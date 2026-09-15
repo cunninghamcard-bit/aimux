@@ -156,7 +156,7 @@ fn header_and_exports_agree() {
     exports.sort();
     assert_eq!(
         exports.len(),
-        119,
+        122,
         "export count changed; update the headers"
     );
 

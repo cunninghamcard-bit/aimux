@@ -55,6 +55,7 @@ use serde::de::DeserializeOwned;
 
 use aimux_core::AbortSignal;
 use aimux_core::AiMuxError;
+use aimux_core::parse_tool_call::{RawToolCall, ToolCallRepair, ToolCallRepairContext};
 use aimux_core::generate::{
     GenerateTextOptions, generate_object, generate_text, generate_text_as_openai, stream_text,
     stream_text_as_openai,
@@ -102,6 +103,9 @@ enum HandleEntry {
     /// Live transcription streaming session (RFC-0028 Phase 2).
     TranscriptionSession(Arc<transcription_session::TranscriptionFfiSession>),
     Abort(AbortSignal),
+    /// Host-implemented `GenerateTextOptions.repair_tool_call`, referenced from
+    /// `opts_json` by handle (see [`aimux_tool_call_repair_new`]).
+    ToolCallRepair(ToolCallRepair),
 }
 
 type Registry = HashMap<u64, HandleEntry>;
@@ -166,6 +170,24 @@ fn get_abort_signal(handle: u64) -> Option<AbortSignal> {
 
 fn abort_of(handle: u64) -> Result<AbortSignal, FfiError> {
     get_abort_signal(handle).ok_or(FfiError::InvalidHandle { expected: "abort" })
+}
+
+fn tool_call_repair_of(handle: u64) -> Result<ToolCallRepair, FfiError> {
+    match get_handle(handle) {
+        Some(HandleEntry::ToolCallRepair(repair)) => Ok(repair),
+        _ => Err(FfiError::InvalidHandle {
+            expected: "tool_call_repair",
+        }),
+    }
+}
+
+fn drop_tool_call_repair(handle: u64) {
+    let mut registry = registry()
+        .lock()
+        .expect("aimux-ffi: registry mutex poisoned");
+    if matches!(registry.get(&handle), Some(HandleEntry::ToolCallRepair(_))) {
+        registry.remove(&handle);
+    }
 }
 
 /// Remove a handle from the registry (the model drops when the last ref goes).
@@ -922,11 +944,38 @@ fn parse_prompt_arg(prompt_json: *const c_char) -> FfiResult<ModelPrompt> {
 /// Parse the options JSON (`opts_json`, optional). NULL / empty / `null`
 /// yields the default options.
 fn parse_opts_arg(opts_json: *const c_char) -> FfiResult<GenerateTextOptions> {
-    match opt_str_arg(opts_json, "opts_json")? {
-        Some(s) if !s.trim().is_empty() && s.trim() != "null" => {
-            serde_json::from_str(&s).map_err(|e| wire_err("opts_json", e))
-        }
-        _ => Ok(GenerateTextOptions::default()),
+    let Some(s) = opt_str_arg(opts_json, "opts_json")? else {
+        return Ok(GenerateTextOptions::default());
+    };
+    if s.trim().is_empty() || s.trim() == "null" {
+        return Ok(GenerateTextOptions::default());
+    }
+    let value: serde_json::Value = serde_json::from_str(&s).map_err(|e| wire_err("opts_json", e))?;
+    // `opts_json` is the whole `GenerateTextOptions`, AI SDK style: the two
+    // fields Core marks `serde(skip)` because they hold live objects arrive
+    // here as handles and are resolved before the rest deserializes.
+    let abort_signal = handle_field(&value, "abort_signal")?.map(abort_of).transpose()?;
+    let repair_tool_call = handle_field(&value, "repair_tool_call")?
+        .map(tool_call_repair_of)
+        .transpose()?;
+    let mut opts: GenerateTextOptions =
+        serde_json::from_value(value).map_err(|e| wire_err("opts_json", e))?;
+    opts.abort_signal = abort_signal;
+    opts.repair_tool_call = repair_tool_call;
+    Ok(opts)
+}
+
+/// Read an optional handle-valued field of `opts_json`; `null` counts as absent.
+fn handle_field(value: &serde_json::Value, field: &'static str) -> FfiResult<Option<u64>> {
+    match value.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => v.as_u64().map(Some).ok_or_else(|| {
+            FfiError::InvalidWireJson {
+                argument: "opts_json",
+                message: format!("`{field}` must be a handle (unsigned integer)"),
+            }
+            .into()
+        }),
     }
 }
 
@@ -1720,6 +1769,153 @@ pub extern "C" fn aimux_stream_text_with_abort(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// C ABI: host callbacks referenced from opts_json by handle
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Host repair function: `(context_json, user_data) -> repaired_json | NULL`.
+///
+/// `context_json` is valid only for the duration of the call. The returned
+/// string must come from [`aimux_string_new`]; aimux frees it. NULL keeps the
+/// original validation error.
+#[allow(non_camel_case_types)]
+pub type aimux_tool_call_repair_fn =
+    extern "C-unwind" fn(context_json: *const c_char, user_data: *mut c_void) -> *mut c_char;
+
+/// Wire shape of a `RawToolCall`, both directions of the repair callback.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RawToolCallWire {
+    tool_call_id: String,
+    tool_name: String,
+    input: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_executed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dynamic: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    thought_signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_metadata: Option<aimux_core::types::ProviderMetadata>,
+}
+
+impl From<&RawToolCall> for RawToolCallWire {
+    fn from(call: &RawToolCall) -> Self {
+        Self {
+            tool_call_id: call.tool_call_id.clone(),
+            tool_name: call.tool_name.clone(),
+            input: call.input.clone(),
+            provider_executed: call.provider_executed,
+            dynamic: call.dynamic,
+            thought_signature: call.thought_signature.clone(),
+            provider_metadata: call.provider_metadata.clone(),
+        }
+    }
+}
+
+impl From<RawToolCallWire> for RawToolCall {
+    fn from(call: RawToolCallWire) -> Self {
+        Self {
+            tool_call_id: call.tool_call_id,
+            tool_name: call.tool_name,
+            input: call.input,
+            provider_executed: call.provider_executed,
+            dynamic: call.dynamic,
+            thought_signature: call.thought_signature,
+            provider_metadata: call.provider_metadata,
+        }
+    }
+}
+
+/// `ToolCallRepairContext` as the host sees it: the AI SDK `repairToolCall`
+/// arguments, with `input_schema` pre-resolved for the called tool.
+#[derive(serde::Serialize)]
+struct ToolCallRepairContextWire<'a> {
+    tool_call: RawToolCallWire,
+    error: &'a AiMuxError,
+    input_schema: serde_json::Value,
+    tools: &'a [aimux_core::tool::Tool],
+    messages: &'a [aimux_core::message::ModelMessage],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instructions: Option<&'a str>,
+}
+
+/// Wrap a host function pointer as Core's `ToolCallRepair`.
+///
+/// Core awaits the returned future on the thread that entered the FFI call,
+/// so the host function runs synchronously on that thread, inside the FFI
+/// re-entrancy guard: an `aimux_*` call made from inside it is rejected with
+/// `AIMUX_E_FFI_REENTRANT_CALL`, exactly like a stream callback.
+fn tool_call_repair_from_c(
+    repair: aimux_tool_call_repair_fn,
+    user_data: *mut c_void,
+) -> ToolCallRepair {
+    // Raw pointers are not Send; the callback gets it back verbatim.
+    let user_data = user_data as usize;
+    ToolCallRepair::new(move |context: ToolCallRepairContext| async move {
+        let wire = ToolCallRepairContextWire {
+            tool_call: RawToolCallWire::from(&context.tool_call),
+            error: &context.error,
+            input_schema: context.input_schema(&context.tool_call.tool_name),
+            tools: &context.tools,
+            messages: &context.messages,
+            instructions: context.instructions.as_deref(),
+        };
+        let json = serde_json::to_string(&wire)
+            .ok()
+            .and_then(|json| CString::new(json).ok())
+            .ok_or_else(|| {
+                AiMuxError::Other("repair_tool_call: context is not a C string".into())
+            })?;
+        let mut out: *mut c_char = std::ptr::null_mut();
+        invoke_stream_callback("repair_tool_call", || {
+            out = repair(json.as_ptr(), user_data as *mut c_void);
+        })
+        .map_err(|e| match e {
+            FfiError::CallbackFailure { message } => AiMuxError::Other(message),
+            other => AiMuxError::Other(format!("{other:?}")),
+        })?;
+        if out.is_null() {
+            return Ok(None);
+        }
+        // SAFETY: contract of `aimux_tool_call_repair_fn` — `out` came from
+        // `aimux_string_new`, so it is a `CString::into_raw` we now own.
+        let owned = unsafe { CString::from_raw(out) };
+        let repaired: RawToolCallWire = serde_json::from_slice(owned.as_bytes()).map_err(|e| {
+            AiMuxError::Other(format!(
+                "repair_tool_call returned invalid RawToolCall JSON: {e}"
+            ))
+        })?;
+        Ok(Some(RawToolCall::from(repaired)))
+    })
+}
+
+/// Register a host `repair_tool_call` function; reference the returned handle
+/// from `opts_json` as `"repair_tool_call": <handle>`.
+///
+/// `user_data` is passed back verbatim on every invocation. A NULL `repair`
+/// returns 0. Release with [`aimux_tool_call_repair_drop`]; calls already in
+/// flight keep their clone.
+#[unsafe(no_mangle)]
+pub extern "C" fn aimux_tool_call_repair_new(
+    repair: Option<aimux_tool_call_repair_fn>,
+    user_data: *mut c_void,
+) -> u64 {
+    match repair {
+        Some(repair) => intern_handle(HandleEntry::ToolCallRepair(tool_call_repair_from_c(
+            repair, user_data,
+        ))),
+        None => 0,
+    }
+}
+
+/// Release a repair handle. Invalid handles and 0 are no-ops.
+#[unsafe(no_mangle)]
+pub extern "C" fn aimux_tool_call_repair_drop(handle: u64) {
+    if handle != 0 {
+        drop_tool_call_repair(handle);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // C ABI: OpenAI-compatible output (RFC-0026)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1854,6 +2050,7 @@ fn stream_text_as_openai_with_signal(
         })
         .unwrap_or_default();
 
+    let abort_signal = abort_signal.or_else(|| opts.abort_signal.clone());
     opts.abort_signal = abort_signal.clone();
     // stream_ctx is only for C callbacks; not Send into the async task.
     let stream_ctx = stream_ctx as usize;
@@ -1928,6 +2125,7 @@ fn stream_text_with_signal(
     let model = model_of(handle)?;
     let prompt = parse_prompt_arg(prompt_json)?;
     let mut opts = parse_opts_arg(opts_json)?;
+    let abort_signal = abort_signal.or_else(|| opts.abort_signal.clone());
     opts.abort_signal = abort_signal.clone();
     let stream_ctx = stream_ctx as usize;
 
@@ -2014,6 +2212,24 @@ pub unsafe extern "C" fn aimux_free_string(ptr: *mut c_char) {
     }
     // SAFETY: caller guarantees `ptr` came from `CString::into_raw`.
     drop(unsafe { CString::from_raw(ptr) });
+}
+
+/// Copy a NUL-terminated string into an aimux-owned buffer.
+///
+/// This is how a host callback hands a string back to aimux (see
+/// [`aimux_tool_call_repair_fn`]); aimux releases it. NULL yields NULL.
+///
+/// # Safety
+///
+/// `s` must be NULL or point to a valid NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aimux_string_new(s: *const c_char) -> *mut c_char {
+    if s.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: caller guarantees `s` is a valid NUL-terminated string.
+    let bytes = unsafe { CStr::from_ptr(s) }.to_bytes();
+    CString::new(bytes).map_or(std::ptr::null_mut(), CString::into_raw)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4624,5 +4840,219 @@ mod tests {
             )),
             "out_state: must not be NULL"
         );
+    }
+
+    // ── repair_tool_call via opts_json handle ──────────────────────────────
+
+    /// Replies with one tool call whose arguments are missing the closing brace.
+    struct MalformedToolCallModel;
+    #[async_trait::async_trait]
+    impl aimux_core::LanguageModel for MalformedToolCallModel {
+        fn provider(&self) -> &str {
+            "mock"
+        }
+        fn model_id(&self) -> &str {
+            "malformed-tool-call"
+        }
+        async fn do_generate(
+            &self,
+            _options: &aimux_core::options::CallOptions,
+        ) -> Result<aimux_core::result::GenerateResult, AiMuxError> {
+            Ok(aimux_core::result::GenerateResult {
+                content: vec![aimux_core::result::GenerateContent::ToolCall {
+                    tool_call_id: "call_1".into(),
+                    tool_name: "get_weather".into(),
+                    input: r#"{"city": "Tokyo""#.into(),
+                    provider_executed: None,
+                    dynamic: None,
+                    thought_signature: None,
+                    provider_metadata: None,
+                }],
+                finish_reason: aimux_core::types::FinishReason {
+                    unified: aimux_core::types::FinishReasonUnified::ToolCalls,
+                    raw: None,
+                },
+                usage: aimux_core::types::Usage::default(),
+                warnings: vec![],
+                provider_metadata: None,
+                response: aimux_core::types::ResponseMetadata::default(),
+                request_body: None,
+                response_headers: None,
+            })
+        }
+        async fn do_stream(
+            &self,
+            _options: &aimux_core::options::CallOptions,
+        ) -> Result<aimux_core::result::StreamResult, AiMuxError> {
+            unimplemented!()
+        }
+    }
+
+    const WEATHER_TOOL: &str = r#"{"type":"function","name":"get_weather","input_schema":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false}}"#;
+
+    fn c(s: &str) -> CString {
+        CString::new(s).unwrap()
+    }
+
+    fn err_text(e: *mut aimux_error_t) -> String {
+        if e.is_null() {
+            return String::new();
+        }
+        let msg = aimux_error_message(e);
+        let text = unsafe { CStr::from_ptr(msg) }.to_str().unwrap().to_owned();
+        unsafe { aimux_free_string(msg) };
+        aimux_error_free(e);
+        text
+    }
+
+    fn generate_with_repair(repair_handle: u64) -> serde_json::Value {
+        let model = intern_model(Arc::new(MalformedToolCallModel));
+        let opts = c(&format!(
+            r#"{{"tools":[{WEATHER_TOOL}],"repair_tool_call":{repair_handle}}}"#
+        ));
+        let mut out: *mut c_char = std::ptr::null_mut();
+        let e = aimux_generate_text(model, c("\"weather?\"").as_ptr(), opts.as_ptr(), &mut out);
+        assert!(e.is_null(), "generate failed: {}", err_text(e));
+        let json = unsafe { CStr::from_ptr(out) }.to_str().unwrap().to_owned();
+        unsafe { aimux_free_string(out) };
+        serde_json::from_str(&json).unwrap()
+    }
+
+    /// A host repair function: closes the brace the model dropped. This is
+    /// what a Go / Java / Swift caller would write.
+    extern "C-unwind" fn close_brace_repair(
+        ctx: *const c_char,
+        user_data: *mut c_void,
+    ) -> *mut c_char {
+        // The context is the AI SDK repairToolCall argument set.
+        let ctx: serde_json::Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(ctx) }.to_str().unwrap()).unwrap();
+        assert_eq!(ctx["tool_call"]["tool_name"], "get_weather");
+        assert!(
+            ctx["error"].get("InvalidToolInput").is_some(),
+            "{}",
+            ctx["error"]
+        );
+        assert_eq!(ctx["input_schema"]["required"][0], "city");
+        unsafe { *(user_data as *mut u32) += 1 };
+        let mut call = ctx["tool_call"].clone();
+        call["input"] =
+            serde_json::Value::String(format!("{}}}", call["input"].as_str().unwrap()));
+        unsafe { aimux_string_new(c(&call.to_string()).as_ptr()) }
+    }
+
+    extern "C-unwind" fn give_up_repair(
+        _ctx: *const c_char,
+        _user_data: *mut c_void,
+    ) -> *mut c_char {
+        std::ptr::null_mut()
+    }
+
+    /// A host repair function that (wrongly) calls back into aimux. It must
+    /// get the re-entrancy error, not a deadlock.
+    extern "C-unwind" fn reentrant_repair(
+        _ctx: *const c_char,
+        user_data: *mut c_void,
+    ) -> *mut c_char {
+        let inner = mock_handle("mock", "inner", "hi");
+        let mut out: *mut c_char = std::ptr::null_mut();
+        let e = aimux_generate_text(inner, c("\"hi\"").as_ptr(), std::ptr::null(), &mut out);
+        unsafe { *(user_data as *mut i32) = aimux_error_code(e) };
+        aimux_error_free(e);
+        std::ptr::null_mut()
+    }
+
+    #[test]
+    fn host_repair_fixes_malformed_tool_call_arguments() {
+        let mut calls: u32 = 0;
+        let repair =
+            aimux_tool_call_repair_new(Some(close_brace_repair), (&mut calls as *mut u32).cast());
+        assert_ne!(repair, 0);
+        let result = generate_with_repair(repair);
+        aimux_tool_call_repair_drop(repair);
+
+        let call = &result["tool_calls"][0];
+        assert_eq!(calls, 1, "repair invoked exactly once");
+        assert_eq!(call["input"]["city"], "Tokyo");
+        assert!(call.get("invalid").is_none(), "{call}");
+        assert!(call.get("error").is_none(), "{call}");
+    }
+
+    #[test]
+    fn host_repair_returning_null_keeps_the_original_error() {
+        let repair = aimux_tool_call_repair_new(Some(give_up_repair), std::ptr::null_mut());
+        let result = generate_with_repair(repair);
+        aimux_tool_call_repair_drop(repair);
+
+        let call = &result["tool_calls"][0];
+        assert_eq!(call["invalid"], true);
+        assert!(
+            call["error"].get("InvalidToolInput").is_some(),
+            "{}",
+            call["error"]
+        );
+        assert_eq!(call["input"], r#"{"city": "Tokyo""#);
+    }
+
+    #[test]
+    fn host_repair_calling_back_into_aimux_is_rejected_as_reentrant() {
+        let mut inner_code: i32 = 0;
+        let repair = aimux_tool_call_repair_new(
+            Some(reentrant_repair),
+            (&mut inner_code as *mut i32).cast(),
+        );
+        let result = generate_with_repair(repair);
+        aimux_tool_call_repair_drop(repair);
+
+        assert_eq!(inner_code, AIMUX_E_FFI_REENTRANT_CALL);
+        assert_eq!(result["tool_calls"][0]["invalid"], true);
+    }
+
+    #[test]
+    fn opts_json_rejects_unknown_repair_handle_and_non_integer_handles() {
+        let model = intern_model(Arc::new(MalformedToolCallModel));
+        let mut out: *mut c_char = std::ptr::null_mut();
+
+        let e = aimux_generate_text(
+            model,
+            c("\"x\"").as_ptr(),
+            c(r#"{"repair_tool_call": 999999}"#).as_ptr(),
+            &mut out,
+        );
+        assert_eq!(aimux_error_code(e), AIMUX_E_FFI_INVALID_HANDLE);
+        aimux_error_free(e);
+
+        let e = aimux_generate_text(
+            model,
+            c("\"x\"").as_ptr(),
+            c(r#"{"abort_signal": "seven"}"#).as_ptr(),
+            &mut out,
+        );
+        assert_eq!(aimux_error_code(e), AIMUX_E_FFI_INVALID_WIRE_JSON);
+        aimux_error_free(e);
+    }
+
+    #[test]
+    fn abort_signal_handle_in_opts_json_cancels_generate() {
+        let abort = aimux_abort_signal_new();
+        aimux_abort_signal_abort(abort);
+        let model = intern_model(Arc::new(MalformedToolCallModel));
+        let mut out: *mut c_char = std::ptr::null_mut();
+        let e = aimux_generate_text(
+            model,
+            c("\"x\"").as_ptr(),
+            c(&format!(r#"{{"abort_signal": {abort}}}"#)).as_ptr(),
+            &mut out,
+        );
+        assert_eq!(aimux_error_code(e), AIMUX_E_ABORTED, "{}", err_text(e));
+        aimux_abort_signal_drop(abort);
+    }
+
+    #[test]
+    fn string_new_round_trips_and_is_null_safe() {
+        let s = unsafe { aimux_string_new(c("héllo").as_ptr()) };
+        assert_eq!(unsafe { CStr::from_ptr(s) }.to_str().unwrap(), "héllo");
+        unsafe { aimux_free_string(s) };
+        assert!(unsafe { aimux_string_new(std::ptr::null()) }.is_null());
     }
 }

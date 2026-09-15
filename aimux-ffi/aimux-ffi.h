@@ -320,6 +320,44 @@ aimux_error_t *aimux_stream_text_with_abort(uint64_t handle, uint64_t abort_hand
                                                 void (*on_done)(void *stream_ctx),
                                                 void *stream_ctx);
 
+/* ── Host callbacks, referenced from opts_json by handle ───────────────── */
+
+/**
+ * `opts_json` is the whole GenerateTextOptions object (AI SDK shape). The two
+ * fields that hold live objects are passed as handles:
+ *
+ *     {"tools": [...], "abort_signal": <abort handle>, "repair_tool_call": <repair handle>}
+ *
+ * Every aimux_generate_text / aimux_stream_text / *_as_openai entry point
+ * honors them; the explicit `abort_handle` parameter of the *_with_abort
+ * variants takes precedence when both are given.
+ */
+
+/**
+ * Host repair function for invalid tool calls (AI SDK `repairToolCall`).
+ *
+ * `context_json` — {tool_call, error, input_schema, tools, messages,
+ * instructions}; valid only during the call. Return the repaired tool call
+ * as JSON `{tool_call_id, tool_name, input, ...}` allocated with
+ * aimux_string_new (aimux frees it), or NULL to keep the original error.
+ *
+ * Runs synchronously on the thread that entered the aimux_* call, inside the
+ * re-entrancy guard: calling any aimux_* function from inside it fails with
+ * AIMUX_E_FFI_REENTRANT_CALL.
+ */
+typedef char *(*aimux_tool_call_repair_fn)(const char *context_json, void *user_data);
+
+/**
+ * Register a host repair function. `user_data` is passed back verbatim.
+ *
+ * @return A non-zero handle for `"repair_tool_call"` in opts_json; 0 for a
+ *         NULL function. Release it with aimux_tool_call_repair_drop.
+ */
+uint64_t aimux_tool_call_repair_new(aimux_tool_call_repair_fn repair, void *user_data);
+
+/** Release a repair handle. 0 and unknown handles are no-ops. */
+void aimux_tool_call_repair_drop(uint64_t handle);
+
 /* ── OpenAI-compatible output (RFC-0026) ───────────────────────────────── */
 
 /**
@@ -378,6 +416,13 @@ void aimux_drop_handle(uint64_t handle);
  * @param ptr Pointer from an aimux_* function (NULL is safe).
  */
 void aimux_free_string(char *ptr);
+
+/**
+ * Copy a NUL-terminated string into an aimux-owned buffer. This is how a host
+ * callback hands a string back to aimux (see aimux_tool_call_repair_fn);
+ * aimux releases it. NULL yields NULL.
+ */
+char *aimux_string_new(const char *s);
 
 /* ── Embedding ───────────────────────────────────────────────────────────── */
 /* [C ABI] Multimodal constructors below cannot fail as an AiMuxError (they only
