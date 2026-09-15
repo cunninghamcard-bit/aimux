@@ -260,6 +260,57 @@ model.close();
 | `streamText` | `Stream<StreamPart> streamText(Object prompt, [GenerateTextOptions? options])` | Yields typed `StreamPart`s |
 | `close` | `void close()` | Release the native handle |
 
+## repairToolCall
+
+`bindings/flutter/lib/repair.dart` wraps a Dart function as
+`GenerateTextOptions.repairToolCall` (AI SDK `repairToolCall`): one attempt to
+fix a tool call Core rejected, or `null` to keep the original validation error.
+
+```dart
+final repair = ToolCallRepair((context) => RawToolCall(
+      toolCallId: context.toolCall.toolCallId,
+      toolName: context.toolCall.toolName,
+      input: '${context.toolCall.input}}',  // the model dropped the brace
+    ));
+try {
+  typed.generateText(prompt,
+      GenerateTextOptions(tools: tools, repairToolCall: repair));
+} finally {
+  repair.close();
+}
+```
+
+| API | Signature | Description |
+|------|------|------|
+| `ToolCallRepair` | `ToolCallRepair(RawToolCall? Function(ToolCallRepairContext) repair)` | Registers the function with the FFI layer |
+| `handle` | `int? get handle` | The FFI handle it marshals as; `null` once closed |
+| `lastError` | `Object? get lastError` | The last exception the function threw |
+| `close` | `void close()` | Release the handle; idempotent |
+
+`ToolCallRepairContext` carries `toolCall` (a `RawToolCall`, whose `input` is
+the model's argument text verbatim), `error` (the typed failure as wire JSON,
+same shape as `ToolCall.error`), `inputSchema`, `tools`, `messages` and
+`instructions`.
+
+**Where it runs.** Synchronously on the isolate that called `generateText` /
+`streamText`, while that call is in progress — not on the event loop. An
+`async` repair function is therefore useless: only the synchronous return value
+reaches Core.
+
+**Re-entrancy.** The function runs inside the FFI re-entrancy guard: calling
+any aimux API from within it fails with `AIMUX_E_FFI_REENTRANT_CALL` (204).
+
+**Errors.** Nothing may unwind into the Rust frames below, so an exception is
+caught, turned into "not repaired" (the original validation error stays on the
+tool call, `invalid: true`), and kept in `lastError` — the C contract carries
+no room for the cause.
+
+**Ownership.** `ToolCallRepair` owns a native handle; `close()` releases it, and
+there is no finalizer, so a repair that is never closed leaks the handle. Close
+it only once no call referencing it is in flight — calls already running keep
+their own clone on the native side. Serializing a closed repair emits
+`"repair_tool_call": null`, which the native side reads as "absent".
+
 ## Types
 
 `bindings/flutter/lib/types.dart` declares the typed model surface (with

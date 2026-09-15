@@ -20,6 +20,8 @@
 
 import 'package:json_annotation/json_annotation.dart';
 
+import 'repair.dart';
+
 part 'types.g.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -807,6 +809,14 @@ class GenerateTextOptions {
   final bool? includeRawChunks;
   @JsonKey(name: 'session_id')
   final String? sessionId;
+  /// Host function that gets one attempt to fix an invalid tool call (AI SDK
+  /// `repairToolCall`). Serializes as its FFI handle.
+  @JsonKey(
+      name: 'repair_tool_call',
+      includeIfNull: false,
+      includeFromJson: false,
+      toJson: _repairToolCallToJson)
+  final ToolCallRepair? repairToolCall;
 
   GenerateTextOptions({
     this.maxOutputTokens,
@@ -829,6 +839,7 @@ class GenerateTextOptions {
     this.timeout,
     this.includeRawChunks,
     this.sessionId,
+    this.repairToolCall,
   });
 
   factory GenerateTextOptions.fromJson(Map<String, dynamic> json) {
@@ -884,8 +895,16 @@ class GenerateTextOptions {
         if (timeout != null) 'timeout': timeout!.toJson(),
         if (includeRawChunks != null) 'include_raw_chunks': includeRawChunks,
         if (sessionId != null) 'session_id': sessionId,
+        if (repairToolCall != null)
+          'repair_tool_call': _repairToolCallToJson(repairToolCall),
       };
 }
+
+/// A repair function crosses the wire only as its FFI handle, and the handle is
+/// null once it is closed — which the native side reads as "absent", the same
+/// degradation the Go binding's `MarshalJSON` applies. Nothing can rebuild the
+/// live object from JSON, so [GenerateTextOptions.fromJson] drops the field.
+Object? _repairToolCallToJson(ToolCallRepair? repair) => repair?.handle;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Messages
