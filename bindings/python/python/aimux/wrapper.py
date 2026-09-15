@@ -24,6 +24,7 @@ from typing import Annotated, Any, Dict, Iterator, List, Literal, Optional, Unio
 
 from pydantic import BaseModel, ConfigDict, Field, RootModel, model_serializer, model_validator
 
+from . import RepairToolCall
 from .aimux import Model
 
 __all__ = [
@@ -833,10 +834,6 @@ class GenerateTextOptions(BaseModel):
 
     Mirrors Rust ``GenerateTextOptions``. All fields are optional; unset fields
     default to ``None`` (Rust treats absent / ``null`` as ``None``).
-
-    The Rust ``repair_tool_call`` callback is core-only (it cannot cross the
-    FFI boundary); invalid tool calls arrive with ``invalid``/``error`` set on
-    the tool call.
     """
 
     max_output_tokens: Optional[int] = None
@@ -865,6 +862,13 @@ class GenerateTextOptions(BaseModel):
     """
     timeout: Optional[TimeoutConfiguration] = None
     include_raw_chunks: Optional[bool] = None
+    repair_tool_call: Optional[RepairToolCall] = Field(default=None, exclude=True)
+    """One attempt to fix an invalid tool call (AI SDK ``repairToolCall``).
+
+    A live callable, not wire data: it is excluded from the serialized options
+    and handed to the native layer separately. See
+    :data:`aimux.RepairToolCall`.
+    """
 
 
 class GenerateResult(BaseModel):
@@ -1127,6 +1131,11 @@ def _opts_to_json(options: Optional[GenerateTextOptions]) -> Optional[str]:
     return options.model_dump_json(exclude_none=True, by_alias=True)
 
 
+def _repair_of(options: Optional[GenerateTextOptions]) -> Optional[RepairToolCall]:
+    """The ``repair_tool_call`` callable, which travels outside ``opts_json``."""
+    return options.repair_tool_call if options is not None else None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Typed API
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1149,7 +1158,7 @@ def generate_text(
     """
     prompt_json = _prompt_to_json(prompt)
     opts_json = _opts_to_json(options)
-    result_json = model.generate_text(prompt_json, opts_json)
+    result_json = model.generate_text(prompt_json, opts_json, _repair_of(options))
     return GenerateTextResult.model_validate_json(result_json)
 
 
@@ -1172,7 +1181,7 @@ def stream_text(
     """
     prompt_json = _prompt_to_json(prompt)
     opts_json = _opts_to_json(options)
-    for part_json in model.stream_text(prompt_json, opts_json):
+    for part_json in model.stream_text(prompt_json, opts_json, _repair_of(options)):
         yield json.loads(part_json)
 
 
@@ -1202,7 +1211,7 @@ def generate_text_as_openai(
     """
     prompt_json = _prompt_to_json(prompt)
     opts_json = _opts_to_json(options)
-    result_json = model.generate_text_as_openai(prompt_json, opts_json)
+    result_json = model.generate_text_as_openai(prompt_json, opts_json, _repair_of(options))
     return ChatCompletion.model_validate_json(result_json)
 
 
@@ -1228,5 +1237,5 @@ def stream_text_as_openai(
     """
     prompt_json = _prompt_to_json(prompt)
     opts_json = _opts_to_json(options)
-    for chunk_json in model.stream_text_as_openai(prompt_json, opts_json):
+    for chunk_json in model.stream_text_as_openai(prompt_json, opts_json, _repair_of(options)):
         yield ChatCompletionChunk.model_validate_json(chunk_json)

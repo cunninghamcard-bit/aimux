@@ -5,7 +5,7 @@ providing a Pythonic API surface.
 """
 
 import json
-from typing import Any, AsyncIterator, Dict, List, Optional, Union
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple, Union
 
 from .aimux import (
     AimuxError,
@@ -150,6 +150,7 @@ __all__ = [
     "google_image",
     "google_video",
     "tavily_search",
+    "RepairToolCall",
     "generate_text",
     "generate_object",
     "consume_stream_text",
@@ -233,11 +234,33 @@ def _prompt_to_json(prompt: Union[str, List[Dict[str, Any]]]) -> str:
     return json.dumps({"prompt": prompt})
 
 
-def _opts_to_json(options: Optional[Dict[str, Any]]) -> Optional[str]:
-    """Convert options dict to JSON string."""
+RepairToolCall = Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]
+"""One attempt to fix an invalid tool call (AI SDK ``repairToolCall``).
+
+Receives the repair context — ``tool_call``, ``error``, ``input_schema``,
+``tools``, ``messages``, ``instructions`` — and returns a repaired
+``RawToolCall`` dict (``tool_call_id``, ``tool_name``, ``input`` as raw
+argument text), or ``None`` to keep the original validation error. It runs
+synchronously, with the GIL held, while the aimux call is in progress, and must
+not call back into aimux.
+"""
+
+
+def _split_opts(
+    options: Optional[Dict[str, Any]],
+) -> Tuple[Optional[str], Optional[RepairToolCall]]:
+    """Split options into the JSON string and the ``repair_tool_call`` callable.
+
+    The callable is a live Python object rather than JSON (core marks the field
+    ``serde(skip)``), so it travels to the native layer as its own argument.
+    """
     if options is None:
-        return None
-    return json.dumps(options)
+        return None, None
+    repair = options.get("repair_tool_call")
+    if repair is None:
+        return json.dumps(options), None
+    rest = {k: v for k, v in options.items() if k != "repair_tool_call"}
+    return json.dumps(rest), repair
 
 
 def generate_text(
@@ -256,8 +279,8 @@ def generate_text(
         Dict with keys: text, tool_calls, finish_reason, usage, warnings, raw.
     """
     prompt_json = _prompt_to_json(prompt)
-    opts_json = _opts_to_json(options)
-    result_json = model.generate_text(prompt_json, opts_json)
+    opts_json, repair = _split_opts(options)
+    result_json = model.generate_text(prompt_json, opts_json, repair)
     return json.loads(result_json)
 
 
@@ -282,8 +305,8 @@ def generate_object(
         warnings, reasoning, provider_metadata, response, raw.
     """
     prompt_json = _prompt_to_json(prompt)
-    opts_json = _opts_to_json(options)
-    result_json = model.generate_object(prompt_json, opts_json)
+    opts_json, repair = _split_opts(options)
+    result_json = model.generate_object(prompt_json, opts_json, repair)
     return json.loads(result_json)
 
 
@@ -307,8 +330,8 @@ def consume_stream_text(
         Dict with the aggregated stream result.
     """
     prompt_json = _prompt_to_json(prompt)
-    opts_json = _opts_to_json(options)
-    result_json = model.consume_stream_text(prompt_json, opts_json)
+    opts_json, repair = _split_opts(options)
+    result_json = model.consume_stream_text(prompt_json, opts_json, repair)
     return json.loads(result_json)
 
 
@@ -325,8 +348,8 @@ def stream_text(
                 print(part["TextDelta"]["delta"], end="")
     """
     prompt_json = _prompt_to_json(prompt)
-    opts_json = _opts_to_json(options)
-    iterator = model.stream_text(prompt_json, opts_json)
+    opts_json, repair = _split_opts(options)
+    iterator = model.stream_text(prompt_json, opts_json, repair)
     for part_json in iterator:
         yield json.loads(part_json)
 
@@ -351,8 +374,8 @@ def generate_text_as_openai(
         choices, usage, system_fingerprint.
     """
     prompt_json = _prompt_to_json(prompt)
-    opts_json = _opts_to_json(options)
-    result_json = model.generate_text_as_openai(prompt_json, opts_json)
+    opts_json, repair = _split_opts(options)
+    result_json = model.generate_text_as_openai(prompt_json, opts_json, repair)
     return json.loads(result_json)
 
 
@@ -377,7 +400,7 @@ def stream_text_as_openai(
                     print(delta["content"], end="")
     """
     prompt_json = _prompt_to_json(prompt)
-    opts_json = _opts_to_json(options)
-    iterator = model.stream_text_as_openai(prompt_json, opts_json)
+    opts_json, repair = _split_opts(options)
+    iterator = model.stream_text_as_openai(prompt_json, opts_json, repair)
     for chunk_json in iterator:
         yield json.loads(chunk_json)

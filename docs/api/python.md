@@ -110,9 +110,50 @@ if len(result["tool_calls"]) > 0:
     print(call["input"])          # {"location": "Tokyo"}
 ```
 
-> The `repair_tool_call` callback is Rust-core-only (it cannot cross the FFI
-> boundary); tool calls that stay invalid arrive with `invalid: true` and a
-> typed `error` on the tool call.
+### Repairing Invalid Tool Calls
+
+`repair_tool_call` is the AI SDK `repairToolCall` hook: one attempt to fix a
+tool call that failed lookup, JSON parsing, or schema validation. Pass a
+callable through the options; it is a live Python object, so it travels beside
+the JSON options rather than inside them.
+
+```python
+def repair(context):
+    # context: tool_call, error, input_schema, tools, messages, instructions
+    call = dict(context["tool_call"])
+    call["input"] = call["input"] + "}"   # the model dropped the closing brace
+    return call                            # or None to give up
+
+result = generate_text(model, "What's the weather in Tokyo?",
+                       {"tools": tools, "repair_tool_call": repair})
+```
+
+The callable receives the repair context as a dict and returns a `RawToolCall`
+dict — `tool_call_id`, `tool_name`, `input` (raw argument *text*), and the
+optional `provider_executed` / `dynamic` / `thought_signature` /
+`provider_metadata` — or `None` to keep the original error. A returned call is
+parsed and validated from scratch. Raising is allowed: the tool call stays
+invalid and its `error` becomes `ToolCallRepair`, carrying both the
+`original_error` and the exception as `cause`.
+
+With `aimux.wrapper`, the same callable goes in
+`GenerateTextOptions(repair_tool_call=...)`; it is excluded from the serialized
+options automatically.
+
+**Where it runs.** Synchronously, with the GIL held, while the aimux call is in
+progress — on the calling thread for `generate_text` / `generate_object` /
+`consume_stream_text`, on a runtime worker for `stream_text`.
+
+**It must not call back into aimux.** Every entry point drives the one shared
+tokio runtime with `Runtime::block_on`, so a nested aimux call panics with
+*"Cannot start a runtime from within a runtime"*. That one is not survivable
+like an ordinary exception: PyO3 raises it as `pyo3_runtime.PanicException`,
+and resumes the panic when it crosses back into Rust, so it unwinds out of the
+enclosing call instead of becoming a repair failure — the whole
+`generate_text` raises `PanicException`. Repair from the context you are
+given, or fetch what you need before the call.
+
+Tool calls that stay invalid arrive with `invalid: true` and a typed `error`.
 
 ### Tool Selection Strategy
 

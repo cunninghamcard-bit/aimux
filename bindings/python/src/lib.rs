@@ -24,6 +24,7 @@ use aimux_core::generate::{
 use aimux_core::language_model::LanguageModel;
 use aimux_core::message::ModelPrompt;
 use aimux_core::openai_output::OpenAiStreamOptions;
+use aimux_core::parse_tool_call::{RawToolCall, ToolCallRepair, ToolCallRepairContext};
 use pyo3::prelude::*;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -135,10 +136,15 @@ impl Model {
     /// prompt_json: JSON string (bare prompt or {"prompt": ...})
     /// opts_json: optional JSON-serialized GenerateTextOptions
     /// Returns JSON-serialized GenerateTextResult.
-    #[pyo3(signature = (prompt_json, opts_json=None))]
-    fn generate_text(&self, prompt_json: &str, opts_json: Option<&str>) -> PyResult<String> {
+    #[pyo3(signature = (prompt_json, opts_json=None, repair_tool_call=None))]
+    fn generate_text(
+        &self,
+        prompt_json: &str,
+        opts_json: Option<&str>,
+        repair_tool_call: Option<PyObject>,
+    ) -> PyResult<String> {
         let prompt = parse_prompt(prompt_json)?;
-        let opts = parse_opts(opts_json)?;
+        let opts = parse_opts(opts_json, repair_tool_call)?;
 
         let rt = runtime();
         let result = rt.block_on(async move { generate_text(&*self.inner, prompt, opts).await });
@@ -156,10 +162,15 @@ impl Model {
     /// Returns JSON-serialized GenerateObjectResult. Pass
     /// `response_format: { "Json": { ... } }` via opts_json for schema
     /// control; the function applies JSON repair before parsing.
-    #[pyo3(signature = (prompt_json, opts_json=None))]
-    fn generate_object(&self, prompt_json: &str, opts_json: Option<&str>) -> PyResult<String> {
+    #[pyo3(signature = (prompt_json, opts_json=None, repair_tool_call=None))]
+    fn generate_object(
+        &self,
+        prompt_json: &str,
+        opts_json: Option<&str>,
+        repair_tool_call: Option<PyObject>,
+    ) -> PyResult<String> {
         let prompt = parse_prompt(prompt_json)?;
-        let opts = parse_opts(opts_json)?;
+        let opts = parse_opts(opts_json, repair_tool_call)?;
 
         let rt = runtime();
         let result = rt.block_on(async move { generate_object(&*self.inner, prompt, opts).await });
@@ -176,10 +187,15 @@ impl Model {
     /// prompt_json: JSON string (bare prompt or {"prompt": ...})
     /// opts_json: optional JSON-serialized GenerateTextOptions
     /// Returns JSON-serialized StreamTextResultAggregated.
-    #[pyo3(signature = (prompt_json, opts_json=None))]
-    fn consume_stream_text(&self, prompt_json: &str, opts_json: Option<&str>) -> PyResult<String> {
+    #[pyo3(signature = (prompt_json, opts_json=None, repair_tool_call=None))]
+    fn consume_stream_text(
+        &self,
+        prompt_json: &str,
+        opts_json: Option<&str>,
+        repair_tool_call: Option<PyObject>,
+    ) -> PyResult<String> {
         let prompt = parse_prompt(prompt_json)?;
-        let opts = parse_opts(opts_json)?;
+        let opts = parse_opts(opts_json, repair_tool_call)?;
 
         let rt = runtime();
         let result = rt.block_on(async move {
@@ -196,10 +212,15 @@ impl Model {
     /// Stream text from the model.
     ///
     /// Returns a StreamIterator that yields StreamPart JSON strings.
-    #[pyo3(signature = (prompt_json, opts_json=None))]
-    fn stream_text(&self, prompt_json: &str, opts_json: Option<&str>) -> PyResult<StreamIterator> {
+    #[pyo3(signature = (prompt_json, opts_json=None, repair_tool_call=None))]
+    fn stream_text(
+        &self,
+        prompt_json: &str,
+        opts_json: Option<&str>,
+        repair_tool_call: Option<PyObject>,
+    ) -> PyResult<StreamIterator> {
         let prompt = parse_prompt(prompt_json)?;
-        let opts = parse_opts(opts_json)?;
+        let opts = parse_opts(opts_json, repair_tool_call)?;
         let model = self.inner.clone();
 
         let (tx, rx) =
@@ -269,14 +290,15 @@ impl Model {
     /// prompt_json: JSON string (bare prompt or {"prompt": ...})
     /// opts_json: optional JSON-serialized GenerateTextOptions
     /// Returns JSON-serialized ChatCompletion (OpenAI `chat.completion` object).
-    #[pyo3(signature = (prompt_json, opts_json=None))]
+    #[pyo3(signature = (prompt_json, opts_json=None, repair_tool_call=None))]
     fn generate_text_as_openai(
         &self,
         prompt_json: &str,
         opts_json: Option<&str>,
+        repair_tool_call: Option<PyObject>,
     ) -> PyResult<String> {
         let prompt = parse_prompt(prompt_json)?;
-        let opts = parse_opts(opts_json)?;
+        let opts = parse_opts(opts_json, repair_tool_call)?;
 
         let rt = runtime();
         let result =
@@ -293,14 +315,15 @@ impl Model {
     /// Returns a StreamIterator that yields ChatCompletionChunk JSON strings.
     /// Stream options (`include_usage`, `include_reasoning`) are read from
     /// `opts.provider_options.openai.stream_options` (both default to `true`).
-    #[pyo3(signature = (prompt_json, opts_json=None))]
+    #[pyo3(signature = (prompt_json, opts_json=None, repair_tool_call=None))]
     fn stream_text_as_openai(
         &self,
         prompt_json: &str,
         opts_json: Option<&str>,
+        repair_tool_call: Option<PyObject>,
     ) -> PyResult<StreamIterator> {
         let prompt = parse_prompt(prompt_json)?;
-        let opts = parse_opts(opts_json)?;
+        let opts = parse_opts(opts_json, repair_tool_call)?;
         let model = self.inner.clone();
 
         // Extract OpenAI stream options from opts.provider_options.openai.stream_options
@@ -1124,15 +1147,143 @@ fn parse_prompt(json: &str) -> PyResult<ModelPrompt> {
         .map_err(|e| to_py_err(&AiMuxError::InvalidArgument(format!("invalid prompt: {e}"))))
 }
 
-fn parse_opts(json: Option<&str>) -> PyResult<GenerateTextOptions> {
-    match json {
-        None => Ok(GenerateTextOptions::default()),
+fn parse_opts(
+    json: Option<&str>,
+    repair_tool_call: Option<PyObject>,
+) -> PyResult<GenerateTextOptions> {
+    let mut opts = match json {
+        None => GenerateTextOptions::default(),
         Some(s) => {
             let trimmed = s.trim();
             if trimmed.is_empty() || trimmed == "null" {
-                return Ok(GenerateTextOptions::default());
+                GenerateTextOptions::default()
+            } else {
+                wire_json("opts_json", s)?
             }
-            wire_json("opts_json", s)
+        }
+    };
+    // `repair_tool_call` holds a live object, so core marks it `serde(skip)` and
+    // it cannot travel inside `opts_json`; it arrives as its own argument.
+    opts.repair_tool_call = repair_tool_call.map(tool_call_repair_from_py);
+    Ok(opts)
+}
+
+/// Wire shape of a `RawToolCall`, both directions of the repair callback.
+/// Mirrors the C ABI's shape, so the repair contract is the same in every
+/// binding.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RawToolCallWire {
+    tool_call_id: String,
+    tool_name: String,
+    input: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_executed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dynamic: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    thought_signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_metadata: Option<aimux_core::types::ProviderMetadata>,
+}
+
+impl From<&RawToolCall> for RawToolCallWire {
+    fn from(call: &RawToolCall) -> Self {
+        Self {
+            tool_call_id: call.tool_call_id.clone(),
+            tool_name: call.tool_name.clone(),
+            input: call.input.clone(),
+            provider_executed: call.provider_executed,
+            dynamic: call.dynamic,
+            thought_signature: call.thought_signature.clone(),
+            provider_metadata: call.provider_metadata.clone(),
         }
     }
+}
+
+impl From<RawToolCallWire> for RawToolCall {
+    fn from(call: RawToolCallWire) -> Self {
+        Self {
+            tool_call_id: call.tool_call_id,
+            tool_name: call.tool_name,
+            input: call.input,
+            provider_executed: call.provider_executed,
+            dynamic: call.dynamic,
+            thought_signature: call.thought_signature,
+            provider_metadata: call.provider_metadata,
+        }
+    }
+}
+
+/// `ToolCallRepairContext` as Python sees it: the AI SDK `repairToolCall`
+/// arguments, with `input_schema` pre-resolved for the called tool.
+#[derive(serde::Serialize)]
+struct ToolCallRepairContextWire<'a> {
+    tool_call: &'a RawToolCallWire,
+    error: &'a AiMuxError,
+    input_schema: serde_json::Value,
+    tools: &'a [aimux_core::tool::Tool],
+    messages: &'a [aimux_core::message::ModelMessage],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instructions: Option<&'a str>,
+}
+
+/// Wrap a Python callable as core's `ToolCallRepair`.
+///
+/// Core awaits the repair future inline, so the callable runs synchronously on
+/// the thread driving the call — the caller's thread for `generate_text`, a
+/// runtime worker for `stream_text` — with the GIL held for its duration. It
+/// receives the context as a dict and returns a `RawToolCall`-shaped dict, or
+/// `None` to keep the original validation error. A raised exception becomes an
+/// `AiMuxError`, which core records as `ToolCallRepair { original_error, cause }`
+/// on the still-invalid tool call — except a re-entrant aimux call, which panics
+/// in `block_on` and which PyO3 resumes out of the enclosing call.
+fn tool_call_repair_from_py(repair: PyObject) -> ToolCallRepair {
+    // `Arc`, because core's repair callback is an `Fn` whose future must own
+    // the callable, and `Py::clone_ref` would need the GIL out here.
+    let repair = Arc::new(repair);
+    ToolCallRepair::new(move |context: ToolCallRepairContext| {
+        let repair = Arc::clone(&repair);
+        async move {
+            let tool_call = RawToolCallWire::from(&context.tool_call);
+            let wire = serde_json::to_string(&ToolCallRepairContextWire {
+                tool_call: &tool_call,
+                error: &context.error,
+                input_schema: context.input_schema(&context.tool_call.tool_name),
+                tools: &context.tools,
+                messages: &context.messages,
+                instructions: context.instructions.as_deref(),
+            })
+            .map_err(|e| AiMuxError::Other(format!("repair_tool_call: context: {e}")))?;
+
+            let repaired = Python::with_gil(|py| call_repair(py, &repair, &wire))
+                .map_err(|e| AiMuxError::Other(format!("repair_tool_call: {e}")))?;
+
+            repaired
+                .map(|json| {
+                    serde_json::from_str::<RawToolCallWire>(&json)
+                        .map(RawToolCall::from)
+                        .map_err(|e| {
+                            AiMuxError::Other(format!(
+                                "repair_tool_call returned an invalid RawToolCall: {e}"
+                            ))
+                        })
+                })
+                .transpose()
+        }
+    })
+}
+
+/// Call the Python repair function; `None` means "keep the original error".
+///
+/// The context crosses as a dict and the repaired call comes back as one — what
+/// both Python layers already hand callers — converted through `json` so the
+/// wire format stays the serde one.
+fn call_repair(py: Python<'_>, repair: &PyObject, context_json: &str) -> PyResult<Option<String>> {
+    let json = py.import_bound("json")?;
+    let context = json.call_method1("loads", (context_json,))?;
+    let repaired = repair.call1(py, (context,))?;
+    if repaired.is_none(py) {
+        return Ok(None);
+    }
+    Ok(Some(json.call_method1("dumps", (repaired,))?.extract()?))
 }
