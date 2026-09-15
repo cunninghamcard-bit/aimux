@@ -29,7 +29,7 @@ use aimux_core::generate::{
 use aimux_core::language_model::LanguageModel;
 use aimux_core::message::ModelPrompt;
 use aimux_core::openai_output::OpenAiStreamOptions;
-use aimux_core::parse_tool_call::{RawToolCall, ToolCallRepair, ToolCallRepairContext};
+use aimux_core::parse_tool_call::{ToolCallRepair, ToolCallRepairContext, parse_repair_reply};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
@@ -85,36 +85,6 @@ impl AbortBridge {
     }
 }
 
-/// Wire shape of a `RawToolCall` — the core struct holds no serde derives —
-/// in both directions of the repair callback. Same shape as the C ABI's.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct RawToolCallWire {
-    tool_call_id: String,
-    tool_name: String,
-    input: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    provider_executed: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    dynamic: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    thought_signature: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    provider_metadata: Option<aimux_core::types::ProviderMetadata>,
-}
-
-/// `ToolCallRepairContext` as JS sees it: the AI SDK `repairToolCall`
-/// arguments, with `input_schema` pre-resolved for the called tool.
-#[derive(serde::Serialize)]
-struct ToolCallRepairContextWire<'a> {
-    tool_call: RawToolCallWire,
-    error: &'a AiMuxError,
-    input_schema: serde_json::Value,
-    tools: &'a [aimux_core::tool::Tool],
-    messages: &'a [aimux_core::message::ModelMessage],
-    #[serde(skip_serializing_if = "Option::is_none")]
-    instructions: Option<&'a str>,
-}
-
 /// `Weak` — the registered callback alone must not keep the Node event loop
 /// alive; the JS caller's pending promise does that for the call's duration.
 type RepairTsfn = napi::threadsafe_function::ThreadsafeFunction<
@@ -163,23 +133,7 @@ impl ToolCallRepairBridge {
             repair: ToolCallRepair::new(move |context: ToolCallRepairContext| {
                 let call = call.clone();
                 async move {
-                    let json = serde_json::to_string(&ToolCallRepairContextWire {
-                        tool_call: RawToolCallWire {
-                            tool_call_id: context.tool_call.tool_call_id.clone(),
-                            tool_name: context.tool_call.tool_name.clone(),
-                            input: context.tool_call.input.clone(),
-                            provider_executed: context.tool_call.provider_executed,
-                            dynamic: context.tool_call.dynamic,
-                            thought_signature: context.tool_call.thought_signature.clone(),
-                            provider_metadata: context.tool_call.provider_metadata.clone(),
-                        },
-                        error: &context.error,
-                        input_schema: context.input_schema(&context.tool_call.tool_name),
-                        tools: &context.tools,
-                        messages: &context.messages,
-                        instructions: context.instructions.as_deref(),
-                    })
-                    .map_err(|e| AiMuxError::Other(format!("repairToolCall context: {e}")))?;
+                    let json = context.to_wire_json()?;
 
                     // `call_async_catch`, not `call_async`: a JS throw stays an
                     // `Err` instead of reaching `napi_fatal_exception`.
@@ -190,24 +144,10 @@ impl ToolCallRepairBridge {
                         .await
                         .map_err(|e| AiMuxError::Other(format!("repairToolCall: {e}")))?;
 
-                    let Some(repaired) = repaired else {
-                        return Ok(None);
-                    };
-                    let repaired: RawToolCallWire =
-                        serde_json::from_str(&repaired).map_err(|e| {
-                            AiMuxError::Other(format!(
-                                "repairToolCall returned invalid RawToolCall JSON: {e}"
-                            ))
-                        })?;
-                    Ok(Some(RawToolCall {
-                        tool_call_id: repaired.tool_call_id,
-                        tool_name: repaired.tool_name,
-                        input: repaired.input,
-                        provider_executed: repaired.provider_executed,
-                        dynamic: repaired.dynamic,
-                        thought_signature: repaired.thought_signature,
-                        provider_metadata: repaired.provider_metadata,
-                    }))
+                    match repaired {
+                        Some(repaired) => parse_repair_reply(&repaired),
+                        None => Ok(None),
+                    }
                 }
             }),
         })
