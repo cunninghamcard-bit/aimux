@@ -24,7 +24,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime/cgo"
-	"sync"
 	"sync/atomic"
 	"unsafe"
 )
@@ -60,7 +59,8 @@ type ToolCallRepairContext struct {
 
 // ToolCallRepairFunc gets one attempt to fix an invalid tool call. Return the
 // repaired call, or nil to keep the original validation error. Core parses
-// and validates the returned call from scratch.
+// and validates the returned call from scratch. A returned error (or a panic)
+// becomes a ToolCallRepair error on the tool call.
 //
 // It runs synchronously on the goroutine that called GenerateText /
 // StreamText, while that call is in progress. It must not call back into
@@ -74,9 +74,6 @@ type ToolCallRepair struct {
 	fn   ToolCallRepairFunc
 	id   atomic.Uint64 // FFI handle; 0 once closed
 	self cgo.Handle
-
-	mu  sync.Mutex
-	err error
 }
 
 // NewToolCallRepair registers fn with the FFI layer.
@@ -100,17 +97,10 @@ func (r *ToolCallRepair) MarshalJSON() ([]byte, error) {
 	return json.Marshal(id)
 }
 
-// Err returns the last error the Go function returned (or the last panic it
-// raised). The C contract carries only "repaired" or "not repaired", so a
-// failing function leaves the original validation error on the tool call;
-// this is where the cause is kept.
-func (r *ToolCallRepair) Err() error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.err
-}
-
-// Close releases the FFI handle. Calls already in flight keep their clone.
+// Close releases the FFI handle. A call already in flight stops invoking the
+// function and behaves as if it had returned nil, so Close is safe unless an
+// invocation is executing on another goroutine at that instant; once Close
+// returns, the function is never invoked again.
 func (r *ToolCallRepair) Close() error {
 	if id := r.id.Swap(0); id != 0 {
 		C.aimux_tool_call_repair_drop(C.uint64_t(id))
@@ -119,38 +109,36 @@ func (r *ToolCallRepair) Close() error {
 	return nil
 }
 
-func (r *ToolCallRepair) setErr(err error) {
-	r.mu.Lock()
-	r.err = err
-	r.mu.Unlock()
+// repairError is the `{"error": "<message>"}` envelope Core records as a
+// ToolCallRepair failure on the tool call.
+func repairError(err error) []byte {
+	b, _ := json.Marshal(map[string]string{"error": err.Error()})
+	return b
 }
 
-// invoke runs the Go function; nil means "keep the original error".
+// invoke runs the Go function; nil means "keep the original error", and an
+// error or a panic becomes the `{"error"}` envelope.
 func (r *ToolCallRepair) invoke(contextJSON string) (out []byte) {
 	// A Go panic must not unwind through the C frames into Rust.
 	defer func() {
 		if p := recover(); p != nil {
-			r.setErr(fmt.Errorf("aimux: repair function panicked: %v", p))
-			out = nil
+			out = repairError(fmt.Errorf("aimux: repair function panicked: %v", p))
 		}
 	}()
 	var ctx ToolCallRepairContext
 	if err := json.Unmarshal([]byte(contextJSON), &ctx); err != nil {
-		r.setErr(fmt.Errorf("aimux: repair context: %w", err))
-		return nil
+		return repairError(fmt.Errorf("aimux: repair context: %w", err))
 	}
 	repaired, err := r.fn(ctx)
 	if err != nil {
-		r.setErr(err)
-		return nil
+		return repairError(err)
 	}
 	if repaired == nil {
 		return nil
 	}
 	b, err := json.Marshal(repaired)
 	if err != nil {
-		r.setErr(fmt.Errorf("aimux: repaired tool call: %w", err))
-		return nil
+		return repairError(fmt.Errorf("aimux: repaired tool call: %w", err))
 	}
 	return b
 }

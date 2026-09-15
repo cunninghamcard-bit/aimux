@@ -3,6 +3,7 @@ package aimux
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -91,9 +92,6 @@ func TestRepairToolCall_GoFunctionFixesMalformedArguments(t *testing.T) {
 	if err := json.Unmarshal(tc.Input, &input); err != nil || input["location"] != "Tokyo" {
 		t.Errorf("input not repaired: %s (%v)", tc.Input, err)
 	}
-	if repair.Err() != nil {
-		t.Errorf("unexpected repair error: %v", repair.Err())
-	}
 }
 
 func TestRepairToolCall_NilKeepsTheOriginalError(t *testing.T) {
@@ -111,19 +109,26 @@ func TestRepairToolCall_NilKeepsTheOriginalError(t *testing.T) {
 	}
 }
 
-func TestRepairToolCall_GoErrorIsKeptOnTheRepair(t *testing.T) {
-	boom := errors.New("boom")
+func TestRepairToolCall_GoErrorBecomesAToolCallRepairError(t *testing.T) {
 	repair := NewToolCallRepair(func(ToolCallRepairContext) (*RawToolCall, error) {
-		return nil, boom
+		return nil, errors.New("boom")
 	})
 	defer repair.Close()
 
 	tc := generateWithRepair(t, repair).ToolCalls[0]
-	if tc.Invalid == nil {
-		t.Fatal("expected the original error to stay")
+	if tc.Invalid == nil || !*tc.Invalid {
+		t.Fatalf("expected an invalid tool call, got %s", tc.Input)
 	}
-	if !errors.Is(repair.Err(), boom) {
-		t.Errorf("Err() = %v, want boom", repair.Err())
+	var e struct {
+		ToolCallRepair *struct {
+			Cause json.RawMessage `json:"cause"`
+		} `json:"ToolCallRepair"`
+	}
+	if err := json.Unmarshal(tc.Error, &e); err != nil || e.ToolCallRepair == nil {
+		t.Fatalf("expected a ToolCallRepair error, got %s (%v)", tc.Error, err)
+	}
+	if !strings.Contains(string(e.ToolCallRepair.Cause), "boom") {
+		t.Errorf("cause lost the Go error: %s", e.ToolCallRepair.Cause)
 	}
 }
 
