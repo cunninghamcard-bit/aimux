@@ -266,6 +266,38 @@ and `(List<ModelMessage> messages, options)` overloads.
 `TypedModel` is `Closeable` (owning factories must be closed with
 try-with-resources); `AiMuxError` values surface as `AimuxException`.
 
+## repairToolCall
+
+One host attempt to fix a tool call Core could not look up, parse, or validate
+(AI SDK `repairToolCall`). Return the repaired call, or `null` to keep the
+original validation error.
+
+```java
+try (ToolCallRepair repair = new ToolCallRepair(context ->
+         // context: getToolCall() (raw argument text), getError(), getInputSchema(),
+         // getTools(), getMessages(), getInstructions()
+         context.getToolCall().withInput(context.getToolCall().getInput() + "}"))) {
+    Types.GenerateTextOptions options = Types.GenerateTextOptions.builder()
+        .tools(tools)
+        .repairToolCall(repair)
+        .build();
+    model.generateText("What is the weather in Tokyo?", options);
+}
+```
+
+- **Where it runs.** Synchronously on the thread that called `generateText` /
+  `streamText`, while that call is in progress — like a stream callback.
+- **No re-entrancy.** It must not call back into aimux: the FFI layer rejects
+  that with `AIMUX_E_FFI_REENTRANT_CALL` (204) rather than deadlocking.
+- **Nothing escapes.** Anything thrown is caught (it must never unwind into
+  Rust), leaves the original error on the tool call, and is kept as
+  `repair.lastError()` — the C contract carries only "repaired" / "not
+  repaired", so that is where the cause lives.
+- **Ownership.** `ToolCallRepair` owns an FFI handle and is `AutoCloseable`:
+  `close()` releases it (idempotent; in-flight calls keep their clone), and
+  `GenerateTextOptions` serializes it as that handle
+  (`"repair_tool_call": <handle>`). A closed repair serializes as `null`.
+
 ## Vector Embedding
 
 ```java

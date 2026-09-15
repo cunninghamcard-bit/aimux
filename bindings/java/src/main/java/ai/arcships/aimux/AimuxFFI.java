@@ -60,6 +60,16 @@ public interface AimuxFFI extends Library {
         void invoke(Pointer streamCtx);
     }
 
+    /**
+     * C: {@code char *(*aimux_tool_call_repair_fn)(const char *context_json, void *user_data)}.
+     * {@code contextJson} is valid only for the duration of the callback; the
+     * returned string must come from {@link #aimux_string_new} (aimux frees it),
+     * or be {@code null} to keep the original validation error.
+     */
+    interface ToolCallRepairCallback extends Callback {
+        Pointer invoke(Pointer contextJson, Pointer userData);
+    }
+
     // ── Provider constructors (error or null; handle written to outHandle) ──
 
     Pointer aimux_openai_new(String apiKey, String modelId, LongByReference outHandle);
@@ -149,11 +159,22 @@ public interface AimuxFFI extends Library {
                                         StreamPartCallback onPart, StreamDoneCallback onDone,
                                         Pointer streamCtx);
 
+    // ── Host callbacks referenced from opts_json by handle ──────────────────
+
+    /** Register a host repair function; returns its handle, or 0 for a null callback. */
+    long aimux_tool_call_repair_new(ToolCallRepairCallback repair, Pointer userData);
+
+    /** Release a repair handle. 0 and unknown handles are no-ops. */
+    void aimux_tool_call_repair_drop(long handle);
+
     // ── Resource management ─────────────────────────────────────────────────
 
     void aimux_drop_handle(long handle);
 
     void aimux_free_string(Pointer ptr);
+
+    /** Copy a string into an aimux-owned buffer — how a callback hands one back. */
+    Pointer aimux_string_new(String s);
 
     // ── Returned errors (aimux-error.h) ─────────────────────────────────────
 
