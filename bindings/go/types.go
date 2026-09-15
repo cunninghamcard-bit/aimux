@@ -298,6 +298,9 @@ type GenerateTextOptions struct {
 	Timeout          *TimeoutConfiguration `json:"timeout,omitempty"`
 	IncludeRawChunks *bool                 `json:"include_raw_chunks,omitempty"`
 	SessionID        *string               `json:"session_id,omitempty"`
+	// RepairToolCall gets one attempt to fix an invalid tool call (AI SDK
+	// repairToolCall). Marshals as its FFI handle.
+	RepairToolCall *ToolCallRepair `json:"repair_tool_call,omitempty"`
 }
 
 // Tool is a function tool definition (the "function" variant).
