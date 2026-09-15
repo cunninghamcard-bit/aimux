@@ -145,13 +145,13 @@ progress — on the calling thread for `generate_text` / `generate_object` /
 `consume_stream_text`, on a runtime worker for `stream_text`.
 
 **It must not call back into aimux.** Every entry point drives the one shared
-tokio runtime with `Runtime::block_on`, so a nested aimux call panics with
-*"Cannot start a runtime from within a runtime"*. That one is not survivable
-like an ordinary exception: PyO3 raises it as `pyo3_runtime.PanicException`,
-and resumes the panic when it crosses back into Rust, so it unwinds out of the
-enclosing call instead of becoming a repair failure — the whole
-`generate_text` raises `PanicException`. Repair from the context you are
-given, or fetch what you need before the call.
+tokio runtime with `Runtime::block_on`, and the hook runs inside that call, so
+a nested aimux call is refused with `RuntimeError("aimux: re-entrant call from
+inside a repair_tool_call hook is not allowed")` — the same rule the C ABI
+enforces with `AIMUX_E_FFI_REENTRANT_CALL`. Like any other exception raised by
+the hook it becomes a `ToolCallRepair` error on the tool call; the enclosing
+call still returns. Repair from the context you are given, or fetch what you
+need before the call.
 
 Tool calls that stay invalid arrive with `invalid: true` and a typed `error`.
 

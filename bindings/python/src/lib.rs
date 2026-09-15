@@ -31,6 +31,21 @@ use pyo3::prelude::*;
 // Global tokio runtime
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// `Runtime::block_on` from a Python entry point.
+///
+/// A `repair_tool_call` hook runs while the calling thread is already inside
+/// `block_on`; tokio panics on a nested `block_on`, and PyO3 would resume that
+/// panic on the way back out of the hook. Refuse up front with an ordinary
+/// exception instead, mirroring the C ABI's re-entrancy error.
+pub(crate) fn block_on<F: std::future::Future>(future: F) -> PyResult<F::Output> {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "aimux: re-entrant call from inside a repair_tool_call hook is not allowed",
+        ));
+    }
+    Ok(runtime().block_on(future))
+}
+
 pub(crate) fn runtime() -> &'static tokio::runtime::Runtime {
     use std::sync::OnceLock;
     static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -146,8 +161,7 @@ impl Model {
         let prompt = parse_prompt(prompt_json)?;
         let opts = parse_opts(opts_json, repair_tool_call)?;
 
-        let rt = runtime();
-        let result = rt.block_on(async move { generate_text(&*self.inner, prompt, opts).await });
+        let result = block_on(async move { generate_text(&*self.inner, prompt, opts).await })?;
 
         match result {
             Ok(r) => serialize_result(&r),
@@ -172,8 +186,7 @@ impl Model {
         let prompt = parse_prompt(prompt_json)?;
         let opts = parse_opts(opts_json, repair_tool_call)?;
 
-        let rt = runtime();
-        let result = rt.block_on(async move { generate_object(&*self.inner, prompt, opts).await });
+        let result = block_on(async move { generate_object(&*self.inner, prompt, opts).await })?;
 
         match result {
             Ok(r) => serialize_result(&r),
@@ -197,11 +210,10 @@ impl Model {
         let prompt = parse_prompt(prompt_json)?;
         let opts = parse_opts(opts_json, repair_tool_call)?;
 
-        let rt = runtime();
-        let result = rt.block_on(async move {
+        let result = block_on(async move {
             let stream_result = stream_text(&*self.inner, prompt, opts).await?;
             stream_result.consume().await
-        });
+        })?;
 
         match result {
             Ok(r) => serialize_result(&r),
@@ -300,9 +312,8 @@ impl Model {
         let prompt = parse_prompt(prompt_json)?;
         let opts = parse_opts(opts_json, repair_tool_call)?;
 
-        let rt = runtime();
         let result =
-            rt.block_on(async move { generate_text_as_openai(&*self.inner, prompt, opts).await });
+            block_on(async move { generate_text_as_openai(&*self.inner, prompt, opts).await })?;
 
         match result {
             Ok(r) => serialize_result(&r),
@@ -411,7 +422,7 @@ impl StreamIterator {
 
     fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<PyObject>> {
         // Block on the next channel item, allowing other Python threads to run.
-        let item = py.allow_threads(|| runtime().block_on(self.rx.recv()));
+        let item = py.allow_threads(|| block_on(self.rx.recv()))?;
 
         match item {
             Some(Ok(json)) => Ok(Some(json.to_object(py).into())),
@@ -730,10 +741,8 @@ impl ProviderHandle {
     /// List models available on this provider (runtime discovery + anya2a spec).
     /// Returns a JSON array of RuntimeModel.
     fn list_models(&self) -> PyResult<String> {
-        let rt = runtime();
-        let models = rt
-            .block_on(async { self.inner.list_models().await })
-            .map_err(|e| to_py_err(&e))?;
+        let models =
+            block_on(async { self.inner.list_models().await })?.map_err(|e| to_py_err(&e))?;
         serialize_result(&models)
     }
 
@@ -780,8 +789,7 @@ fn create_provider(
 /// `dist/all.json`.
 #[pyfunction]
 fn get_model_specs(source_url: Option<&str>) -> PyResult<String> {
-    let catalogue = runtime()
-        .block_on(async { aimux_providers::get_model_specs(source_url).await })
+    let catalogue = block_on(async { aimux_providers::get_model_specs(source_url).await })?
         .map_err(|e| to_py_err(&e))?;
     serialize_result(&catalogue)
 }

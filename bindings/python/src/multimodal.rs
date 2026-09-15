@@ -102,9 +102,9 @@ impl EmbeddingModel {
         let values: Vec<String> = wire_json("values_json", values_json)?;
         opts.values = values;
 
-        let result = crate::runtime().block_on(async move {
+        let result = crate::block_on(async move {
             aimux_core::embedding_model::embed(self.inner.as_ref(), opts).await
-        });
+        })?;
 
         match result {
             Ok(r) => serialize_result(&r),
@@ -129,9 +129,9 @@ impl SpeechModel {
     pub fn generate(&self, opts_json: &str) -> PyResult<String> {
         let opts: SpeechCallOptions = wire_json("opts_json", opts_json)?;
 
-        let result = crate::runtime().block_on(async move {
+        let result = crate::block_on(async move {
             aimux_core::speech_model::generate_speech(self.inner.as_ref(), opts).await
-        });
+        })?;
 
         match result {
             Ok(r) => serialize_result(&r),
@@ -156,9 +156,9 @@ impl ImageModel {
     pub fn generate(&self, opts_json: &str) -> PyResult<String> {
         let opts: ImageCallOptions = wire_json("opts_json", opts_json)?;
 
-        let result = crate::runtime().block_on(async move {
+        let result = crate::block_on(async move {
             aimux_core::image_model::generate_image(self.inner.as_ref(), opts).await
-        });
+        })?;
 
         match result {
             Ok(r) => serialize_result(&r),
@@ -210,9 +210,9 @@ impl TranscriptionModel {
             }
         }
 
-        let result = crate::runtime().block_on(async move {
+        let result = crate::block_on(async move {
             aimux_core::transcription_model::transcribe(self.inner.as_ref(), opts).await
-        });
+        })?;
 
         match result {
             Ok(r) => serialize_result(&r),
@@ -264,9 +264,9 @@ impl RerankingModel {
             }
         }
 
-        let result = crate::runtime().block_on(async move {
+        let result = crate::block_on(async move {
             aimux_core::reranking_model::rerank(self.inner.as_ref(), opts).await
-        });
+        })?;
 
         match result {
             Ok(r) => serialize_result(&r),
@@ -291,9 +291,9 @@ impl VideoModel {
     pub fn generate(&self, opts_json: &str) -> PyResult<String> {
         let opts: VideoCallOptions = wire_json("opts_json", opts_json)?;
 
-        let result = crate::runtime().block_on(async move {
+        let result = crate::block_on(async move {
             aimux_core::video_model::generate_video(self.inner.as_ref(), opts).await
-        });
+        })?;
 
         match result {
             Ok(r) => serialize_result(&r),
@@ -332,9 +332,9 @@ impl SearchModel {
             }
         }
 
-        let result = crate::runtime().block_on(async move {
+        let result = crate::block_on(async move {
             aimux_core::search_model::search(self.inner.as_ref(), opts).await
-        });
+        })?;
 
         match result {
             Ok(r) => serialize_result(&r),
@@ -380,7 +380,7 @@ impl Files {
             }
         }
 
-        let result = crate::runtime().block_on(async move { self.inner.upload_file(&opts).await });
+        let result = crate::block_on(async move { self.inner.upload_file(&opts).await })?;
 
         match result {
             Ok(r) => serialize_result(&r),
@@ -787,7 +787,7 @@ impl TranscriptionSession {
             }
         };
         let chunk = AudioChunk::Binary(data.to_vec());
-        py.allow_threads(|| crate::runtime().block_on(async move { tx.send(chunk).await }))
+        py.allow_threads(|| crate::block_on(async move { tx.send(chunk).await }))?
             .map_err(|_| {
                 binding_py_err(&BindingError::InvalidHandle {
                     expected: "transcription session",
@@ -825,7 +825,7 @@ impl TranscriptionSession {
             TimedOut,
         }
         let outcome = py.allow_threads(|| {
-            crate::runtime().block_on(async {
+            crate::block_on(async {
                 let mut rx = self.parts_rx.lock().await;
                 let recv = rx.recv();
                 match timeout {
@@ -836,7 +836,7 @@ impl TranscriptionSession {
                     None => Outcome::Part(recv.await),
                 }
             })
-        });
+        })?;
         let part = match outcome {
             Outcome::Part(p) => p,
             Outcome::TimedOut => {
