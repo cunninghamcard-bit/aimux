@@ -290,13 +290,19 @@ try (ToolCallRepair repair = new ToolCallRepair(context ->
 - **No re-entrancy.** It must not call back into aimux: the FFI layer rejects
   that with `AIMUX_E_FFI_REENTRANT_CALL` (204) rather than deadlocking.
 - **Nothing escapes.** Anything thrown is caught (it must never unwind into
-  Rust), leaves the original error on the tool call, and is kept as
-  `repair.lastError()` — the C contract carries only "repaired" / "not
-  repaired", so that is where the cause lives.
+  Rust) and reported to Core, which leaves the call `invalid` with a
+  `ToolCallRepairError`: `getOriginalError()` is the validation failure, its
+  `cause` carries the throwable's text. Same semantics as a Rust, Node, or
+  Python repair function that fails.
 - **Ownership.** `ToolCallRepair` owns an FFI handle and is `AutoCloseable`:
-  `close()` releases it (idempotent; in-flight calls keep their clone), and
-  `GenerateTextOptions` serializes it as that handle
-  (`"repair_tool_call": <handle>`). A closed repair serializes as `null`.
+  `close()` releases it (idempotent) and `GenerateTextOptions` serializes it
+  as that handle (`"repair_tool_call": <handle>`); a closed repair serializes
+  as `null`. **It must be closed** — until then it stays alive in a
+  process-wide registry, because Rust holds only a raw pointer to it and a GC
+  of a collectable callback would crash the process. `close()` also disarms
+  calls already in flight (they behave as if the function returned `null`), so
+  it is safe as long as no invocation is executing on another thread at that
+  instant.
 
 ## Vector Embedding
 

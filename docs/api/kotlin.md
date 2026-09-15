@@ -249,7 +249,6 @@ ToolCallRepair { context ->
     context.toolCall.copy(input = context.toolCall.input + "}")
 }.use { repair ->
     model.generateText(prompt, GenerateTextOptions(tools = tools, repairToolCall = repair))
-    repair.lastError            // whatever the function threw, if anything
 }
 ```
 
@@ -259,12 +258,19 @@ ToolCallRepair { context ->
   call made from it fails with code 204 (`AIMUX_E_FFI_REENTRANT_CALL`). Do not
   call back into a `Model` / `TypedModel` from a repair function.
 - **Errors never cross the boundary.** Every `Throwable` is caught inside the
-  callback (it must not unwind into Rust): the tool call keeps its original
-  error and `invalid` flag, and the cause is kept in `repair.lastError`.
+  callback (it must not unwind into Rust) and reported to Core, which leaves
+  the call `invalid` with a `ToolCallRepairError`: `originalError` is the
+  validation failure, its `cause` carries the throwable's text. Same semantics
+  as a Rust, Node, or Python repair function that fails.
 - **Handle ownership.** The object owns an FFI handle and is `Closeable`:
-  `close()` releases it (idempotent), and it serializes as the handle under
-  `repair_tool_call`. Close it only once no call referencing it is in flight;
-  a closed repair serializes as `null` (= no repair).
+  `close()` releases it (idempotent) and it serializes as the handle under
+  `repair_tool_call`; a closed repair serializes as `null` (= no repair).
+  **It must be closed** — until then it stays alive in a process-wide
+  registry, because Rust holds only a raw pointer to it and a GC of a
+  collectable callback would crash the process. `close()` also disarms calls
+  already in flight (they behave as if the function returned `null`), so it is
+  safe as long as no invocation is executing on another thread at that
+  instant.
 
 ## Types
 

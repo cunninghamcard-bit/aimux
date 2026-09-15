@@ -22,7 +22,9 @@ import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import java.io.Closeable
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -68,23 +70,13 @@ data class ToolCallRepairContext(
  * It runs **synchronously on the thread that called `generateText` /
  * `streamText`**, inside the FFI re-entrancy guard: it must not call back into
  * aimux (that fails with code 204). Throwables never reach Rust — they are
- * caught, leave the original error on the tool call, and are kept in
- * [lastError].
+ * caught and reported to Core, which records them on the tool call as
+ * `ToolCallRepairError` with the throwable's text as its `cause`.
  *
- * [Closeable]: close it once no call that references it is in flight.
+ * [Closeable]: it must be closed, and stays alive until then.
  */
 @Serializable(with = ToolCallRepairSerializer::class)
 class ToolCallRepair(private val fn: (ToolCallRepairContext) -> RawToolCall?) : Closeable {
-
-    /**
-     * The last Throwable the repair function (or the context/result JSON
-     * conversion) raised. The C contract carries only "repaired" or "not
-     * repaired", so a failing function leaves the original validation error on
-     * the tool call; this is where the cause is kept.
-     */
-    @Volatile
-    var lastError: Throwable? = null
-        private set
 
     // JNA collects a Callback that is only reachable from native code, so it is
     // held here for as long as this object — and therefore the handle — lives.
@@ -96,16 +88,30 @@ class ToolCallRepair(private val fn: (ToolCallRepairContext) -> RawToolCall?) : 
 
     private val handle = AtomicLong(FFI.lib.aimux_tool_call_repair_new(callback, null))
 
-    /** Release the FFI handle. Idempotent; calls already in flight keep their clone. */
+    init {
+        handle.get().let { if (it != 0L) registered[it] = this }
+    }
+
+    /**
+     * Release the FFI handle and stop keeping this object alive. Idempotent.
+     *
+     * Calls already in flight are disarmed and behave as if the function had
+     * returned `null`, so closing is safe as long as no invocation is executing
+     * on another thread at that instant.
+     */
     override fun close() {
         val h = handle.getAndSet(0L)
-        if (h != 0L) FFI.lib.aimux_tool_call_repair_drop(h)
+        if (h != 0L) {
+            FFI.lib.aimux_tool_call_repair_drop(h)
+            registered.remove(h)
+        }
     }
 
     internal fun handleValue(): Long = handle.get()
 
     // An exception must never unwind through the C frames into Rust, so every
-    // Throwable stops here and becomes "not repaired".
+    // Throwable stops here and comes back as the error envelope, which Core
+    // records as ToolCallRepair {original_error, cause}.
     private fun invoke(contextJson: Pointer?): Pointer? = try {
         if (contextJson == null) {
             null
@@ -119,8 +125,15 @@ class ToolCallRepair(private val fn: (ToolCallRepairContext) -> RawToolCall?) : 
             }
         }
     } catch (t: Throwable) {
-        lastError = t
-        null
+        FFI.lib.aimux_string_new(JsonObject(mapOf("error" to JsonPrimitive(t.toString()))).toString())
+    }
+
+    private companion object {
+        // Rust holds only a raw function pointer, and JNA tracks callbacks
+        // weakly: the options object is dead once serialized, so without this a
+        // GC during the HTTP wait frees the trampoline Rust is about to call.
+        // Leaking a forgotten repair beats crashing on one.
+        val registered = ConcurrentHashMap<Long, ToolCallRepair>()
     }
 }
 

@@ -1,9 +1,8 @@
 package ai.arcships.aimux;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.sun.jna.Pointer;
-import com.sun.jna.ptr.PointerByReference;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
@@ -103,9 +102,6 @@ class ToolCallRepairTest {
             assertThat(calls.get()).isEqualTo(1);
             assertThat(call.getInvalid()).isNull();
             assertThat(call.getInput().path("location").asText()).isEqualTo("Tokyo");
-            // Also the guard for the assertions above: the callback swallows
-            // every Throwable, so a failed one only shows up here.
-            assertThat(repair.lastError()).isNull();
         }
     }
 
@@ -118,20 +114,20 @@ class ToolCallRepairTest {
             assertThat(call.getError().has("InvalidToolInput")).isTrue();
             // The raw argument text survives as-is for the caller to inspect.
             assertThat(call.getInput().asText()).isEqualTo("{\"location\":\"Tokyo\"");
-            assertThat(repair.lastError()).isNull();
         }
     }
 
     @Test
-    void thrownExceptionIsKeptOnTheRepair() {
-        final IllegalStateException boom = new IllegalStateException("boom");
+    void thrownExceptionBecomesAToolCallRepairError() {
         try (ToolCallRepair repair = new ToolCallRepair(context -> {
-            throw boom;
+            throw new IllegalStateException("no idea how to fix that");
         })) {
             Types.ToolCall call = generateWithRepair(repair);
 
             assertThat(call.getInvalid()).isTrue();
-            assertThat(repair.lastError()).isSameAs(boom);
+            JsonNode failure = call.getError().path("ToolCallRepair");
+            assertThat(failure.path("original_error").has("InvalidToolInput")).isTrue();
+            assertThat(failure.path("cause").toString()).contains("no idea how to fix that");
         }
     }
 
@@ -142,24 +138,17 @@ class ToolCallRepairTest {
      */
     @Test
     void callingBackIntoAimuxIsRejectedAsReentrant() {
-        final AtomicInteger innerCode = new AtomicInteger();
         try (Model inner =
                  Model.openaiWithBase("sk-test-fake-key", "gpt-4o", server.baseUrl());
              ToolCallRepair repair = new ToolCallRepair(context -> {
-                 // The raw FFI call, so the C code is observable (the Java
-                 // layer collapses 200–206 into IllegalStateException).
-                 PointerByReference out = new PointerByReference();
-                 Pointer err = AimuxFFI.INSTANCE.aimux_generate_text(
-                     inner.handle(), "\"hi\"", null, out);
-                 innerCode.set(AimuxFFI.INSTANCE.aimux_error_code(err));
-                 AimuxFFI.INSTANCE.aimux_error_free(err);
+                 inner.generateText("\"hi\"");
                  return null;
              })) {
             Types.ToolCall call = generateWithRepair(repair);
 
-            assertThat(innerCode.get()).isEqualTo(204);
             assertThat(call.getInvalid()).isTrue();
-            assertThat(repair.lastError()).isNull();
+            assertThat(call.getError().path("ToolCallRepair").path("cause").toString())
+                .contains("re-entrant");
         }
     }
 

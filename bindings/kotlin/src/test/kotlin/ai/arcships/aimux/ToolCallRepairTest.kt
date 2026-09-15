@@ -1,6 +1,5 @@
 package ai.arcships.aimux
 
-import com.sun.jna.ptr.PointerByReference
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
@@ -88,7 +87,6 @@ class ToolCallRepairTest {
             val call = generateWithRepair(repair)
 
             assertThat(calls).isEqualTo(1)
-            assertThat(repair.lastError).isNull()
             assertThat(call.invalid).isNotEqualTo(true)
             assertThat(call.input.jsonObject["location"]!!.jsonPrimitive.content).isEqualTo("Tokyo")
 
@@ -111,42 +109,40 @@ class ToolCallRepairTest {
             assertThat(call.invalid).isTrue()
             assertThat(call.error).isNotNull()
             assertThat(call.input.jsonPrimitive.content).isEqualTo("""{"location":"Tokyo"""")
-            assertThat(repair.lastError).isNull()
         }
     }
 
     @Test
-    fun `a throwing repair function keeps the original error and lands in lastError`() {
-        val boom = IllegalArgumentException("boom")
-        ToolCallRepair { throw boom }.use { repair ->
+    fun `a throwing repair function becomes a ToolCallRepair error`() {
+        ToolCallRepair { throw IllegalArgumentException("no idea how to fix that") }.use { repair ->
             val call = generateWithRepair(repair)
 
             assertThat(call.invalid).isTrue()
-            assertThat(repair.lastError).isSameAs(boom)
+            val failure = call.error!!.jsonObject["ToolCallRepair"]!!.jsonObject
+            assertThat(failure["original_error"].toString()).contains("InvalidToolInput")
+            assertThat(failure["cause"].toString()).contains("no idea how to fix that")
         }
     }
 
     @Test
     fun `calling back into aimux from the repair function is rejected as re-entrant`() {
-        var innerCode = 0
         Model.openai("sk-test-fake-key", "gpt-4o", server.baseUrl).use { raw ->
-            val handle = raw.handle()
             ToolCallRepair {
-                // Same thread, inside the FFI re-entrancy guard: 204.
-                val out = PointerByReference()
-                val e = FFI.lib.aimux_generate_text(handle, "\"hi\"", null, out)
-                innerCode = FFI.lib.aimux_error_code(e)
-                FFI.lib.aimux_error_free(e)
+                // Same thread, inside the FFI re-entrancy guard: 204, which
+                // throws here and reaches Core as the repair failure.
+                raw.generateText("\"hi\"")
                 null
             }.use { repair ->
-                TypedModel(raw).generateText(
+                val result = TypedModel(raw).generateText(
                     "What is the weather in Tokyo?",
                     GenerateTextOptions(tools = listOf(weatherTool), repairToolCall = repair),
                 )
-                assertThat(repair.lastError).isNull()
+                val call = result.toolCalls[0]
+                assertThat(call.invalid).isTrue()
+                assertThat(call.error!!.jsonObject["ToolCallRepair"]!!.jsonObject["cause"].toString())
+                    .contains("re-entrant")
             }
         }
-        assertThat(innerCode).isEqualTo(204)
     }
 
     @Test

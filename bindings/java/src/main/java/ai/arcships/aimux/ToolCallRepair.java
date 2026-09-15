@@ -3,7 +3,9 @@ package ai.arcships.aimux;
 import com.fasterxml.jackson.annotation.JsonValue;
 import com.sun.jna.Pointer;
 
+import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * A registered {@link ToolCallRepairFunction}. Set it on
@@ -12,8 +14,8 @@ import java.util.Objects;
  * which is how the function reaches Core.
  *
  * <p>Implements {@link AutoCloseable}: {@link #close()} releases the handle.
- * Close it once no call that references it is in flight; a closed repair
- * serializes as {@code null} (no repair).
+ * Until then the object stays reachable from a process-wide registry, so it
+ * must be closed; a closed repair serializes as {@code null} (no repair).
  *
  * <pre>{@code
  * try (ToolCallRepair repair = new ToolCallRepair(ctx ->
@@ -26,10 +28,14 @@ import java.util.Objects;
  */
 public final class ToolCallRepair implements AutoCloseable {
 
+    // Rust holds only a raw function pointer, and JNA tracks callbacks weakly:
+    // an options object is dead the moment it is serialized, so without this a
+    // GC during the HTTP wait frees the trampoline Rust is about to call.
+    // Leaking a forgotten repair beats crashing on one.
+    private static final Map<Long, ToolCallRepair> REGISTERED = new ConcurrentHashMap<>();
+
     private final ToolCallRepairFunction fn;
 
-    // The native side keeps only a raw function pointer, so the JNA callback
-    // must stay strongly referenced for as long as the handle is registered.
     private final AimuxFFI.ToolCallRepairCallback callback =
         new AimuxFFI.ToolCallRepairCallback() {
             @Override
@@ -38,30 +44,29 @@ public final class ToolCallRepair implements AutoCloseable {
             }
         };
 
-    private volatile Throwable lastError;
     private long handle;
 
     /** Register {@code fn} with the FFI layer. */
     public ToolCallRepair(ToolCallRepairFunction fn) {
         this.fn = Objects.requireNonNull(fn, "fn");
         this.handle = AimuxFFI.INSTANCE.aimux_tool_call_repair_new(callback, null);
+        if (handle != 0L) {
+            REGISTERED.put(handle, this);
+        }
     }
 
     /**
-     * The last Throwable the repair function raised (or a failure to decode the
-     * context / encode the repaired call). The C contract carries only
-     * "repaired" or "not repaired", so a failing function leaves the original
-     * validation error on the tool call; this is where the cause is kept.
+     * Release the FFI handle and stop keeping this object alive. Idempotent.
+     *
+     * <p>Calls already in flight are disarmed and behave as if the function had
+     * returned {@code null}, so closing is safe as long as no invocation is
+     * executing on another thread at that instant.
      */
-    public Throwable lastError() {
-        return lastError;
-    }
-
-    /** Release the FFI handle. Idempotent; calls already in flight keep their clone. */
     @Override
     public synchronized void close() {
         if (handle != 0L) {
             AimuxFFI.INSTANCE.aimux_tool_call_repair_drop(handle);
+            REGISTERED.remove(handle);
             handle = 0L;
         }
     }
@@ -72,7 +77,8 @@ public final class ToolCallRepair implements AutoCloseable {
         return handle == 0L ? null : handle;
     }
 
-    // Nothing may unwind into Rust: every failure becomes NULL ("not repaired").
+    // Nothing may unwind into Rust: every failure comes back as the error
+    // envelope, which Core records as ToolCallRepair {original_error, cause}.
     private Pointer invoke(Pointer contextJson) {
         try {
             Types.ToolCallRepairContext context = Types.AimuxJson.MAPPER.readValue(
@@ -84,8 +90,8 @@ public final class ToolCallRepair implements AutoCloseable {
             return AimuxFFI.INSTANCE.aimux_string_new(
                 Types.AimuxJson.MAPPER.writeValueAsString(repaired));
         } catch (Throwable t) {
-            lastError = t;
-            return null;
+            return AimuxFFI.INSTANCE.aimux_string_new(
+                Types.AimuxJson.MAPPER.createObjectNode().put("error", t.toString()).toString());
         }
     }
 }

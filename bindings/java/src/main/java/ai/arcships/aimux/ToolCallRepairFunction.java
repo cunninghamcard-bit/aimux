@@ -10,8 +10,9 @@ package ai.arcships.aimux;
  * {@code generateText} / {@code streamText}, while that call is in progress.
  * It must not call back into aimux: the FFI layer rejects that as a re-entrant
  * call ({@code AIMUX_E_FFI_REENTRANT_CALL}). Anything thrown here is caught by
- * {@link ToolCallRepair} (never unwinds into Rust), leaves the original error
- * on the tool call, and is kept as {@link ToolCallRepair#lastError()}.
+ * {@link ToolCallRepair} (never unwinds into Rust) and reported to Core, which
+ * records it on the tool call as a {@code ToolCallRepairError} whose
+ * {@code cause} carries the throwable's text.
  */
 public interface ToolCallRepairFunction {
 
