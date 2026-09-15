@@ -338,8 +338,10 @@ aimux_error_t *aimux_stream_text_with_abort(uint64_t handle, uint64_t abort_hand
  *
  * `context_json` — {tool_call, error, input_schema, tools, messages,
  * instructions}; valid only during the call. Return the repaired tool call
- * as JSON `{tool_call_id, tool_name, input, ...}` allocated with
- * aimux_string_new (aimux frees it), or NULL to keep the original error.
+ * as JSON `{tool_call_id, tool_name, input, ...}`, or `{"error": "<message>"}`
+ * to record a failure (Core reports it as ToolCallRepair, code 17); either
+ * allocated with aimux_string_new (aimux frees it). NULL keeps the original
+ * validation error.
  *
  * Runs synchronously on the thread that entered the aimux_* call, inside the
  * re-entrancy guard: calling any aimux_* function from inside it fails with
@@ -351,11 +353,18 @@ typedef char *(*aimux_tool_call_repair_fn)(const char *context_json, void *user_
  * Register a host repair function. `user_data` is passed back verbatim.
  *
  * @return A non-zero handle for `"repair_tool_call"` in opts_json; 0 for a
- *         NULL function. Release it with aimux_tool_call_repair_drop.
+ *         NULL function (0 in opts_json means "no repair"). Release it with
+ *         aimux_tool_call_repair_drop.
  */
 uint64_t aimux_tool_call_repair_new(aimux_tool_call_repair_fn repair, void *user_data);
 
-/** Release a repair handle. 0 and unknown handles are no-ops. */
+/**
+ * Release a repair handle. 0 and unknown handles are no-ops.
+ *
+ * Calls already in flight stop invoking the function from this point on and
+ * behave as if it had returned NULL. The host may release `user_data` once
+ * this returns, provided no invocation is executing on another thread.
+ */
 void aimux_tool_call_repair_drop(uint64_t handle);
 
 /* ── OpenAI-compatible output (RFC-0026) ───────────────────────────────── */

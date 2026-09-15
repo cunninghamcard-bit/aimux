@@ -378,18 +378,26 @@ travel as handles:
   schema validation. `context_json` is `{tool_call, error, input_schema,
   tools, messages, instructions}` and is valid only during the call. Return
   the repaired call as `{tool_call_id, tool_name, input, ...}` JSON (`input`
-  is the raw argument text) allocated with `aimux_string_new` — aimux frees
-  it — or `NULL` to keep the original error. Core parses and validates the
-  returned call from scratch; a call that is still invalid comes back with
+  is the raw argument text), or `{"error": "<message>"}` to record a failure
+  (Core reports it as `ToolCallRepair`, code 17, with the original error as
+  `original_error`); either allocated with `aimux_string_new` — aimux frees
+  it. `NULL` keeps the original error. Core parses and validates a returned
+  call from scratch; a call that is still invalid comes back with
   `invalid: true` and its typed `error`.
+
+  `aimux_tool_call_repair_new(NULL, …)` returns 0, and 0 in `opts_json` means
+  "no repair". `aimux_tool_call_repair_drop` disarms the function for calls
+  already in flight — they behave as if it had returned `NULL` — so the host
+  may release `user_data` once `drop` returns, provided no invocation is
+  executing on another thread at that moment.
 
   The function runs synchronously on the thread that entered the `aimux_*`
   call, inside the re-entrancy guard: calling any `aimux_*` function from
   inside it fails with `AIMUX_E_FFI_REENTRANT_CALL` (204). Host exceptions
   must be caught inside the callback and turned into `NULL`.
 
-A handle field that is not an unsigned integer is `AIMUX_E_FFI_INVALID_WIRE_JSON`
-(202); a released or wrong-typed handle is `AIMUX_E_FFI_INVALID_HANDLE` (203).
+A handle field that is not an unsigned integer is `AIMUX_E_INVALID_ARGUMENT`
+(5, like any other schema violation in `opts_json`); a released or wrong-typed handle is `AIMUX_E_FFI_INVALID_HANDLE` (203).
 
 ### Transcription streaming (RFC-0028)
 

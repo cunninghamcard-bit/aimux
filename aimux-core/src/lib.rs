@@ -87,7 +87,9 @@ pub mod prelude {
         encode_chunk_sse, to_chat_completion, to_chat_completion_stream,
     };
     pub use crate::options::{CallOptions, ResponseFormat, ToolChoice};
-    pub use crate::parse_tool_call::{RawToolCall, ToolCallRepair, ToolCallRepairContext};
+    pub use crate::parse_tool_call::{
+        RawToolCall, ToolCallRepair, ToolCallRepairContext, parse_repair_reply,
+    };
     pub use crate::provider::Provider;
     pub use crate::reranking_model::{
         RerankingCallOptions, RerankingModel, RerankingResult, rerank,

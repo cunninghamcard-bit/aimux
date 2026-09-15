@@ -9,21 +9,31 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::AiMuxError;
+use crate::message::ModelMessage;
 use crate::tool::{Tool, ToolCall};
 use crate::types::ProviderMetadata;
 
 /// Provider-facing tool call before Core parses and validates its input.
-#[derive(Debug, Clone)]
+///
+/// Serializes as the wire shape a host-language `repair_tool_call` function
+/// exchanges with Core (see [`ToolCallRepairContext::to_wire_json`] and
+/// [`parse_repair_reply`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawToolCall {
     pub tool_call_id: String,
     pub tool_name: String,
     pub input: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_executed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dynamic: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thought_signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_metadata: Option<ProviderMetadata>,
 }
 
@@ -61,6 +71,67 @@ impl ToolCallRepairContext {
                     "additionalProperties": false
                 })
             })
+    }
+}
+
+/// The AI SDK `repairToolCall` arguments as one JSON document — what a repair
+/// function implemented outside Rust receives.
+#[derive(Serialize)]
+struct ToolCallRepairContextWire<'a> {
+    tool_call: &'a RawToolCall,
+    error: &'a AiMuxError,
+    input_schema: Value,
+    tools: &'a [Tool],
+    messages: &'a [ModelMessage],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instructions: Option<&'a str>,
+}
+
+impl ToolCallRepairContext {
+    /// Serialize as the document a host-language repair function receives:
+    /// `{tool_call, error, input_schema, tools, messages, instructions}`, with
+    /// `input_schema` already resolved for the called tool.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AiMuxError::Other` if the context cannot be serialized.
+    pub fn to_wire_json(&self) -> Result<String, AiMuxError> {
+        serde_json::to_string(&ToolCallRepairContextWire {
+            tool_call: &self.tool_call,
+            error: &self.error,
+            input_schema: self.input_schema(&self.tool_call.tool_name),
+            tools: &self.tools,
+            messages: &self.messages,
+            instructions: self.instructions.as_deref(),
+        })
+        .map_err(|e| AiMuxError::Other(format!("repair_tool_call: context: {e}")))
+    }
+}
+
+/// A host-language repair function's reply: the repaired call, or a failure
+/// it wants recorded (`{"error": "<message>"}`). Order matters for `untagged`:
+/// an object missing the call's required fields falls through to `Error`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ToolCallRepairReply {
+    Call(RawToolCall),
+    Error { error: String },
+}
+
+/// Parse a host-language repair function's reply document. An `Err` here is
+/// what `parse_tool_call` records as `AiMuxError::ToolCallRepair`.
+///
+/// # Errors
+///
+/// The host's `{"error"}` reply, or a document that is neither a
+/// `RawToolCall` nor an error envelope, both as `AiMuxError::Other`.
+pub fn parse_repair_reply(json: &str) -> Result<Option<RawToolCall>, AiMuxError> {
+    match serde_json::from_str::<ToolCallRepairReply>(json) {
+        Ok(ToolCallRepairReply::Call(call)) => Ok(Some(call)),
+        Ok(ToolCallRepairReply::Error { error }) => Err(AiMuxError::Other(error)),
+        Err(e) => Err(AiMuxError::Other(format!(
+            "repair_tool_call returned neither a RawToolCall nor {{\"error\"}}: {e}"
+        ))),
     }
 }
 
