@@ -21,7 +21,9 @@ import 'types.dart';
 // FFI
 // ─────────────────────────────────────────────────────────────────────────────
 
-// aimux_tool_call_repair_fn: (context_json, user_data) → repaired JSON | NULL.
+// aimux_tool_call_repair_fn: (context_json, user_data) → reply JSON | NULL.
+// The reply is the repaired call, or `{"error": "<message>"}`. `user_data` is
+// NULL here — the [NativeCallable] closure already carries the instance.
 typedef _RepairFnC = Pointer<Utf8> Function(
     Pointer<Utf8> contextJson, Pointer<Void> userData);
 
@@ -46,26 +48,6 @@ final _repairDrop = _lib.lookupFunction<_RepairDropC, _RepairDropDart>(
     'aimux_tool_call_repair_drop');
 final _stringNew =
     _lib.lookupFunction<_StringNewC, _StringNewDart>('aimux_string_new');
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Callback trampoline
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// `user_data` → the [ToolCallRepair] that owns the Dart function.
-/// [Pointer.fromFunction] takes a top-level function and cannot capture, so
-/// the key travels through `user_data` (the same round trip cgo.Handle makes
-/// in the Go binding).
-final Map<int, ToolCallRepair> _registered = {};
-int _nextKey = 1;
-
-/// The native side reads a NULL return as "not repaired", which is also what
-/// [Pointer.fromFunction] returns for a `Pointer`-typed callback that throws —
-/// but [ToolCallRepair._invoke] catches first, so the cause is not lost.
-Pointer<Utf8> _onRepair(Pointer<Utf8> contextJson, Pointer<Void> userData) {
-  final repair = _registered[userData.address];
-  if (repair == null || contextJson == nullptr) return nullptr;
-  return repair._invoke(contextJson);
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -157,14 +139,23 @@ class ToolCallRepairContext {
 /// A Dart function registered as `GenerateTextOptions.repairToolCall`
 /// (AI SDK `repairToolCall`). It gets one attempt to fix an invalid tool call:
 /// return the repaired call, or null to keep the original validation error.
-/// Core parses and validates the returned call from scratch.
+/// Core parses and validates the returned call from scratch. A function that
+/// throws reports the failure instead of hiding it: the tool call stays
+/// `invalid`, with a `ToolCallRepair` error whose `cause` is the exception.
 ///
-/// The function runs **synchronously on the isolate that called**
-/// `generateText` / `streamText`, while that call is in progress, and inside
+/// The function runs **synchronously on the isolate that created this
+/// object**, while `generateText` / `streamText` is in progress, and inside
 /// the FFI re-entrancy guard: it must not call back into aimux — that fails
 /// with `AIMUX_E_FFI_REENTRANT_CALL`.
 ///
-/// Call [close] once no call referencing it is in flight.
+/// **Create the repair on the isolate that makes the call.** Its native
+/// trampoline may only run on the isolate that made it, so a [ToolCallRepair]
+/// is not sendable: handing one — or a [GenerateTextOptions] holding one — to
+/// `Isolate.run` throws `ArgumentError` there and then, instead of aborting
+/// the VM once Core invokes it in the worker.
+///
+/// [close] is mandatory: the trampoline holds this object alive, so there is
+/// no finalizer to fall back on.
 ///
 /// ```dart
 /// final repair = ToolCallRepair((ctx) => RawToolCall(
@@ -179,62 +170,70 @@ class ToolCallRepairContext {
 ///   repair.close();
 /// }
 /// ```
+// The pragma is what turns "not sendable" into a thrown ArgumentError: a bare
+// NativeCallable stopped being unsendable on its own when `Pointer` became
+// sendable in Dart 3.6.
+@pragma('vm:isolate-unsendable')
 class ToolCallRepair {
   final RawToolCall? Function(ToolCallRepairContext) _repair;
-  final int _key;
-  int _nativeHandle;
-  Object? _lastError;
 
-  ToolCallRepair(this._repair)
-      : _key = _nextKey++,
-        _nativeHandle = 0 {
-    _registered[_key] = this;
-    _nativeHandle = _repairNew(Pointer.fromFunction<_RepairFnC>(_onRepair),
-        Pointer<Void>.fromAddress(_key));
+  /// `isolateLocal`, not `listener`: Core needs the reply synchronously, and
+  /// the closure carries the instance, so `user_data` stays NULL.
+  late final NativeCallable<_RepairFnC> _callable;
+
+  int _nativeHandle = 0;
+
+  ToolCallRepair(this._repair) {
+    _callable = NativeCallable<_RepairFnC>.isolateLocal(_invoke)
+      ..keepIsolateAlive = false;
+    _nativeHandle = _repairNew(_callable.nativeFunction, nullptr);
   }
 
   /// The FFI handle, which is how the function reaches `opts_json`
   /// (`"repair_tool_call": <handle>`). Null once [close]d — the native side
-  /// reads a null field as "no repair function", so a closed repair degrades
-  /// to the default instead of failing the call.
+  /// reads a null (or 0) field as "no repair function", so a closed repair
+  /// degrades to the default instead of failing the call.
   int? get handle => _nativeHandle == 0 ? null : _nativeHandle;
 
-  /// The last exception the Dart function threw (or a failure decoding the
-  /// context / encoding the result). The C contract carries only "repaired"
-  /// or "not repaired", so a failing function leaves the original validation
-  /// error on the tool call; this is where the cause is kept.
-  Object? get lastError => _lastError;
-
-  /// Release the FFI handle. Idempotent. Calls already in flight keep their
-  /// clone on the native side.
+  /// Release the FFI handle and the trampoline. Idempotent, and safe as long
+  /// as no invocation is executing at that instant: the native side disarms
+  /// calls already in flight, which then behave as "not repaired".
   void close() {
     if (_nativeHandle == 0) return;
     _repairDrop(_nativeHandle);
     _nativeHandle = 0;
-    _registered.remove(_key);
+    _callable.close();
   }
 
   /// Runs the Dart function. `nullptr` means "keep the original error".
   ///
-  /// Nothing may escape into the C ABI (undefined behavior, and the Rust
-  /// frames below cannot unwind a Dart exception), so every failure is caught
-  /// and kept in [lastError].
-  Pointer<Utf8> _invoke(Pointer<Utf8> contextJson) {
+  /// Nothing may escape into the C ABI — the Rust frames below cannot unwind a
+  /// Dart exception, and what a [NativeCallable] returns after one is
+  /// undefined — so every failure becomes the ABI's error envelope, which Core
+  /// records as `ToolCallRepair { original_error, cause }`.
+  Pointer<Utf8> _invoke(Pointer<Utf8> contextJson, Pointer<Void> userData) {
     try {
-      final context = ToolCallRepairContext.fromJson(
-          jsonDecode(contextJson.toDartString()) as Map<String, dynamic>);
-      final repaired = _repair(context);
-      if (repaired == null) return nullptr;
-      // aimux frees the returned string, so it has to come from its allocator.
-      final json = toCString(encodeJson(repaired.toJson(), 'repaired tool call'));
-      try {
-        return _stringNew(json);
-      } finally {
-        calloc.free(json);
-      }
+      final repaired = _repair(ToolCallRepairContext.fromJson(
+          jsonDecode(contextJson.toDartString()) as Map<String, dynamic>));
+      return repaired == null ? nullptr : _reply(repaired.toJson());
     } catch (e) {
-      _lastError = e;
-      return nullptr;
+      try {
+        return _reply({'error': e.toString()});
+      } catch (_) {
+        // The envelope itself does not marshal — an unpaired surrogate in the
+        // message, say. "Not repaired" is all that is left.
+        return nullptr;
+      }
+    }
+  }
+
+  /// [value] as a reply string aimux owns, since aimux frees what it is given.
+  Pointer<Utf8> _reply(Map<String, Object?> value) {
+    final json = toCString(encodeJson(value, 'repair_tool_call reply'));
+    try {
+      return _stringNew(json);
+    } finally {
+      calloc.free(json);
     }
   }
 }

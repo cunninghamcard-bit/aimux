@@ -12,9 +12,10 @@
 // The FFI call runs in a worker isolate for the reason spelled out in
 // `structured_e2e_test.dart`: `generateText` blocks its isolate until the Rust
 // core finishes, so the mock server has to live elsewhere. The repair function
-// is registered *inside* the worker — a `Pointer.fromFunction` callback may
-// only be invoked on the mutator thread of the isolate that created it, which
-// is exactly the thread the blocking FFI call occupies.
+// is constructed *inside* the worker — its `NativeCallable.isolateLocal`
+// trampoline may only be invoked on the mutator thread of the isolate that
+// created it, which is exactly the thread the blocking FFI call occupies, and
+// a [ToolCallRepair] cannot be sent there ready-made.
 
 import 'dart:convert';
 import 'dart:io';
@@ -65,8 +66,8 @@ class RepairArgs {
 }
 
 /// Runs one `generateText` with a [ToolCallRepair] in a worker isolate and
-/// returns a sendable summary: the resulting tool calls as plain JSON, the
-/// context the repair function saw, and `lastError`.
+/// returns a sendable summary: the resulting tool calls as plain JSON and the
+/// context the repair function saw.
 Future<Map<String, dynamic>> runWithRepair(RepairArgs args) {
   return Isolate.run(() {
     Map<String, dynamic>? seen;
@@ -103,7 +104,6 @@ Future<Map<String, dynamic>> runWithRepair(RepairArgs args) {
         'tool_calls':
             jsonDecode(jsonEncode(result.toolCalls)) as List<dynamic>,
         'seen': seen,
-        'last_error': repair.lastError?.toString(),
       };
     } finally {
       repair.close();
@@ -140,7 +140,6 @@ void main() {
     final call = calls.single as Map<String, dynamic>;
     expect(call['invalid'], isNot(true));
     expect((call['input'] as Map<String, dynamic>)['location'], 'Tokyo');
-    expect(out['last_error'], isNull);
   });
 
   test('returning null keeps the original error and the raw text', () async {
@@ -150,17 +149,29 @@ void main() {
         as Map<String, dynamic>;
     expect(call['invalid'], isTrue);
     expect(call['input'], r'{"location":"Tokyo"');
-    expect(out['last_error'], isNull);
   });
 
-  test('a thrown exception keeps the original error and lands in lastError',
-      () async {
+  test('a thrown exception is reported as a ToolCallRepair failure', () async {
     final out = await runWithRepair(RepairArgs(baseUrl, RepairMode.throwing));
 
     final call = (out['tool_calls'] as List<dynamic>).single
         as Map<String, dynamic>;
     expect(call['invalid'], isTrue);
-    expect(out['last_error'], contains('boom'));
+    final failure =
+        (call['error'] as Map<String, dynamic>)['ToolCallRepair']
+            as Map<String, dynamic>;
+    expect((failure['original_error'] as Map<String, dynamic>).keys,
+        contains('InvalidToolInput'));
+    expect(jsonEncode(failure['cause']), contains('boom'));
+  });
+
+  test('a repair cannot ride into another isolate', () async {
+    final repair = ToolCallRepair((_) => null);
+    try {
+      await expectLater(Isolate.run(() => repair.handle), throwsArgumentError);
+    } finally {
+      repair.close();
+    }
   });
 
   test('a closed repair serializes as null, and closing twice is a no-op', () {

@@ -265,6 +265,7 @@ model.close();
 `bindings/flutter/lib/repair.dart` wraps a Dart function as
 `GenerateTextOptions.repairToolCall` (AI SDK `repairToolCall`): one attempt to
 fix a tool call Core rejected, or `null` to keep the original validation error.
+Create it on the isolate that makes the call — see **Isolates** below.
 
 ```dart
 final repair = ToolCallRepair((context) => RawToolCall(
@@ -284,32 +285,44 @@ try {
 |------|------|------|
 | `ToolCallRepair` | `ToolCallRepair(RawToolCall? Function(ToolCallRepairContext) repair)` | Registers the function with the FFI layer |
 | `handle` | `int? get handle` | The FFI handle it marshals as; `null` once closed |
-| `lastError` | `Object? get lastError` | The last exception the function threw |
-| `close` | `void close()` | Release the handle; idempotent |
+| `close` | `void close()` | Release the handle and the callback; idempotent |
 
 `ToolCallRepairContext` carries `toolCall` (a `RawToolCall`, whose `input` is
 the model's argument text verbatim), `error` (the typed failure as wire JSON,
 same shape as `ToolCall.error`), `inputSchema`, `tools`, `messages` and
 `instructions`.
 
-**Where it runs.** Synchronously on the isolate that called `generateText` /
-`streamText`, while that call is in progress — not on the event loop. An
-`async` repair function is therefore useless: only the synchronous return value
-reaches Core.
+**Where it runs.** Synchronously on the isolate that created the
+`ToolCallRepair`, while `generateText` / `streamText` is in progress — not on
+the event loop. An `async` repair function is therefore useless: only the
+synchronous return value reaches Core.
+
+**Isolates.** Create the repair on the isolate that makes the call. It owns a
+`NativeCallable.isolateLocal` trampoline, which only its own isolate may run,
+so a `ToolCallRepair` is not sendable: passing one — or a
+`GenerateTextOptions` holding one — into `Isolate.run` throws `ArgumentError`
+right there instead of aborting the VM later. Since `generateText` blocks its
+isolate anyway, build the repair inside the worker, as `test/repair_test.dart`
+does.
 
 **Re-entrancy.** The function runs inside the FFI re-entrancy guard: calling
 any aimux API from within it fails with `AIMUX_E_FFI_REENTRANT_CALL` (204).
 
-**Errors.** Nothing may unwind into the Rust frames below, so an exception is
-caught, turned into "not repaired" (the original validation error stays on the
-tool call, `invalid: true`), and kept in `lastError` — the C contract carries
-no room for the cause.
+**Errors.** Nothing may unwind into the Rust frames below, so every exception
+is caught and reported through the ABI's error envelope
+(`{"error": "<message>"}`, the message being `e.toString()`). Core records that
+as `ToolCallRepair` (code 17) carrying the original validation error as
+`original_error` and the exception as `cause`, and the tool call stays
+`invalid: true` — the same semantics the other bindings give a repair function
+that fails.
 
-**Ownership.** `ToolCallRepair` owns a native handle; `close()` releases it, and
-there is no finalizer, so a repair that is never closed leaks the handle. Close
-it only once no call referencing it is in flight — calls already running keep
-their own clone on the native side. Serializing a closed repair emits
-`"repair_tool_call": null`, which the native side reads as "absent".
+**Ownership.** `ToolCallRepair` owns a native handle and a native callback;
+`close()` releases both, and there is no finalizer — the callback keeps the
+object alive — so a repair that is never closed leaks them. `close()` is safe
+as long as no invocation is executing at that instant: the native side disarms
+calls already in flight, which then behave as "not repaired". Serializing a
+closed repair emits `"repair_tool_call": null`, which the native side reads as
+"absent".
 
 ## Types
 

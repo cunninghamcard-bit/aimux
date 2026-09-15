@@ -810,7 +810,8 @@ class GenerateTextOptions {
   @JsonKey(name: 'session_id')
   final String? sessionId;
   /// Host function that gets one attempt to fix an invalid tool call (AI SDK
-  /// `repairToolCall`). Serializes as its FFI handle.
+  /// `repairToolCall`). Serializes as its FFI handle. A [ToolCallRepair] is
+  /// not sendable, so options carrying one cannot cross an isolate boundary.
   @JsonKey(
       name: 'repair_tool_call',
       includeIfNull: false,
