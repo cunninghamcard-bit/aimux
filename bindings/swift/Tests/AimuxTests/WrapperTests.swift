@@ -485,7 +485,6 @@ final class ToolCallRepairTests: XCTestCase {
         XCTAssertEqual(calls, 1)
         XCTAssertNil(toolCall.invalid)
         XCTAssertEqual(toolCall.input["location"]?.stringValue, "Tokyo")
-        XCTAssertNil(repair.lastError)
     }
 
     /// nil keeps the original validation error and the raw argument text.
@@ -499,11 +498,10 @@ final class ToolCallRepairTests: XCTestCase {
         let toolCall = try generate(with: repair, on: model)
         XCTAssertEqual(toolCall.invalid, true)
         XCTAssertEqual(toolCall.input.stringValue, #"{"location":"Tokyo""#)
-        XCTAssertNil(repair.lastError)
     }
 
-    /// A thrown error stays on the Swift side and leaves the call invalid.
-    func testRepairThrowingIsKeptOnLastError() throws {
+    /// A thrown error is reported to Core as a failed repair.
+    func testRepairThrowingIsRecordedAsAToolCallRepairError() throws {
         struct Boom: Error {}
         let (server, model) = try malformedToolCallSetup()
         defer { server.stop() }
@@ -513,7 +511,8 @@ final class ToolCallRepairTests: XCTestCase {
 
         let toolCall = try generate(with: repair, on: model)
         XCTAssertEqual(toolCall.invalid, true)
-        XCTAssertNotNil(repair.lastError as? Boom)
+        XCTAssertEqual(repairCause(of: toolCall)?.contains("Boom"), true,
+                       "got \(String(describing: toolCall.error))")
     }
 
     /// Calling back into aimux from the closure is rejected as a re-entrant
@@ -522,21 +521,16 @@ final class ToolCallRepairTests: XCTestCase {
         let (server, model) = try malformedToolCallSetup()
         defer { server.stop() }
 
-        var nested: (any Error)?
         let repair = ToolCallRepair { _ in
-            do {
-                _ = try model.generateText(prompt: .text("nested"))
-            } catch {
-                nested = error
-            }
+            _ = try model.generateText(prompt: .text("nested"))
             return nil
         }
         defer { repair.close() }
 
         let toolCall = try generate(with: repair, on: model)
         XCTAssertEqual(toolCall.invalid, true)
-        XCTAssertTrue(String(describing: nested).contains("re-entrant"),
-                      "expected a re-entrant FFI failure, got \(String(describing: nested))")
+        XCTAssertEqual(repairCause(of: toolCall)?.contains("re-entrant"), true,
+                       "expected a re-entrant FFI failure, got \(String(describing: toolCall.error))")
     }
 
     /// A closed repair encodes as null, which the FFI reads as absent.
@@ -547,6 +541,12 @@ final class ToolCallRepairTests: XCTestCase {
 
         let json = try JSONEncoder().encode(GenerateTextOptions(repairToolCall: repair))
         XCTAssertEqual(String(data: json, encoding: .utf8), #"{"repair_tool_call":null}"#)
+    }
+
+    /// The message of the `ToolCallRepair` error Core recorded for a failed
+    /// repair: `{"ToolCallRepair": {"original_error": …, "cause": {"Other": …}}}`.
+    private func repairCause(of toolCall: ToolCall) -> String? {
+        toolCall.error?["ToolCallRepair"]?["cause"]?["Other"]?.stringValue
     }
 }
 

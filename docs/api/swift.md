@@ -110,13 +110,16 @@ let result = try model.generateText(
   with `AIMUX_E_FFI_REENTRANT_CALL` (204), surfaced as
   `DecodingError.dataCorrupted` in the nested call.
 - **Errors.** A `@convention(c)` callback cannot throw into Rust, so anything
-  the closure throws is caught, kept in `repair.lastError`, and treated as
-  "not repaired" (the original validation error stays on the tool call).
+  the closure throws is caught and reported to Core as a failed repair: the
+  tool call comes back `invalid`, with a `ToolCallRepair` error (code 17)
+  carrying the original validation error as `original_error` and the thrown
+  error as its `cause`.
 - **Handle ownership.** `ToolCallRepair` owns the FFI handle from `init` and
-  encodes as that handle (`"repair_tool_call": <handle>`). `close()` releases
-  it and is idempotent; `deinit` calls it. A closed repair encodes as `null`,
-  which the FFI reads as absent. Keep the object alive for as long as a call
-  referencing it is in flight (holding it in the options struct does that).
+  encodes as that handle (`"repair_tool_call": <handle>`). Registering retains
+  the object, so **call `close()` when you are done** — an unclosed repair
+  lives forever. `close()` is idempotent, and a closed repair encodes as
+  `null`, which the FFI reads as absent. Do not close it while a call
+  referencing it is in flight on another thread.
 
 ## API Surface
 

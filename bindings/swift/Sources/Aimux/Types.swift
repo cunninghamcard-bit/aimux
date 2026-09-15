@@ -1180,9 +1180,13 @@ public struct ToolCallRepairContext: Decodable {
 /// The closure runs synchronously on the thread that called
 /// `generateText` / `streamText`, while that call is in progress, and must not
 /// call back into aimux: the FFI layer rejects that as a re-entrant call
-/// (`AIMUX_E_FFI_REENTRANT_CALL`). Errors it throws stay on the Swift side
-/// (`lastError`) and leave the original validation error on the tool call —
-/// nothing unwinds into Rust.
+/// (`AIMUX_E_FFI_REENTRANT_CALL`). Nothing unwinds into Rust — anything the
+/// closure throws is reported to Core as a repair failure, which surfaces on
+/// the tool call as `ToolCallRepair` with the thrown error as its cause.
+///
+/// Call `close()` when you are done with it; registering retains the object,
+/// so an unclosed `ToolCallRepair` lives forever. Do not close it while a call
+/// referencing it is in flight on another thread.
 public final class ToolCallRepair: @unchecked Sendable {
 
     /// One attempt to fix an invalid tool call: return the repaired call, or
@@ -1193,38 +1197,30 @@ public final class ToolCallRepair: @unchecked Sendable {
     private let repair: Repair
     private let lock = NSLock()
     private var handle: UInt64 = 0
-    private var storedError: (any Error)?
 
     /// Register `repair` with the FFI layer.
     public init(_ repair: @escaping Repair) {
         self.repair = repair
-        // `user_data` is an unretained pointer back to self: the handle is
-        // owned by this object, so a call can only be in flight while the
-        // caller still holds it (the options struct keeps a strong reference).
+        // `user_data` is a retained pointer back to self, balanced by close():
+        // the object cannot be deallocated while the trampoline can still reach
+        // it. Leaking a forgotten repair beats a use-after-free.
         handle = aimux_tool_call_repair_new(
-            aimuxRepairToolCall, Unmanaged.passUnretained(self).toOpaque())
+            aimuxRepairToolCall, Unmanaged.passRetained(self).toOpaque())
     }
 
-    deinit { close() }
-
-    /// Release the FFI handle (idempotent). Calls already in flight keep their
-    /// clone. A closed repair encodes as null, which the FFI reads as absent.
+    /// Release the FFI handle and the registration's retain (idempotent). Calls
+    /// already in flight stop invoking the closure and behave as if it had
+    /// returned nil, so this is safe unless an invocation is executing on
+    /// another thread right now. A closed repair encodes as null, which the FFI
+    /// reads as absent.
     public func close() {
         lock.lock()
         let h = handle
         handle = 0
         lock.unlock()
-        if h != 0 { aimux_tool_call_repair_drop(h) }
-    }
-
-    /// The last error the closure threw (or the last context/result coding
-    /// failure). The C contract carries only "repaired" or "not repaired", so a
-    /// failing closure leaves the original validation error on the tool call;
-    /// this is where the cause is kept.
-    public var lastError: (any Error)? {
-        lock.lock()
-        defer { lock.unlock() }
-        return storedError
+        guard h != 0 else { return }
+        aimux_tool_call_repair_drop(h)
+        Unmanaged.passUnretained(self).release()
     }
 
     /// Run the closure for one C callback; nil means "keep the original error".
@@ -1236,10 +1232,11 @@ public final class ToolCallRepair: @unchecked Sendable {
             guard let repaired = try repair(context) else { return nil }
             return aimux_string_new(try AimuxCodable.jsonString(for: repaired))
         } catch {
-            lock.lock()
-            storedError = error
-            lock.unlock()
-            return nil
+            // A @convention(c) function cannot throw into Rust; the error
+            // envelope is the C contract's way to record the failure.
+            let envelope = try? AimuxCodable.jsonString(
+                for: ["error": String(describing: error)])
+            return aimux_string_new(envelope ?? #"{"error":"repair_tool_call failed"}"#)
         }
     }
 }
