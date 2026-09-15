@@ -236,6 +236,36 @@ The timeout sentinel is deliberately **not** an `AimuxException` / `TimeoutError
 Go / Java / Swift / Flutter bindings). `close()` aborts and releases the
 session (idempotent).
 
+## repairToolCall
+
+A `ToolCallRepair` gets one attempt to fix a tool call that failed lookup,
+JSON parsing, or schema validation (AI SDK `repairToolCall`). Return the
+repaired `RawToolCall`, or `null` to keep the original validation error; Core
+parses and validates the returned call from scratch.
+
+```kotlin
+ToolCallRepair { context ->
+    // context: toolCall (raw argument text), error, inputSchema, tools, messages, instructions
+    context.toolCall.copy(input = context.toolCall.input + "}")
+}.use { repair ->
+    model.generateText(prompt, GenerateTextOptions(tools = tools, repairToolCall = repair))
+    repair.lastError            // whatever the function threw, if anything
+}
+```
+
+- **Where it runs.** Synchronously on the thread that called `generateText` /
+  `streamText`, while that call is in progress — not on a background thread.
+- **Re-entrancy.** It runs inside the FFI re-entrancy guard: any `aimux_*`
+  call made from it fails with code 204 (`AIMUX_E_FFI_REENTRANT_CALL`). Do not
+  call back into a `Model` / `TypedModel` from a repair function.
+- **Errors never cross the boundary.** Every `Throwable` is caught inside the
+  callback (it must not unwind into Rust): the tool call keeps its original
+  error and `invalid` flag, and the cause is kept in `repair.lastError`.
+- **Handle ownership.** The object owns an FFI handle and is `Closeable`:
+  `close()` releases it (idempotent), and it serializes as the handle under
+  `repair_tool_call`. Close it only once no call referencing it is in flight;
+  a closed repair serializes as `null` (= no repair).
+
 ## Types
 
 `bindings/kotlin/src/main/kotlin/ai/arcships/aimux/Types.kt` declares the

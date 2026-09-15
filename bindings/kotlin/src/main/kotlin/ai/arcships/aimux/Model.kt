@@ -103,6 +103,14 @@ internal interface AimuxFFI : Library {
 
     fun aimux_drop_handle(handle: Long)
     fun aimux_free_string(ptr: Pointer?)
+    /** Copy a string into an aimux-owned buffer — how a host callback hands a string back; aimux frees it. */
+    fun aimux_string_new(s: String?): Pointer?
+
+    // ── Host callbacks referenced from opts_json by handle ──────────────────
+    // char *(*)(const char *context_json, void *user_data); the returned string
+    // must come from aimux_string_new, NULL keeps the original error.
+    fun aimux_tool_call_repair_new(repair: Callback?, userData: Pointer?): Long
+    fun aimux_tool_call_repair_drop(handle: Long)
 
     // ── Returned error (aimux-error.h): aimux_error_t *. Release exactly once
     // with aimux_error_free (NULL-safe).

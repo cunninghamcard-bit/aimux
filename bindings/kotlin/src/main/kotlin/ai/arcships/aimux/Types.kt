@@ -615,6 +615,11 @@ data class GenerateTextOptions(
     @SerialName("timeout") val timeout: TimeoutConfiguration? = null,
     /** Session identifier (RFC-0024): groups consecutive calls into a session. */
     @SerialName("session_id") val sessionId: String? = null,
+    /**
+     * One attempt to fix an invalid tool call (AI SDK `repairToolCall`).
+     * Serializes as the [ToolCallRepair] FFI handle.
+     */
+    @SerialName("repair_tool_call") val repairToolCall: ToolCallRepair? = null,
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
