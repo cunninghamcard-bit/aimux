@@ -201,6 +201,32 @@ fmt.Println(result)
 > Parameters, return value, and the `raw.content` variants are documented in
 > the [API overview](../API.md#text-generation).
 
+### Tool-call repair
+
+`GenerateTextOptions.RepairToolCall` is the AI SDK `repairToolCall` hook: a
+Go function that gets one attempt to fix a tool call whose arguments failed
+JSON parsing or schema validation (or whose tool name is unknown).
+
+```go
+repair := aimux.NewToolCallRepair(func(ctx aimux.ToolCallRepairContext) (*aimux.RawToolCall, error) {
+    fixed := ctx.ToolCall          // ctx also carries Error, InputSchema, Tools, Messages
+    fixed.Input += "}"             // Input is the model's raw argument text
+    return &fixed, nil             // nil keeps the original validation error
+})
+defer repair.Close()
+
+opts, _ := aimux.MarshalOptions(&aimux.GenerateTextOptions{Tools: tools, RepairToolCall: repair})
+result, err := model.GenerateText(prompt, opts)
+```
+
+The function runs synchronously on the goroutine that called `GenerateText`
+/ `StreamText`, while that call is in progress, and must not call back into
+aimux (the FFI layer rejects that as a re-entrant call). A returned call is
+parsed and validated from scratch; if it is still invalid the tool call comes
+back with `Invalid` set and its typed `Error`. A Go error or panic inside the
+function leaves the original validation error on the tool call and is kept
+on `repair.Err()`.
+
 ## Streaming Generation
 
 Returns generated content as a stream, output chunk by chunk.
@@ -493,6 +519,7 @@ the composite must be closed separately.
 |------|------|------|
 | `*Model` | `GenerateText(promptJson, optsJson) (string, error)` — raw JSON; `Generate(prompt any, opts *GenerateTextOptions) (*GenerateTextResult, error)` — typed | typed input via `Generate` |
 | `*Model` | `StreamText(promptJson, optsJson) *Stream` — raw JSON parts; `Stream(prompt any, opts *GenerateTextOptions) (*TypedStream, error)` — typed `*StreamPart` values | `Stream.Parts()` / `TypedStream.Parts()` channels, `.Err()` |
+| `*ToolCallRepair` | `NewToolCallRepair(fn ToolCallRepairFunc)`; `Err() error`; `Close() error` — set as `GenerateTextOptions.RepairToolCall` | marshals as its FFI handle (`repair_tool_call`) |
 | `*EmbeddingModel` | `Embed(values []string, opts *EmbeddingCallOptions) (string, error)` | returns JSON; use `ParseEmbeddingResult` |
 | `*SpeechModel` | `Generate(opts *SpeechCallOptions) (string, error)` | `ParseSpeechResult` |
 | `*ImageModel` | `Generate(opts *ImageCallOptions) (string, error)` | `ParseImageResult` |

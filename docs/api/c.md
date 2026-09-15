@@ -327,6 +327,8 @@ high-level range. Any fallible call can additionally return 200..206.
 | `aimux_generate_text_as_openai(handle, prompt_json, opts_json, char **out_json)` | [AiMuxError] `ChatCompletion` JSON (RFC-0026) |
 | `aimux_stream_text_as_openai(…)` / `_with_abort(…)` | [AiMuxError] `ChatCompletionChunk` per part; same shapes as `aimux_stream_text` / `_with_abort` |
 | `uint64_t aimux_abort_signal_new(void)` / `void aimux_abort_signal_abort(h)` / `void aimux_abort_signal_drop(h)` | Stream cancellation; infallible |
+| `uint64_t aimux_tool_call_repair_new(aimux_tool_call_repair_fn, void *user_data)` / `void aimux_tool_call_repair_drop(h)` | Host `repair_tool_call` function (see below); infallible |
+| `char *aimux_string_new(const char *s)` | Copy a string into an aimux-owned buffer, for callbacks that return one to aimux |
 
 ### Embedding / speech / image / video / rerank / search / files / transcription
 
@@ -350,6 +352,44 @@ Constructors are `[C ABI]` (they only store config); the calls are `[AiMuxError]
 `opts_json` — it carries the input, not just options; NULL or empty is a
 C ABI failure. `aimux_embed`'s `opts_json` is optional, and
 `aimux_transcription_generate` / `aimux_file_upload` ignore theirs.
+
+### Callbacks in `opts_json`
+
+`opts_json` is the whole `GenerateTextOptions` object, the same shape the
+AI SDK uses. Two of its fields hold live objects rather than data, so they
+travel as handles:
+
+```json
+{"tools": [...], "abort_signal": 7, "repair_tool_call": 42}
+```
+
+- `abort_signal` — a handle from `aimux_abort_signal_new`. Honored by every
+  `aimux_generate_text` / `aimux_stream_text` / `*_as_openai` entry point;
+  the explicit `abort_handle` parameter of the `*_with_abort` variants wins
+  when both are given.
+- `repair_tool_call` — a handle from `aimux_tool_call_repair_new`, wrapping
+  a host function with the AI SDK `repairToolCall` contract:
+
+  ```c
+  typedef char *(*aimux_tool_call_repair_fn)(const char *context_json, void *user_data);
+  ```
+
+  Core calls it at most once when a tool call fails lookup, JSON parsing, or
+  schema validation. `context_json` is `{tool_call, error, input_schema,
+  tools, messages, instructions}` and is valid only during the call. Return
+  the repaired call as `{tool_call_id, tool_name, input, ...}` JSON (`input`
+  is the raw argument text) allocated with `aimux_string_new` — aimux frees
+  it — or `NULL` to keep the original error. Core parses and validates the
+  returned call from scratch; a call that is still invalid comes back with
+  `invalid: true` and its typed `error`.
+
+  The function runs synchronously on the thread that entered the `aimux_*`
+  call, inside the re-entrancy guard: calling any `aimux_*` function from
+  inside it fails with `AIMUX_E_FFI_REENTRANT_CALL` (204). Host exceptions
+  must be caught inside the callback and turned into `NULL`.
+
+A handle field that is not an unsigned integer is `AIMUX_E_FFI_INVALID_WIRE_JSON`
+(202); a released or wrong-typed handle is `AIMUX_E_FFI_INVALID_HANDLE` (203).
 
 ### Transcription streaming (RFC-0028)
 
