@@ -260,9 +260,34 @@ if (result.tool_calls.length > 0) {
 }
 ```
 
-> The `repair_tool_call` callback is Rust-core-only (it cannot cross the FFI
-> boundary); tool calls that stay invalid arrive with `invalid: true` and a
-> typed `error` on the tool call.
+### Repairing invalid tool calls (`repairToolCall`)
+
+When a tool call fails lookup, JSON parsing, or schema validation, the AI SDK
+`repairToolCall` hook gets one attempt to replace it; the returned call is
+parsed and validated from scratch. Return `null` to keep the original error.
+Tool calls that stay invalid arrive with `invalid: true` and a typed `error`.
+
+```typescript
+const result = await generateText(model, "What's the weather in Tokyo?", {
+  tools,
+  repairToolCall: async (context) => {
+    // context: { tool_call, error, input_schema, tools, messages, instructions }
+    // context.tool_call.input is the model's raw argument text.
+    if (!('InvalidToolInput' in context.error)) return null
+    return { ...context.tool_call, input: `${context.tool_call.input}}` }
+  },
+})
+```
+
+The hook runs on the JS event loop while the native call waits on a Tokio
+worker thread, so it may `await` — and may itself call aimux (e.g. ask a model
+to rewrite the arguments against `context.input_schema`). The C ABI's
+re-entrancy restriction does not apply: the Node binding links the core
+directly and holds no handle registry across the callback.
+
+Throwing from the hook does not reject the `generateText` promise — the call
+comes back `invalid: true` with a `ToolCallRepair` error carrying both the
+original validation failure and the thrown cause.
 
 ### Tool Selection Strategy
 

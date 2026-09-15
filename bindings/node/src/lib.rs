@@ -29,6 +29,7 @@ use aimux_core::generate::{
 use aimux_core::language_model::LanguageModel;
 use aimux_core::message::ModelPrompt;
 use aimux_core::openai_output::OpenAiStreamOptions;
+use aimux_core::parse_tool_call::{RawToolCall, ToolCallRepair, ToolCallRepairContext};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
@@ -81,6 +82,141 @@ impl AbortBridge {
 impl AbortBridge {
     fn core_signal(&self) -> aimux_core::AbortSignal {
         (*self.signal).clone()
+    }
+}
+
+/// Wire shape of a `RawToolCall` — the core struct holds no serde derives —
+/// in both directions of the repair callback. Same shape as the C ABI's.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RawToolCallWire {
+    tool_call_id: String,
+    tool_name: String,
+    input: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_executed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dynamic: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    thought_signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_metadata: Option<aimux_core::types::ProviderMetadata>,
+}
+
+/// `ToolCallRepairContext` as JS sees it: the AI SDK `repairToolCall`
+/// arguments, with `input_schema` pre-resolved for the called tool.
+#[derive(serde::Serialize)]
+struct ToolCallRepairContextWire<'a> {
+    tool_call: RawToolCallWire,
+    error: &'a AiMuxError,
+    input_schema: serde_json::Value,
+    tools: &'a [aimux_core::tool::Tool],
+    messages: &'a [aimux_core::message::ModelMessage],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instructions: Option<&'a str>,
+}
+
+/// `Weak` — the registered callback alone must not keep the Node event loop
+/// alive; the JS caller's pending promise does that for the call's duration.
+type RepairTsfn = napi::threadsafe_function::ThreadsafeFunction<
+    String,
+    Promise<Option<String>>,
+    String,
+    Status,
+    false,
+    true,
+>;
+
+/// A bridge from a JS `repairToolCall` function to the core's
+/// `GenerateTextOptions.repair_tool_call` (the AI SDK hook).
+///
+/// Constructed on the JS thread like [`AbortBridge`], then passed to
+/// `generateText` / `streamText`. The JS function receives the repair context
+/// as a JSON string and returns a promise of the repaired `RawToolCall` JSON,
+/// or `null` to keep the original validation error. It runs on the JS event
+/// loop while the Rust call waits on a tokio worker, so — unlike the C ABI's
+/// callback — it may call back into aimux.
+///
+/// ```ts
+/// const repair = new ToolCallRepairBridge(async (json) => …)
+/// await model.generateText(prompt, options, undefined, repair)
+/// ```
+#[napi]
+pub struct ToolCallRepairBridge {
+    repair: ToolCallRepair,
+}
+
+#[napi]
+impl ToolCallRepairBridge {
+    #[napi(
+        constructor,
+        ts_args_type = "repair: (contextJson: string) => Promise<string | null>"
+    )]
+    pub fn new(repair: Function<String, Promise<Option<String>>>) -> napi::Result<Self> {
+        let call: Arc<RepairTsfn> = Arc::new(
+            repair
+                .build_threadsafe_function()
+                .callee_handled::<false>()
+                .weak::<true>()
+                .build()?,
+        );
+        Ok(Self {
+            repair: ToolCallRepair::new(move |context: ToolCallRepairContext| {
+                let call = call.clone();
+                async move {
+                    let json = serde_json::to_string(&ToolCallRepairContextWire {
+                        tool_call: RawToolCallWire {
+                            tool_call_id: context.tool_call.tool_call_id.clone(),
+                            tool_name: context.tool_call.tool_name.clone(),
+                            input: context.tool_call.input.clone(),
+                            provider_executed: context.tool_call.provider_executed,
+                            dynamic: context.tool_call.dynamic,
+                            thought_signature: context.tool_call.thought_signature.clone(),
+                            provider_metadata: context.tool_call.provider_metadata.clone(),
+                        },
+                        error: &context.error,
+                        input_schema: context.input_schema(&context.tool_call.tool_name),
+                        tools: &context.tools,
+                        messages: &context.messages,
+                        instructions: context.instructions.as_deref(),
+                    })
+                    .map_err(|e| AiMuxError::Other(format!("repairToolCall context: {e}")))?;
+
+                    // `call_async_catch`, not `call_async`: a JS throw stays an
+                    // `Err` instead of reaching `napi_fatal_exception`.
+                    let repaired = call
+                        .call_async_catch(json)
+                        .await
+                        .map_err(|e| AiMuxError::Other(format!("repairToolCall: {e}")))?
+                        .await
+                        .map_err(|e| AiMuxError::Other(format!("repairToolCall: {e}")))?;
+
+                    let Some(repaired) = repaired else {
+                        return Ok(None);
+                    };
+                    let repaired: RawToolCallWire =
+                        serde_json::from_str(&repaired).map_err(|e| {
+                            AiMuxError::Other(format!(
+                                "repairToolCall returned invalid RawToolCall JSON: {e}"
+                            ))
+                        })?;
+                    Ok(Some(RawToolCall {
+                        tool_call_id: repaired.tool_call_id,
+                        tool_name: repaired.tool_name,
+                        input: repaired.input,
+                        provider_executed: repaired.provider_executed,
+                        dynamic: repaired.dynamic,
+                        thought_signature: repaired.thought_signature,
+                        provider_metadata: repaired.provider_metadata,
+                    }))
+                }
+            }),
+        })
+    }
+}
+
+impl ToolCallRepairBridge {
+    fn core_repair(&self) -> ToolCallRepair {
+        self.repair.clone()
     }
 }
 
@@ -210,12 +346,14 @@ impl Model {
         prompt: String,
         options: Option<String>,
         bridge: Option<&AbortBridge>,
+        repair: Option<&ToolCallRepairBridge>,
     ) -> AimuxResult<String> {
         AimuxResult({
             let __r: crate::error::MResult<String> = async {
                 let parsed_prompt = parse_prompt(&prompt)?;
                 let mut opts = parse_opts(options.as_deref())?;
                 opts.abort_signal = bridge.map(|b| b.core_signal());
+                opts.repair_tool_call = repair.map(|r| r.core_repair());
 
                 let result = generate_text(&*self.inner, parsed_prompt, opts)
                     .await
@@ -240,12 +378,14 @@ impl Model {
         prompt: String,
         options: Option<String>,
         bridge: Option<&AbortBridge>,
+        repair: Option<&ToolCallRepairBridge>,
     ) -> AimuxResult<String> {
         AimuxResult({
             let __r: crate::error::MResult<String> = async {
                 let parsed_prompt = parse_prompt(&prompt)?;
                 let mut opts = parse_opts(options.as_deref())?;
                 opts.abort_signal = bridge.map(|b| b.core_signal());
+                opts.repair_tool_call = repair.map(|r| r.core_repair());
 
                 let result = generate_object(&*self.inner, parsed_prompt, opts)
                     .await
@@ -269,12 +409,14 @@ impl Model {
         prompt: String,
         options: Option<String>,
         bridge: Option<&AbortBridge>,
+        repair: Option<&ToolCallRepairBridge>,
     ) -> AimuxResult<String> {
         AimuxResult({
             let __r: crate::error::MResult<String> = async {
                 let parsed_prompt = parse_prompt(&prompt)?;
                 let mut opts = parse_opts(options.as_deref())?;
                 opts.abort_signal = bridge.map(|b| b.core_signal());
+                opts.repair_tool_call = repair.map(|r| r.core_repair());
 
                 let stream_result = stream_text(&*self.inner, parsed_prompt, opts)
                     .await
@@ -301,6 +443,7 @@ impl Model {
         prompt: String,
         options: Option<String>,
         bridge: Option<&AbortBridge>,
+        repair: Option<&ToolCallRepairBridge>,
     ) -> AimuxResult<StreamTextGenerator> {
         AimuxResult({
             let __r: crate::error::MResult<StreamTextGenerator> = async {
@@ -308,6 +451,7 @@ impl Model {
                 // Extract the core signal on the napi thread; it is `Send` and can
                 // move into the spawned task.
                 let abort_signal = bridge.map(|b| b.core_signal());
+                let repair_tool_call = repair.map(|r| r.core_repair());
 
                 let (tx, rx) =
                     tokio::sync::mpsc::channel::<std::result::Result<String, AiMuxBindingError>>(64);
@@ -329,6 +473,7 @@ impl Model {
                         }
                     };
                     opts.abort_signal = abort_signal;
+                    opts.repair_tool_call = repair_tool_call;
 
                     match stream_text(&*model, prompt, opts).await {
                         Ok(stream_result) => {
@@ -402,12 +547,14 @@ impl Model {
         prompt: String,
         options: Option<String>,
         bridge: Option<&AbortBridge>,
+        repair: Option<&ToolCallRepairBridge>,
     ) -> AimuxResult<String> {
         AimuxResult({
             let __r: crate::error::MResult<String> = async {
                 let parsed_prompt = parse_prompt(&prompt)?;
                 let mut opts = parse_opts(options.as_deref())?;
                 opts.abort_signal = bridge.map(|b| b.core_signal());
+                opts.repair_tool_call = repair.map(|r| r.core_repair());
 
                 let result = generate_text_as_openai(&*self.inner, parsed_prompt, opts)
                     .await
@@ -430,11 +577,13 @@ impl Model {
         prompt: String,
         options: Option<String>,
         bridge: Option<&AbortBridge>,
+        repair: Option<&ToolCallRepairBridge>,
     ) -> AimuxResult<StreamTextGenerator> {
         AimuxResult({
             let __r: crate::error::MResult<StreamTextGenerator> = async {
                 let model = self.inner.clone();
                 let abort_signal = bridge.map(|b| b.core_signal());
+                let repair_tool_call = repair.map(|r| r.core_repair());
 
                 let (tx, rx) =
                     tokio::sync::mpsc::channel::<std::result::Result<String, AiMuxBindingError>>(64);
@@ -475,6 +624,7 @@ impl Model {
                         .unwrap_or_default();
 
                     opts.abort_signal = abort_signal;
+                    opts.repair_tool_call = repair_tool_call;
 
                     match stream_text_as_openai(&*model, prompt, opts, stream_options).await {
                         Ok(stream_result) => {

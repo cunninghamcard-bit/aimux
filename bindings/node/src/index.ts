@@ -15,6 +15,7 @@
 import * as native from './native.ts'
 import {
   AbortBridge,
+  ToolCallRepairBridge,
   createProvider as rawCreateProvider,
   getModelSpecs as rawGetModelSpecs,
 } from './native.ts'
@@ -52,6 +53,8 @@ import type {
   RuntimeModel,
   VideoCallOptions,
   VideoPollOptions,
+  AiMuxError,
+  JsonValue,
 } from './types'
 
 // Error hierarchy (throw/catch). Wire payload type `AiMuxError` lives under StreamPart only.
@@ -89,6 +92,7 @@ export {
   Model,
   StreamTextGenerator,
   AbortBridge,
+  ToolCallRepairBridge,
   initLogging,
   recordingFlush,
   recordingStop,
@@ -155,6 +159,70 @@ export type {
   RuntimeModel,
   VideoCallOptions,
   VideoPollOptions,
+  AiMuxError,
+  JsonValue,
+}
+
+/**
+ * A tool call as the provider delivered it, before the core parsed and
+ * validated its input — `input` is the model's raw argument text. This is both
+ * what {@link RepairToolCall} is handed and what it returns.
+ */
+export type RawToolCall = {
+  tool_call_id: string
+  tool_name: string
+  input: string
+  provider_executed?: boolean | null
+  dynamic?: boolean | null
+  thought_signature?: string | null
+  provider_metadata?: JsonValue | null
+}
+
+/** The AI SDK `repairToolCall` arguments, with `input_schema` pre-resolved. */
+export type ToolCallRepairContext = {
+  tool_call: RawToolCall
+  error: AiMuxError
+  input_schema: JsonValue
+  tools: Tool[]
+  messages: ModelMessage[]
+  instructions?: string
+}
+
+/**
+ * The AI SDK `repairToolCall` hook. Called at most once, when a tool call
+ * fails lookup, JSON parsing, or schema validation; the returned call is
+ * parsed and validated from scratch. Return `null` to keep the original error.
+ *
+ * It runs on the JS event loop while the native call is in flight, so it may
+ * itself call aimux (e.g. ask a model to fix the arguments). Throwing leaves
+ * the call invalid with a `ToolCallRepair` error.
+ */
+export type RepairToolCall = (
+  context: ToolCallRepairContext,
+) => RawToolCall | null | Promise<RawToolCall | null>
+
+/** Typed generation options plus the live (non-JSON) `repairToolCall` hook. */
+export type TextOptions = GenerateTextOptions & { repairToolCall?: RepairToolCall }
+
+/**
+ * Split the options object into the JSON the native layer takes and the live
+ * repair callback, which is a JS function and cannot cross as JSON.
+ */
+function splitOptions(options?: TextOptions): {
+  optsJson?: string
+  repair?: ToolCallRepairBridge
+} {
+  if (!options) return {}
+  const { repairToolCall, ...rest } = options
+  return {
+    optsJson: JSON.stringify(rest),
+    repair: repairToolCall
+      ? new ToolCallRepairBridge(async (contextJson: string) => {
+          const repaired = await repairToolCall(JSON.parse(contextJson) as ToolCallRepairContext)
+          return repaired ? JSON.stringify(repaired) : null
+        })
+      : undefined,
+  }
 }
 
 /**
@@ -172,10 +240,10 @@ export type RawModel = Model
  * @param model   - A raw model instance from `openai()`, `anthropic()`, etc.
  * @param prompt  - A plain string or an array of typed chat messages.
  * @param options - Optional typed generation options (tools, tool_choice,
- *                  temperature, response_format, …). The Rust `repair_tool_call`
- *                  callback is core-only (it cannot cross the FFI boundary);
- *                  invalid tool calls arrive with `invalid`/`error` set on the
- *                  tool call.
+ *                  temperature, response_format, …), plus the
+ *                  {@link RepairToolCall} hook as `repairToolCall`. Tool calls
+ *                  that stay invalid (no hook, or it returned `null`) arrive
+ *                  with `invalid`/`error` set on the tool call.
  * @param signal  - Optional `AbortSignal`; aborting it cancels the call.
  *
  * Internally calls the raw
@@ -193,12 +261,12 @@ export type RawModel = Model
 export async function generateText(
   model: RawModel,
   prompt: string | ModelMessage[],
-  options?: GenerateTextOptions,
+  options?: TextOptions,
   signal?: AbortSignal,
 ): Promise<GenerateTextResult> {
-  const optsJson = options ? JSON.stringify(options) : undefined
+  const { optsJson, repair } = splitOptions(options)
   const bridge = signal ? new AbortBridge(signal) : undefined
-  const resultJson = await model.generateText(JSON.stringify(prompt), optsJson, bridge)
+  const resultJson = await model.generateText(JSON.stringify(prompt), optsJson, bridge, repair)
   return JSON.parse(resultJson) as GenerateTextResult
 }
 
@@ -226,12 +294,12 @@ export async function generateText(
 export async function* streamText(
   model: RawModel,
   prompt: string | ModelMessage[],
-  options?: GenerateTextOptions,
+  options?: TextOptions,
   signal?: AbortSignal,
 ): AsyncGenerator<StreamPart> {
-  const optsJson = options ? JSON.stringify(options) : undefined
+  const { optsJson, repair } = splitOptions(options)
   const bridge = signal ? new AbortBridge(signal) : undefined
-  const gen = await model.streamText(JSON.stringify(prompt), optsJson, bridge)
+  const gen = await model.streamText(JSON.stringify(prompt), optsJson, bridge, repair)
   for await (const json of gen) {
     yield JSON.parse(json) as StreamPart
   }
@@ -272,12 +340,12 @@ export function getSessions(): SessionView[] {
 export async function generateTextAsOpenai(
   model: RawModel,
   prompt: string | ModelMessage[],
-  options?: GenerateTextOptions,
+  options?: TextOptions,
   signal?: AbortSignal,
 ): Promise<ChatCompletion> {
-  const optsJson = options ? JSON.stringify(options) : undefined
+  const { optsJson, repair } = splitOptions(options)
   const bridge = signal ? new AbortBridge(signal) : undefined
-  const resultJson = await model.generateTextAsOpenai(JSON.stringify(prompt), optsJson, bridge)
+  const resultJson = await model.generateTextAsOpenai(JSON.stringify(prompt), optsJson, bridge, repair)
   return JSON.parse(resultJson) as ChatCompletion
 }
 
@@ -301,12 +369,12 @@ export async function generateTextAsOpenai(
 export async function* streamTextAsOpenai(
   model: RawModel,
   prompt: string | ModelMessage[],
-  options?: GenerateTextOptions,
+  options?: TextOptions,
   signal?: AbortSignal,
 ): AsyncGenerator<ChatCompletionChunk> {
-  const optsJson = options ? JSON.stringify(options) : undefined
+  const { optsJson, repair } = splitOptions(options)
   const bridge = signal ? new AbortBridge(signal) : undefined
-  const gen = await model.streamTextAsOpenai(JSON.stringify(prompt), optsJson, bridge)
+  const gen = await model.streamTextAsOpenai(JSON.stringify(prompt), optsJson, bridge, repair)
   for await (const json of gen) {
     yield JSON.parse(json) as ChatCompletionChunk
   }

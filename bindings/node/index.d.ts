@@ -102,7 +102,7 @@ export declare class Model {
    * aborting the signal cancels the call.
    * Returns a JSON-serialized `GenerateTextResult`.
    */
-  generateText(prompt: string, options?: string | undefined | null, bridge?: AbortBridge | undefined | null): Promise<string>
+  generateText(prompt: string, options?: string | undefined | null, bridge?: AbortBridge | undefined | null, repair?: ToolCallRepairBridge | undefined | null): Promise<string>
   /**
    * Generate a structured JSON object from the model (M12, RFC-0016).
    *
@@ -111,7 +111,7 @@ export declare class Model {
    * via `options` for schema control; the function applies JSON repair
    * before parsing.
    */
-  generateObject(prompt: string, options?: string | undefined | null, bridge?: AbortBridge | undefined | null): Promise<string>
+  generateObject(prompt: string, options?: string | undefined | null, bridge?: AbortBridge | undefined | null, repair?: ToolCallRepairBridge | undefined | null): Promise<string>
   /**
    * Consume a stream to completion and return the aggregated result
    * (M11, RFC-0016).
@@ -119,27 +119,27 @@ export declare class Model {
    * Drives `streamText` to completion and returns a JSON-serialized
    * `StreamTextResultAggregated` (the fully-consumed stream summary).
    */
-  consumeStreamText(prompt: string, options?: string | undefined | null, bridge?: AbortBridge | undefined | null): Promise<string>
+  consumeStreamText(prompt: string, options?: string | undefined | null, bridge?: AbortBridge | undefined | null, repair?: ToolCallRepairBridge | undefined | null): Promise<string>
   /**
    * Stream text from the model.
    *
    * Returns an `AsyncGenerator<string>` yielding `StreamPart` JSON strings.
    * Use `for await (const part of model.streamText(...))` to consume.
    */
-  streamText(prompt: string, options?: string | undefined | null, bridge?: AbortBridge | undefined | null): Promise<AsyncGenerator<string>>
+  streamText(prompt: string, options?: string | undefined | null, bridge?: AbortBridge | undefined | null, repair?: ToolCallRepairBridge | undefined | null): Promise<AsyncGenerator<string>>
   /**
    * Generate text and return an OpenAI Chat Completion (non-streaming).
    *
    * Returns a JSON-serialized `ChatCompletion`. Works with any provider.
    */
-  generateTextAsOpenai(prompt: string, options?: string | undefined | null, bridge?: AbortBridge | undefined | null): Promise<string>
+  generateTextAsOpenai(prompt: string, options?: string | undefined | null, bridge?: AbortBridge | undefined | null, repair?: ToolCallRepairBridge | undefined | null): Promise<string>
   /**
    * Stream text as OpenAI Chat Completion chunks.
    *
    * Returns an `AsyncGenerator<string>` yielding `ChatCompletionChunk` JSON
    * strings. Works with any provider.
    */
-  streamTextAsOpenai(prompt: string, options?: string | undefined | null, bridge?: AbortBridge | undefined | null): Promise<AsyncGenerator<string>>
+  streamTextAsOpenai(prompt: string, options?: string | undefined | null, bridge?: AbortBridge | undefined | null, repair?: ToolCallRepairBridge | undefined | null): Promise<AsyncGenerator<string>>
 }
 
 /**
@@ -212,6 +212,26 @@ export declare class SpeechModel {
 export declare class StreamTextGenerator {
 
   [globalThis.Symbol.asyncIterator](): globalThis.__NapiRsAsyncGenerator<StreamTextGenerator, StreamItem, void, undefined>
+}
+
+/**
+ * A bridge from a JS `repairToolCall` function to the core's
+ * `GenerateTextOptions.repair_tool_call` (the AI SDK hook).
+ *
+ * Constructed on the JS thread like [`AbortBridge`], then passed to
+ * `generateText` / `streamText`. The JS function receives the repair context
+ * as a JSON string and returns a promise of the repaired `RawToolCall` JSON,
+ * or `null` to keep the original validation error. It runs on the JS event
+ * loop while the Rust call waits on a tokio worker, so — unlike the C ABI's
+ * callback — it may call back into aimux.
+ *
+ * ```ts
+ * const repair = new ToolCallRepairBridge(async (json) => …)
+ * await model.generateText(prompt, options, undefined, repair)
+ * ```
+ */
+export declare class ToolCallRepairBridge {
+  constructor(repair: (contextJson: string) => Promise<string | null>)
 }
 
 export declare class TranscriptionModel {

@@ -710,6 +710,7 @@ module.exports.RerankingModel = nativeBinding.RerankingModel
 module.exports.SearchModel = nativeBinding.SearchModel
 module.exports.SpeechModel = nativeBinding.SpeechModel
 module.exports.StreamTextGenerator = nativeBinding.StreamTextGenerator
+module.exports.ToolCallRepairBridge = nativeBinding.ToolCallRepairBridge
 module.exports.TranscriptionModel = nativeBinding.TranscriptionModel
 module.exports.TranscriptionSession = nativeBinding.TranscriptionSession
 module.exports.VideoModel = nativeBinding.VideoModel
