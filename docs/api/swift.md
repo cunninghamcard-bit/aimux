@@ -84,6 +84,40 @@ model.streamText(prompt: "\"Write a haiku\"") { part in
 }
 ```
 
+## repairToolCall
+
+`GenerateTextOptions.repairToolCall` takes a `ToolCallRepair` — one attempt to
+fix a tool call that failed tool lookup, JSON parsing, or schema validation.
+Return the repaired `RawToolCall` (its `input` is argument *text*, re-parsed and
+re-validated by Core), or `nil` to keep the original error.
+
+```swift
+let repair = ToolCallRepair { context in
+    var fixed = context.toolCall          // RawToolCall (raw argument text)
+    fixed.input += "}"                    // context.error / .inputSchema / .tools / .messages
+    return fixed
+}
+defer { repair.close() }
+
+let result = try model.generateText(
+    prompt: .text("What's the weather in Tokyo?"),
+    options: GenerateTextOptions(tools: tools, repairToolCall: repair))
+```
+
+- **Where it runs.** Synchronously, on the thread that called `generateText` /
+  `streamText`, while that call is in progress — like the stream callbacks.
+- **Re-entrancy.** It must not call any aimux API: the FFI layer rejects that
+  with `AIMUX_E_FFI_REENTRANT_CALL` (204), surfaced as
+  `DecodingError.dataCorrupted` in the nested call.
+- **Errors.** A `@convention(c)` callback cannot throw into Rust, so anything
+  the closure throws is caught, kept in `repair.lastError`, and treated as
+  "not repaired" (the original validation error stays on the tool call).
+- **Handle ownership.** `ToolCallRepair` owns the FFI handle from `init` and
+  encodes as that handle (`"repair_tool_call": <handle>`). `close()` releases
+  it and is idempotent; `deinit` calls it. A closed repair encodes as `null`,
+  which the FFI reads as absent. Keep the object alive for as long as a call
+  referencing it is in flight (holding it in the options struct does that).
+
 ## API Surface
 
 | API | Signature | Description |
@@ -223,6 +257,10 @@ mirroring the shared JSON shape — usable with the JSON-string APIs:
 `ModelMessage`, `ModelPrompt`, `ToolCall`, `FileBytes`, `FileData`,
 `GenerateContent`, `GenerateResult`, `GenerateTextResult`,
 `GenerateTextOptions`, `StreamPart` (all `Codable, Equatable`).
+
+`RawToolCall` (a tool call whose `input` is still raw argument text),
+`ToolCallRepairContext` and `ToolCallRepair` belong to
+[repairToolCall](#repairtoolcall).
 
 `ToolCall` (top-level and `StreamPart.toolCall`) carries `providerMetadata`
 plus `invalid` (set by Core when tool lookup, input parse, or schema validation

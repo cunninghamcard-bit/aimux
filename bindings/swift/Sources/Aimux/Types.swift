@@ -1118,6 +1118,165 @@ public struct TimeoutConfiguration: Codable, Equatable {
     }
 }
 
+// MARK: - Tool call repair (AI SDK `repairToolCall`)
+
+/// A tool call before Core parses its input: `input` is the model's argument
+/// text verbatim, possibly malformed.
+public struct RawToolCall: Codable, Equatable {
+    public var toolCallId: String
+    public var toolName: String
+    public var input: String
+    public var providerExecuted: Bool?
+    public var dynamic: Bool?
+    public var thoughtSignature: String?
+    public var providerMetadata: JSONValue?
+
+    enum CodingKeys: String, CodingKey {
+        case toolCallId = "tool_call_id"
+        case toolName = "tool_name"
+        case input
+        case providerExecuted = "provider_executed"
+        case dynamic
+        case thoughtSignature = "thought_signature"
+        case providerMetadata = "provider_metadata"
+    }
+
+    public init(toolCallId: String, toolName: String, input: String,
+                providerExecuted: Bool? = nil, dynamic: Bool? = nil,
+                thoughtSignature: String? = nil, providerMetadata: JSONValue? = nil) {
+        self.toolCallId = toolCallId; self.toolName = toolName; self.input = input
+        self.providerExecuted = providerExecuted; self.dynamic = dynamic
+        self.thoughtSignature = thoughtSignature; self.providerMetadata = providerMetadata
+    }
+}
+
+/// What a `ToolCallRepair` closure receives — the AI SDK `repairToolCall`
+/// arguments.
+public struct ToolCallRepairContext: Decodable {
+    /// The call that failed tool lookup, JSON parsing, or schema validation.
+    public var toolCall: RawToolCall
+    /// The typed failure, same shape as `ToolCall.error`.
+    public var error: JSONValue
+    /// JSON Schema of the called tool; an empty-object schema when the tool
+    /// is unknown.
+    public var inputSchema: JSONValue
+    public var tools: [Tool]
+    /// The prompt of the current step.
+    public var messages: [ModelMessage]
+    public var instructions: String?
+
+    enum CodingKeys: String, CodingKey {
+        case toolCall = "tool_call"
+        case error
+        case inputSchema = "input_schema"
+        case tools, messages, instructions
+    }
+}
+
+/// A host repair function for invalid tool calls, registered with the FFI
+/// layer. Assign it to `GenerateTextOptions.repairToolCall`; it encodes as its
+/// handle (`"repair_tool_call": <handle>`).
+///
+/// The closure runs synchronously on the thread that called
+/// `generateText` / `streamText`, while that call is in progress, and must not
+/// call back into aimux: the FFI layer rejects that as a re-entrant call
+/// (`AIMUX_E_FFI_REENTRANT_CALL`). Errors it throws stay on the Swift side
+/// (`lastError`) and leave the original validation error on the tool call —
+/// nothing unwinds into Rust.
+public final class ToolCallRepair: @unchecked Sendable {
+
+    /// One attempt to fix an invalid tool call: return the repaired call, or
+    /// nil to keep the original validation error. Core parses and validates
+    /// the returned call from scratch.
+    public typealias Repair = (ToolCallRepairContext) throws -> RawToolCall?
+
+    private let repair: Repair
+    private let lock = NSLock()
+    private var handle: UInt64 = 0
+    private var storedError: (any Error)?
+
+    /// Register `repair` with the FFI layer.
+    public init(_ repair: @escaping Repair) {
+        self.repair = repair
+        // `user_data` is an unretained pointer back to self: the handle is
+        // owned by this object, so a call can only be in flight while the
+        // caller still holds it (the options struct keeps a strong reference).
+        handle = aimux_tool_call_repair_new(
+            aimuxRepairToolCall, Unmanaged.passUnretained(self).toOpaque())
+    }
+
+    deinit { close() }
+
+    /// Release the FFI handle (idempotent). Calls already in flight keep their
+    /// clone. A closed repair encodes as null, which the FFI reads as absent.
+    public func close() {
+        lock.lock()
+        let h = handle
+        handle = 0
+        lock.unlock()
+        if h != 0 { aimux_tool_call_repair_drop(h) }
+    }
+
+    /// The last error the closure threw (or the last context/result coding
+    /// failure). The C contract carries only "repaired" or "not repaired", so a
+    /// failing closure leaves the original validation error on the tool call;
+    /// this is where the cause is kept.
+    public var lastError: (any Error)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedError
+    }
+
+    /// Run the closure for one C callback; nil means "keep the original error".
+    /// The returned string is owned by aimux (`aimux_string_new`).
+    fileprivate func invoke(_ contextJson: String) -> UnsafeMutablePointer<CChar>? {
+        do {
+            let context = try JSONDecoder().decode(
+                ToolCallRepairContext.self, from: Data(contextJson.utf8))
+            guard let repaired = try repair(context) else { return nil }
+            return aimux_string_new(try AimuxCodable.jsonString(for: repaired))
+        } catch {
+            lock.lock()
+            storedError = error
+            lock.unlock()
+            return nil
+        }
+    }
+}
+
+extension ToolCallRepair: Codable, Equatable {
+    /// Encodes as the FFI handle — how the function reaches `opts_json`.
+    public func encode(to encoder: Encoder) throws {
+        lock.lock()
+        let h = handle
+        lock.unlock()
+        var c = encoder.singleValueContainer()
+        if h == 0 { try c.encodeNil() } else { try c.encode(h) }
+    }
+
+    /// A live host function cannot be rebuilt from a handle number; only
+    /// present so `GenerateTextOptions` keeps its synthesized `Codable`.
+    public convenience init(from decoder: Decoder) throws {
+        throw aimuxDecodingError(decoder.codingPath, "repair_tool_call cannot be decoded")
+    }
+
+    /// Identity — a registered function has no value equality.
+    public static func == (lhs: ToolCallRepair, rhs: ToolCallRepair) -> Bool { lhs === rhs }
+}
+
+/// C trampoline: `char *(*)(const char *context_json, void *user_data)`.
+/// A `@convention(c)` function cannot capture or throw, so the owning
+/// `ToolCallRepair` arrives through `user_data` and catches inside `invoke`.
+private func aimuxRepairToolCall(
+    _ contextJson: UnsafePointer<CChar>?,
+    _ userData: UnsafeMutableRawPointer?
+) -> UnsafeMutablePointer<CChar>? {
+    guard let contextJson, let userData else { return nil }
+    return Unmanaged<ToolCallRepair>.fromOpaque(userData)
+        .takeUnretainedValue()
+        .invoke(String(cString: contextJson))
+}
+
 // MARK: - GenerateTextOptions
 
 /// User-facing options for `generate_text` / `stream_text`.
@@ -1146,6 +1305,8 @@ public struct GenerateTextOptions: Codable, Equatable {
     public var timeout: TimeoutConfiguration?
     public var includeRawChunks: Bool?
     public var sessionId: String?
+    /// Host repair function for invalid tool calls; encoded as its FFI handle.
+    public var repairToolCall: ToolCallRepair?
 
     enum CodingKeys: String, CodingKey {
         case maxOutputTokens = "max_output_tokens"
@@ -1166,6 +1327,7 @@ public struct GenerateTextOptions: Codable, Equatable {
         case timeout
         case includeRawChunks = "include_raw_chunks"
         case sessionId = "session_id"
+        case repairToolCall = "repair_tool_call"
     }
 
     public init(maxOutputTokens: UInt32? = nil, temperature: Double? = nil,
@@ -1178,7 +1340,8 @@ public struct GenerateTextOptions: Codable, Equatable {
                 bodyOverrides: JSONValue? = nil, maxRetries: UInt32? = nil,
                 timeout: TimeoutConfiguration? = nil,
                 includeRawChunks: Bool? = nil,
-                sessionId: String? = nil) {
+                sessionId: String? = nil,
+                repairToolCall: ToolCallRepair? = nil) {
         self.maxOutputTokens = maxOutputTokens; self.temperature = temperature
         self.stopSequences = stopSequences; self.topP = topP; self.topK = topK
         self.presencePenalty = presencePenalty; self.frequencyPenalty = frequencyPenalty
@@ -1188,6 +1351,7 @@ public struct GenerateTextOptions: Codable, Equatable {
         self.bodyOverrides = bodyOverrides; self.maxRetries = maxRetries; self.timeout = timeout
         self.includeRawChunks = includeRawChunks
         self.sessionId = sessionId
+        self.repairToolCall = repairToolCall
     }
 }
 

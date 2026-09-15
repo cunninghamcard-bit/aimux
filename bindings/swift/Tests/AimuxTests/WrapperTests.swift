@@ -434,3 +434,138 @@ private let openaiStreamToolEvents: [[String: Any]] = [
         "usage": ["prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7],
     ],
 ]
+
+// MARK: - repairToolCall (host repair function, passed by handle in opts_json)
+
+final class ToolCallRepairTests: XCTestCase {
+
+    private let weatherTools: [Tool] = [
+        .function(FunctionTool(
+            name: "get_weather",
+            inputSchema: jv(#"{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}"#)
+        )),
+    ]
+
+    /// A mock returning the malformed tool call, plus a model pointed at it.
+    private func malformedToolCallSetup() throws -> (MockHTTPServer, Model) {
+        let server = MockHTTPServer(response: .json(openaiMalformedToolCallResponse))
+        try server.start()
+        let model = try Model.openai(
+            apiKey: "test-key", modelId: "gpt-4o", baseUrl: server.baseURL)
+        return (server, model)
+    }
+
+    private func generate(with repair: ToolCallRepair, on model: Model) throws -> ToolCall {
+        let result = try model.generateText(
+            prompt: .text("What's the weather in Tokyo?"),
+            options: GenerateTextOptions(tools: weatherTools, repairToolCall: repair))
+        XCTAssertEqual(result.toolCalls.count, 1)
+        return result.toolCalls[0]
+    }
+
+    /// The closure adds the brace the model dropped; Core re-parses the call.
+    func testRepairFixesMalformedArguments() throws {
+        let (server, model) = try malformedToolCallSetup()
+        defer { server.stop() }
+
+        var calls = 0
+        let repair = ToolCallRepair { context in
+            calls += 1
+            XCTAssertEqual(context.toolCall.toolName, "get_weather")
+            XCTAssertEqual(context.tools.count, 1)
+            XCTAssertNotNil(context.inputSchema["properties"])
+            XCTAssertNotNil(context.error["InvalidToolInput"])
+            var fixed = context.toolCall
+            fixed.input += "}"
+            return fixed
+        }
+        defer { repair.close() }
+
+        let toolCall = try generate(with: repair, on: model)
+        XCTAssertEqual(calls, 1)
+        XCTAssertNil(toolCall.invalid)
+        XCTAssertEqual(toolCall.input["location"]?.stringValue, "Tokyo")
+        XCTAssertNil(repair.lastError)
+    }
+
+    /// nil keeps the original validation error and the raw argument text.
+    func testRepairReturningNilKeepsTheOriginalError() throws {
+        let (server, model) = try malformedToolCallSetup()
+        defer { server.stop() }
+
+        let repair = ToolCallRepair { _ in nil }
+        defer { repair.close() }
+
+        let toolCall = try generate(with: repair, on: model)
+        XCTAssertEqual(toolCall.invalid, true)
+        XCTAssertEqual(toolCall.input.stringValue, #"{"location":"Tokyo""#)
+        XCTAssertNil(repair.lastError)
+    }
+
+    /// A thrown error stays on the Swift side and leaves the call invalid.
+    func testRepairThrowingIsKeptOnLastError() throws {
+        struct Boom: Error {}
+        let (server, model) = try malformedToolCallSetup()
+        defer { server.stop() }
+
+        let repair = ToolCallRepair { _ in throw Boom() }
+        defer { repair.close() }
+
+        let toolCall = try generate(with: repair, on: model)
+        XCTAssertEqual(toolCall.invalid, true)
+        XCTAssertNotNil(repair.lastError as? Boom)
+    }
+
+    /// Calling back into aimux from the closure is rejected as a re-entrant
+    /// call (AIMUX_E_FFI_REENTRANT_CALL = 204).
+    func testRepairCallingBackIntoAimuxIsReentrant() throws {
+        let (server, model) = try malformedToolCallSetup()
+        defer { server.stop() }
+
+        var nested: (any Error)?
+        let repair = ToolCallRepair { _ in
+            do {
+                _ = try model.generateText(prompt: .text("nested"))
+            } catch {
+                nested = error
+            }
+            return nil
+        }
+        defer { repair.close() }
+
+        let toolCall = try generate(with: repair, on: model)
+        XCTAssertEqual(toolCall.invalid, true)
+        XCTAssertTrue(String(describing: nested).contains("re-entrant"),
+                      "expected a re-entrant FFI failure, got \(String(describing: nested))")
+    }
+
+    /// A closed repair encodes as null, which the FFI reads as absent.
+    func testClosedRepairEncodesAsNull() throws {
+        let repair = ToolCallRepair { _ in nil }
+        repair.close()
+        repair.close() // idempotent
+
+        let json = try JSONEncoder().encode(GenerateTextOptions(repairToolCall: repair))
+        XCTAssertEqual(String(data: json, encoding: .utf8), #"{"repair_tool_call":null}"#)
+    }
+}
+
+/// `openaiToolCallResponse` with the closing brace of the arguments dropped —
+/// the tool call Core cannot parse.
+private let openaiMalformedToolCallResponse: [String: Any] = [
+    "id": "chatcmpl-bad",
+    "model": "gpt-4o",
+    "choices": [[
+        "message": [
+            "role": "assistant",
+            "content": NSNull(),
+            "tool_calls": [[
+                "id": "call_bad",
+                "type": "function",
+                "function": ["name": "get_weather", "arguments": "{\"location\":\"Tokyo\""],
+            ]],
+        ],
+        "finish_reason": "tool_calls",
+    ]],
+    "usage": ["prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30],
+]
