@@ -134,24 +134,23 @@ optional `provider_executed` / `dynamic` / `thought_signature` /
 `provider_metadata` — or `None` to keep the original error. A returned call is
 parsed and validated from scratch. Raising is allowed: the tool call stays
 invalid and its `error` becomes `ToolCallRepair`, carrying both the
-`original_error` and the exception as `cause`.
+`original_error` and the exception as `cause`. Returning `{"error": "..."}`
+instead of raising records the same thing.
 
 With `aimux.wrapper`, the same callable goes in
 `GenerateTextOptions(repair_tool_call=...)`; it is excluded from the serialized
-options automatically.
+options and from `model_json_schema()` automatically.
 
-**Where it runs.** Synchronously, with the GIL held, while the aimux call is in
-progress — on the calling thread for `generate_text` / `generate_object` /
-`consume_stream_text`, on a runtime worker for `stream_text`.
+**Where it runs.** Synchronously, while the aimux call is in progress, on a
+blocking thread of its own that acquires the GIL there — the same for every
+entry point, `stream_text` included. The calling thread has released the GIL for
+the duration of the native call, so other Python threads keep running while the
+model call is in flight, and no tokio worker is ever parked waiting for the GIL.
 
-**It must not call back into aimux.** Every entry point drives the one shared
-tokio runtime with `Runtime::block_on`, and the hook runs inside that call, so
-a nested aimux call is refused with `RuntimeError("aimux: re-entrant call from
-inside a repair_tool_call hook is not allowed")` — the same rule the C ABI
-enforces with `AIMUX_E_FFI_REENTRANT_CALL`. Like any other exception raised by
-the hook it becomes a `ToolCallRepair` error on the tool call; the enclosing
-call still returns. Repair from the context you are given, or fetch what you
-need before the call.
+**It may call back into aimux.** The hook is off the runtime's worker threads,
+so a nested `generate_text` — asking the model for a corrected call, say — runs
+on the hook's own thread while the workers keep polling the enclosing call's
+I/O. It is still one blocking thread and one attempt: keep it short.
 
 Tool calls that stay invalid arrive with `invalid: true` and a typed `error`.
 

@@ -241,8 +241,8 @@ Receives the repair context — ``tool_call``, ``error``, ``input_schema``,
 ``tools``, ``messages``, ``instructions`` — and returns a repaired
 ``RawToolCall`` dict (``tool_call_id``, ``tool_name``, ``input`` as raw
 argument text), or ``None`` to keep the original validation error. It runs
-synchronously, with the GIL held, while the aimux call is in progress, and must
-not call back into aimux.
+synchronously, on a worker thread of its own, while the aimux call is in
+progress; it may call back into aimux.
 """
 
 

@@ -24,26 +24,21 @@ use aimux_core::generate::{
 use aimux_core::language_model::LanguageModel;
 use aimux_core::message::ModelPrompt;
 use aimux_core::openai_output::OpenAiStreamOptions;
-use aimux_core::parse_tool_call::{RawToolCall, ToolCallRepair, ToolCallRepairContext};
+use aimux_core::parse_tool_call::{ToolCallRepair, ToolCallRepairContext, parse_repair_reply};
 use pyo3::prelude::*;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Global tokio runtime
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// `Runtime::block_on` from a Python entry point.
+/// Drive `future` on the one shared runtime.
 ///
-/// A `repair_tool_call` hook runs while the calling thread is already inside
-/// `block_on`; tokio panics on a nested `block_on`, and PyO3 would resume that
-/// panic on the way back out of the hook. Refuse up front with an ordinary
-/// exception instead, mirroring the C ABI's re-entrancy error.
-pub(crate) fn block_on<F: std::future::Future>(future: F) -> PyResult<F::Output> {
-    if tokio::runtime::Handle::try_current().is_ok() {
-        return Err(pyo3::exceptions::PyRuntimeError::new_err(
-            "aimux: re-entrant call from inside a repair_tool_call hook is not allowed",
-        ));
-    }
-    Ok(runtime().block_on(future))
+/// Every entry point wraps this in `Python::allow_threads`, and a
+/// `repair_tool_call` hook runs on a `spawn_blocking` thread — never a runtime
+/// worker — so the hook may call back into aimux: the nested `block_on` runs on
+/// the blocking thread while the workers stay free to poll the outer call's I/O.
+pub(crate) fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    runtime().block_on(future)
 }
 
 pub(crate) fn runtime() -> &'static tokio::runtime::Runtime {
@@ -154,6 +149,7 @@ impl Model {
     #[pyo3(signature = (prompt_json, opts_json=None, repair_tool_call=None))]
     fn generate_text(
         &self,
+        py: Python<'_>,
         prompt_json: &str,
         opts_json: Option<&str>,
         repair_tool_call: Option<PyObject>,
@@ -161,7 +157,9 @@ impl Model {
         let prompt = parse_prompt(prompt_json)?;
         let opts = parse_opts(opts_json, repair_tool_call)?;
 
-        let result = block_on(async move { generate_text(&*self.inner, prompt, opts).await })?;
+        let result = py.allow_threads(|| {
+            block_on(async move { generate_text(&*self.inner, prompt, opts).await })
+        });
 
         match result {
             Ok(r) => serialize_result(&r),
@@ -179,6 +177,7 @@ impl Model {
     #[pyo3(signature = (prompt_json, opts_json=None, repair_tool_call=None))]
     fn generate_object(
         &self,
+        py: Python<'_>,
         prompt_json: &str,
         opts_json: Option<&str>,
         repair_tool_call: Option<PyObject>,
@@ -186,7 +185,9 @@ impl Model {
         let prompt = parse_prompt(prompt_json)?;
         let opts = parse_opts(opts_json, repair_tool_call)?;
 
-        let result = block_on(async move { generate_object(&*self.inner, prompt, opts).await })?;
+        let result = py.allow_threads(|| {
+            block_on(async move { generate_object(&*self.inner, prompt, opts).await })
+        });
 
         match result {
             Ok(r) => serialize_result(&r),
@@ -203,6 +204,7 @@ impl Model {
     #[pyo3(signature = (prompt_json, opts_json=None, repair_tool_call=None))]
     fn consume_stream_text(
         &self,
+        py: Python<'_>,
         prompt_json: &str,
         opts_json: Option<&str>,
         repair_tool_call: Option<PyObject>,
@@ -210,10 +212,12 @@ impl Model {
         let prompt = parse_prompt(prompt_json)?;
         let opts = parse_opts(opts_json, repair_tool_call)?;
 
-        let result = block_on(async move {
-            let stream_result = stream_text(&*self.inner, prompt, opts).await?;
-            stream_result.consume().await
-        })?;
+        let result = py.allow_threads(|| {
+            block_on(async move {
+                let stream_result = stream_text(&*self.inner, prompt, opts).await?;
+                stream_result.consume().await
+            })
+        });
 
         match result {
             Ok(r) => serialize_result(&r),
@@ -305,6 +309,7 @@ impl Model {
     #[pyo3(signature = (prompt_json, opts_json=None, repair_tool_call=None))]
     fn generate_text_as_openai(
         &self,
+        py: Python<'_>,
         prompt_json: &str,
         opts_json: Option<&str>,
         repair_tool_call: Option<PyObject>,
@@ -312,8 +317,9 @@ impl Model {
         let prompt = parse_prompt(prompt_json)?;
         let opts = parse_opts(opts_json, repair_tool_call)?;
 
-        let result =
-            block_on(async move { generate_text_as_openai(&*self.inner, prompt, opts).await })?;
+        let result = py.allow_threads(|| {
+            block_on(async move { generate_text_as_openai(&*self.inner, prompt, opts).await })
+        });
 
         match result {
             Ok(r) => serialize_result(&r),
@@ -422,7 +428,7 @@ impl StreamIterator {
 
     fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<PyObject>> {
         // Block on the next channel item, allowing other Python threads to run.
-        let item = py.allow_threads(|| block_on(self.rx.recv()))?;
+        let item = py.allow_threads(|| block_on(self.rx.recv()));
 
         match item {
             Some(Ok(json)) => Ok(Some(json.to_object(py).into())),
@@ -740,9 +746,10 @@ struct ProviderHandle {
 impl ProviderHandle {
     /// List models available on this provider (runtime discovery + anya2a spec).
     /// Returns a JSON array of RuntimeModel.
-    fn list_models(&self) -> PyResult<String> {
-        let models =
-            block_on(async { self.inner.list_models().await })?.map_err(|e| to_py_err(&e))?;
+    fn list_models(&self, py: Python<'_>) -> PyResult<String> {
+        let models = py
+            .allow_threads(|| block_on(async { self.inner.list_models().await }))
+            .map_err(|e| to_py_err(&e))?;
         serialize_result(&models)
     }
 
@@ -788,8 +795,9 @@ fn create_provider(
 /// string (serialized `Catalogue`). `source_url` defaults to the anya2a
 /// `dist/all.json`.
 #[pyfunction]
-fn get_model_specs(source_url: Option<&str>) -> PyResult<String> {
-    let catalogue = block_on(async { aimux_providers::get_model_specs(source_url).await })?
+fn get_model_specs(py: Python<'_>, source_url: Option<&str>) -> PyResult<String> {
+    let catalogue = py
+        .allow_threads(|| block_on(async { aimux_providers::get_model_specs(source_url).await }))
         .map_err(|e| to_py_err(&e))?;
     serialize_result(&catalogue)
 }
@@ -1176,75 +1184,17 @@ fn parse_opts(
     Ok(opts)
 }
 
-/// Wire shape of a `RawToolCall`, both directions of the repair callback.
-/// Mirrors the C ABI's shape, so the repair contract is the same in every
-/// binding.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct RawToolCallWire {
-    tool_call_id: String,
-    tool_name: String,
-    input: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    provider_executed: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    dynamic: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    thought_signature: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    provider_metadata: Option<aimux_core::types::ProviderMetadata>,
-}
-
-impl From<&RawToolCall> for RawToolCallWire {
-    fn from(call: &RawToolCall) -> Self {
-        Self {
-            tool_call_id: call.tool_call_id.clone(),
-            tool_name: call.tool_name.clone(),
-            input: call.input.clone(),
-            provider_executed: call.provider_executed,
-            dynamic: call.dynamic,
-            thought_signature: call.thought_signature.clone(),
-            provider_metadata: call.provider_metadata.clone(),
-        }
-    }
-}
-
-impl From<RawToolCallWire> for RawToolCall {
-    fn from(call: RawToolCallWire) -> Self {
-        Self {
-            tool_call_id: call.tool_call_id,
-            tool_name: call.tool_name,
-            input: call.input,
-            provider_executed: call.provider_executed,
-            dynamic: call.dynamic,
-            thought_signature: call.thought_signature,
-            provider_metadata: call.provider_metadata,
-        }
-    }
-}
-
-/// `ToolCallRepairContext` as Python sees it: the AI SDK `repairToolCall`
-/// arguments, with `input_schema` pre-resolved for the called tool.
-#[derive(serde::Serialize)]
-struct ToolCallRepairContextWire<'a> {
-    tool_call: &'a RawToolCallWire,
-    error: &'a AiMuxError,
-    input_schema: serde_json::Value,
-    tools: &'a [aimux_core::tool::Tool],
-    messages: &'a [aimux_core::message::ModelMessage],
-    #[serde(skip_serializing_if = "Option::is_none")]
-    instructions: Option<&'a str>,
-}
-
 /// Wrap a Python callable as core's `ToolCallRepair`.
 ///
-/// Core awaits the repair future inline, so the callable runs synchronously on
-/// the thread driving the call — the caller's thread for `generate_text`, a
-/// runtime worker for `stream_text` — with the GIL held for its duration. It
-/// receives the context as a dict and returns a `RawToolCall`-shaped dict, or
+/// The callable runs on a `spawn_blocking` thread, which acquires the GIL there
+/// and so can never park a runtime worker waiting for it: the entry points hold
+/// no GIL while they drive the runtime, and a repair triggered from a stream
+/// keeps the worker free to poll the in-flight I/O of every other call.
+///
+/// It receives the context as a dict and returns a `RawToolCall`-shaped dict, or
 /// `None` to keep the original validation error. A raised exception becomes an
 /// `AiMuxError`, which core records as `ToolCallRepair { original_error, cause }`
-/// on the still-invalid tool call — except a re-entrant aimux call, which panics
-/// in `block_on` and which PyO3 resumes out of the enclosing call.
+/// on the still-invalid tool call — as does a returned `{"error": "..."}` dict.
 fn tool_call_repair_from_py(repair: PyObject) -> ToolCallRepair {
     // `Arc`, because core's repair callback is an `Fn` whose future must own
     // the callable, and `Py::clone_ref` would need the GIL out here.
@@ -1252,31 +1202,19 @@ fn tool_call_repair_from_py(repair: PyObject) -> ToolCallRepair {
     ToolCallRepair::new(move |context: ToolCallRepairContext| {
         let repair = Arc::clone(&repair);
         async move {
-            let tool_call = RawToolCallWire::from(&context.tool_call);
-            let wire = serde_json::to_string(&ToolCallRepairContextWire {
-                tool_call: &tool_call,
-                error: &context.error,
-                input_schema: context.input_schema(&context.tool_call.tool_name),
-                tools: &context.tools,
-                messages: &context.messages,
-                instructions: context.instructions.as_deref(),
+            let wire = context.to_wire_json()?;
+
+            let repaired = tokio::task::spawn_blocking(move || {
+                Python::with_gil(|py| call_repair(py, &repair, &wire))
             })
-            .map_err(|e| AiMuxError::Other(format!("repair_tool_call: context: {e}")))?;
+            .await
+            .map_err(|e| AiMuxError::Other(format!("repair_tool_call: {e}")))?
+            .map_err(|e| AiMuxError::Other(format!("repair_tool_call: {e}")))?;
 
-            let repaired = Python::with_gil(|py| call_repair(py, &repair, &wire))
-                .map_err(|e| AiMuxError::Other(format!("repair_tool_call: {e}")))?;
-
-            repaired
-                .map(|json| {
-                    serde_json::from_str::<RawToolCallWire>(&json)
-                        .map(RawToolCall::from)
-                        .map_err(|e| {
-                            AiMuxError::Other(format!(
-                                "repair_tool_call returned an invalid RawToolCall: {e}"
-                            ))
-                        })
-                })
-                .transpose()
+            match repaired {
+                None => Ok(None),
+                Some(json) => parse_repair_reply(&json),
+            }
         }
     })
 }

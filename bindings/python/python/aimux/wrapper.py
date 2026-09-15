@@ -23,6 +23,7 @@ import json
 from typing import Annotated, Any, Dict, Iterator, List, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, RootModel, model_serializer, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from . import RepairToolCall
 from .aimux import Model
@@ -862,12 +863,12 @@ class GenerateTextOptions(BaseModel):
     """
     timeout: Optional[TimeoutConfiguration] = None
     include_raw_chunks: Optional[bool] = None
-    repair_tool_call: Optional[RepairToolCall] = Field(default=None, exclude=True)
+    repair_tool_call: SkipJsonSchema[Optional[RepairToolCall]] = Field(default=None, exclude=True)
     """One attempt to fix an invalid tool call (AI SDK ``repairToolCall``).
 
     A live callable, not wire data: it is excluded from the serialized options
-    and handed to the native layer separately. See
-    :data:`aimux.RepairToolCall`.
+    and from ``model_json_schema()``, and handed to the native layer separately.
+    See :data:`aimux.RepairToolCall`.
     """
 
 

@@ -5,6 +5,7 @@ fails and the hook gets its single attempt.
 """
 
 import json
+import threading
 
 from aimux import openai, generate_text
 from test_e2e import RecordingMockServer
@@ -57,7 +58,7 @@ class TestRepairToolCall:
         contexts = []
 
         def repair(context):
-            contexts.append(context)
+            contexts.append((context, threading.get_ident()))
             call = dict(context["tool_call"])
             call["input"] = call["input"] + "}"
             return call
@@ -70,7 +71,11 @@ class TestRepairToolCall:
 
         # The hook runs exactly once, with the AI SDK repairToolCall context.
         assert len(contexts) == 1
-        context = contexts[0]
+        context, hook_thread = contexts[0]
+        # On a blocking thread of its own: the calling thread has released the
+        # GIL for the whole native call, so it cannot be the one running the
+        # hook — and reaching this assertion at all means it did release it.
+        assert hook_thread != threading.get_ident()
         assert context["tool_call"]["tool_name"] == "get_weather"
         assert context["tool_call"]["tool_call_id"] == "call_abc"
         assert context["tool_call"]["input"] == '{"location":"Tokyo"'
@@ -108,14 +113,25 @@ class TestRepairToolCall:
         assert result.tool_calls[0].input == {"location": "Tokyo"}
         assert not result.tool_calls[0].invalid
 
-    def test_calling_aimux_from_the_hook_is_a_repair_error(self):
-        """A nested aimux call would nest tokio's block_on; it is refused with an
-        ordinary exception, which core records as the repair failure."""
+    def test_json_schema_skips_the_callable(self):
+        """A Callable field has no JSON schema; it must not break the model's."""
+        from aimux.wrapper import GenerateTextOptions
+
+        schema = GenerateTextOptions.model_json_schema()
+        assert "repair_tool_call" not in schema["properties"]
+        assert "tools" in schema["properties"]
+
+    def test_the_hook_may_call_aimux(self):
+        """The hook runs on a blocking thread, so a nested aimux call is fine:
+        it drives the runtime from there while the workers keep polling."""
         with RecordingMockServer(BROKEN_TOOL_CALL) as mock:
             model = openai("test-key", "gpt-4o", mock.url)
 
             def repair(context):
-                return generate_text(model, "try again", None)
+                generate_text(model, "ask the model how to fix it", None)
+                call = dict(context["tool_call"])
+                call["input"] = call["input"] + "}"
+                return call
 
             result = generate_text(
                 model,
@@ -123,11 +139,13 @@ class TestRepairToolCall:
                 {"tools": [WEATHER_TOOL], "repair_tool_call": repair},
             )
 
-        tool_call = result["tool_calls"][0]
+        assert result["tool_calls"][0]["input"] == {"location": "Tokyo"}
+
+    def test_returning_an_error_dict_is_a_repair_error(self):
+        tool_call = _generate(lambda context: {"error": "cannot fix that"})
+
         assert tool_call["invalid"] is True
-        failure = tool_call["error"]["ToolCallRepair"]
-        assert "InvalidToolInput" in failure["original_error"]
-        assert "re-entrant" in json.dumps(failure["cause"])
+        assert "cannot fix that" in json.dumps(tool_call["error"]["ToolCallRepair"]["cause"])
 
     def test_raising_becomes_a_tool_call_repair_error(self):
         def repair(context):
