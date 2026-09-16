@@ -158,3 +158,17 @@ class TestRepairToolCall:
         failure = tool_call["error"]["ToolCallRepair"]
         assert "InvalidToolInput" in failure["original_error"]
         assert "no idea how to fix that" in json.dumps(failure["cause"])
+
+    def test_a_reply_that_is_neither_a_call_nor_an_error_is_a_repair_error(self):
+        tool_call = _generate(lambda context: {})
+
+        assert tool_call["invalid"] is True
+        cause = json.dumps(tool_call["error"]["ToolCallRepair"]["cause"])
+        assert "neither a RawToolCall nor" in cause
+
+    def test_returning_a_string_is_a_type_error(self):
+        tool_call = _generate(lambda context: '{"tool_call_id":"x"}')
+
+        assert tool_call["invalid"] is True
+        cause = json.dumps(tool_call["error"]["ToolCallRepair"]["cause"])
+        assert "TypeError" in cause and "dict or None" in cause

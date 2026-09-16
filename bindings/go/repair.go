@@ -144,7 +144,16 @@ func (r *ToolCallRepair) invoke(contextJSON string) (out []byte) {
 }
 
 //export goRepairToolCall
-func goRepairToolCall(id C.uintptr_t, contextJSON *C.char) *C.char {
+func goRepairToolCall(id C.uintptr_t, contextJSON *C.char) (reply *C.char) {
+	// Nothing may unwind through the C frames into Rust. cgo.Handle.Value
+	// panics on a deleted handle, which happens when Close races an
+	// invocation already past the Rust-side live check; a NULL reply is what
+	// the disarmed Rust side would have produced anyway.
+	defer func() {
+		if recover() != nil {
+			reply = nil
+		}
+	}()
 	r, ok := cgo.Handle(id).Value().(*ToolCallRepair)
 	if !ok || contextJSON == nil {
 		return nil

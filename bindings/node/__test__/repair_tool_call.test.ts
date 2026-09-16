@@ -172,3 +172,22 @@ test('repairToolCall: a throwing hook yields a ToolCallRepair error', async (t) 
     await closeServer(server)
   }
 })
+
+test('repairToolCall: a reply that is neither a call nor an error is a ToolCallRepair error', async (t) => {
+  const { server, url } = await startMockServer()
+
+  try {
+    const model = await openai('test-key', 'gpt-4o', url)
+    const result = await generateText(model, "What's the weather in Tokyo?", {
+      tools: [weatherTool],
+      repairToolCall: () => ({}) as any,
+    })
+
+    t.true(result.tool_calls[0].invalid === true)
+    const error = result.tool_calls[0].error as any
+    t.truthy(error.ToolCallRepair)
+    t.regex(JSON.stringify(error.ToolCallRepair.cause), /neither a RawToolCall nor/)
+  } finally {
+    await closeServer(server)
+  }
+})

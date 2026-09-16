@@ -54,8 +54,8 @@ data class ToolCallRepairContext(
     /** JSON Schema of the called tool; an empty-object schema when the tool is unknown. */
     @SerialName("input_schema") val inputSchema: JsonElement = JsonObject(emptyMap()),
     val tools: List<Tool> = emptyList(),
-    /** The prompt of the current step. */
-    val messages: List<ModelMessage> = emptyList(),
+    /** The prompt of the current step, as wire JSON — a message shape this codec does not model must not fail the repair before it runs. */
+    val messages: List<JsonElement> = emptyList(),
     val instructions: String? = null,
 )
 

@@ -394,7 +394,9 @@ travel as handles:
   The function runs synchronously on the thread that entered the `aimux_*`
   call, inside the re-entrancy guard: calling any `aimux_*` function from
   inside it fails with `AIMUX_E_FFI_REENTRANT_CALL` (204). Host exceptions
-  must be caught inside the callback and turned into `NULL`.
+  must be caught inside the callback: return `{"error": "<message>"}` to
+  record them on the tool call, or `NULL` to keep the original error —
+  never unwind across the C ABI.
 
 A handle field that is not an unsigned integer is `AIMUX_E_INVALID_ARGUMENT`
 (5, like any other schema violation in `opts_json`); a released or wrong-typed handle is `AIMUX_E_FFI_INVALID_HANDLE` (203).

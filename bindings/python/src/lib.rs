@@ -1231,5 +1231,14 @@ fn call_repair(py: Python<'_>, repair: &PyObject, context_json: &str) -> PyResul
     if repaired.is_none(py) {
         return Ok(None);
     }
+    // Only a dict is a RawToolCall / {"error"} once dumped. Anything else
+    // (a JSON *string*, say) would dump to a document core rejects with a
+    // message about the wire shape, hiding the real mistake.
+    if !repaired.bind(py).is_instance_of::<pyo3::types::PyDict>() {
+        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "repair_tool_call must return a dict or None, got {}",
+            repaired.bind(py).get_type().name()?
+        )));
+    }
     Ok(Some(json.call_method1("dumps", (repaired,))?.extract()?))
 }

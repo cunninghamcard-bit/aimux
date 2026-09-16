@@ -4843,8 +4843,62 @@ mod tests {
             &self,
             _options: &aimux_core::options::CallOptions,
         ) -> Result<aimux_core::result::StreamResult, AiMuxError> {
-            unimplemented!()
+            Ok(aimux_core::result::StreamResult {
+                stream: Box::pin(futures::stream::iter([
+                    Ok(aimux_core::stream_part::StreamPart::ToolCall {
+                        tool_call_id: "call_1".into(),
+                        tool_name: "get_weather".into(),
+                        input: serde_json::Value::String(r#"{"city": "Tokyo""#.into()),
+                        provider_executed: None,
+                        dynamic: None,
+                        thought_signature: None,
+                        provider_metadata: None,
+                        invalid: None,
+                        error: None,
+                    }),
+                    Ok(aimux_core::stream_part::StreamPart::Finish {
+                        finish_reason: aimux_core::types::FinishReason {
+                            unified: aimux_core::types::FinishReasonUnified::ToolCalls,
+                            raw: None,
+                        },
+                        usage: aimux_core::types::Usage::default(),
+                        provider_metadata: None,
+                    }),
+                ])),
+                request_body: None,
+                response_headers: None,
+            })
         }
+    }
+
+    /// Drive `aimux_stream_text` with a repair handle and return the
+    /// `ToolCall` part core emitted after parsing (and repairing).
+    fn stream_with_repair(repair_handle: u64) -> serde_json::Value {
+        extern "C-unwind" fn on_part(json: *const c_char, ctx: *mut c_void) {
+            let parts = unsafe { &mut *(ctx as *mut Vec<serde_json::Value>) };
+            let text = unsafe { CStr::from_ptr(json) }.to_str().unwrap();
+            parts.push(serde_json::from_str(text).unwrap());
+        }
+        extern "C-unwind" fn on_done(_ctx: *mut c_void) {}
+
+        let model = intern_model(Arc::new(MalformedToolCallModel));
+        let opts = c(&format!(
+            r#"{{"tools":[{WEATHER_TOOL}],"repair_tool_call":{repair_handle}}}"#
+        ));
+        let mut parts: Vec<serde_json::Value> = Vec::new();
+        let e = aimux_stream_text(
+            model,
+            c("\"weather?\"").as_ptr(),
+            opts.as_ptr(),
+            Some(on_part),
+            Some(on_done),
+            &mut parts as *mut Vec<serde_json::Value> as *mut c_void,
+        );
+        assert!(e.is_null(), "stream failed: {}", err_text(e));
+        parts
+            .into_iter()
+            .find_map(|p| p.get("ToolCall").cloned())
+            .expect("a ToolCall part")
     }
 
     const WEATHER_TOOL: &str = r#"{"type":"function","name":"get_weather","input_schema":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false}}"#;
@@ -5027,6 +5081,33 @@ mod tests {
             call["error"]
         );
         assert_eq!(call["input"], r#"{"city": "Tokyo""#);
+    }
+
+    /// The streaming path awaits the repair on the consumer side of the
+    /// stream, so the host function runs on the thread inside
+    /// `aimux_stream_text`, under the same re-entrancy guard as generate.
+    #[test]
+    fn host_repair_runs_on_the_streaming_path_too() {
+        let mut calls: u32 = 0;
+        let h = aimux_tool_call_repair_new(
+            Some(close_brace_repair),
+            &mut calls as *mut u32 as *mut c_void,
+        );
+        let call = stream_with_repair(h);
+        aimux_tool_call_repair_drop(h);
+        assert_eq!(calls, 1);
+        assert_eq!(call["input"]["city"], "Tokyo", "{call}");
+        assert!(call.get("invalid").is_none(), "{call}");
+
+        let mut code: i32 = 0;
+        let h = aimux_tool_call_repair_new(
+            Some(reentrant_repair),
+            &mut code as *mut i32 as *mut c_void,
+        );
+        let call = stream_with_repair(h);
+        aimux_tool_call_repair_drop(h);
+        assert_eq!(code, AIMUX_E_FFI_REENTRANT_CALL, "{call}");
+        assert_eq!(call["invalid"], true, "{call}");
     }
 
     #[test]
