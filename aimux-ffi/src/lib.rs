@@ -55,7 +55,6 @@ use serde::de::DeserializeOwned;
 
 use aimux_core::AbortSignal;
 use aimux_core::AiMuxError;
-use aimux_core::parse_tool_call::{ToolCallRepair, ToolCallRepairContext};
 use aimux_core::generate::{
     GenerateTextOptions, generate_object, generate_text, generate_text_as_openai, stream_text,
     stream_text_as_openai,
@@ -63,6 +62,7 @@ use aimux_core::generate::{
 use aimux_core::language_model::LanguageModel;
 use aimux_core::message::ModelPrompt;
 use aimux_core::openai_output::OpenAiStreamOptions;
+use aimux_core::parse_tool_call::{ToolCallRepair, ToolCallRepairContext};
 use aimux_core::provider::Provider;
 use aimux_core::recording::RecordingError;
 use aimux_core::trace::{RingTraceStore, TraceFilter, TraceLayer};
@@ -959,7 +959,11 @@ fn parse_opts_arg(opts_json: *const c_char) -> FfiResult<GenerateTextOptions> {
     let handles: HandleFields = serde_json::from_str(&s).map_err(|e| wire_err("opts_json", e))?;
     let mut opts: GenerateTextOptions =
         serde_json::from_str(&s).map_err(|e| wire_err("opts_json", e))?;
-    opts.abort_signal = handles.abort_signal.filter(|h| *h != 0).map(abort_of).transpose()?;
+    opts.abort_signal = handles
+        .abort_signal
+        .filter(|h| *h != 0)
+        .map(abort_of)
+        .transpose()?;
     opts.repair_tool_call = handles
         .repair_tool_call
         .filter(|h| *h != 0)
@@ -4891,8 +4895,7 @@ mod tests {
         assert_eq!(ctx["input_schema"]["required"][0], "city");
         unsafe { *(user_data as *mut u32) += 1 };
         let mut call = ctx["tool_call"].clone();
-        call["input"] =
-            serde_json::Value::String(format!("{}}}", call["input"].as_str().unwrap()));
+        call["input"] = serde_json::Value::String(format!("{}}}", call["input"].as_str().unwrap()));
         unsafe { aimux_string_new(c(&call.to_string()).as_ptr()) }
     }
 
@@ -4918,7 +4921,10 @@ mod tests {
     }
 
     /// A host repair function that reports a failure instead of a call.
-    extern "C-unwind" fn erroring_repair(_ctx: *const c_char, _user_data: *mut c_void) -> *mut c_char {
+    extern "C-unwind" fn erroring_repair(
+        _ctx: *const c_char,
+        _user_data: *mut c_void,
+    ) -> *mut c_char {
         unsafe { aimux_string_new(c(r#"{"error":"no idea how to fix that"}"#).as_ptr()) }
     }
 
@@ -4931,15 +4937,26 @@ mod tests {
         let call = &result["tool_calls"][0];
         assert_eq!(call["invalid"], true);
         let failure = &call["error"]["ToolCallRepair"];
-        assert!(failure["original_error"].get("InvalidToolInput").is_some(), "{call}");
-        assert!(failure["cause"].to_string().contains("no idea how to fix that"), "{call}");
+        assert!(
+            failure["original_error"].get("InvalidToolInput").is_some(),
+            "{call}"
+        );
+        assert!(
+            failure["cause"]
+                .to_string()
+                .contains("no idea how to fix that"),
+            "{call}"
+        );
     }
 
     #[test]
     fn zero_handles_in_opts_json_mean_none() {
         assert_eq!(aimux_tool_call_repair_new(None, std::ptr::null_mut()), 0);
         let result = generate_with_repair(0);
-        assert_eq!(result["tool_calls"][0]["invalid"], true, "ran without repair");
+        assert_eq!(
+            result["tool_calls"][0]["invalid"], true,
+            "ran without repair"
+        );
     }
 
     #[test]
@@ -4960,7 +4977,8 @@ mod tests {
             thought_signature: None,
             provider_metadata: None,
         };
-        let tools: Vec<aimux_core::tool::Tool> = serde_json::from_str(&format!("[{WEATHER_TOOL}]")).unwrap();
+        let tools: Vec<aimux_core::tool::Tool> =
+            serde_json::from_str(&format!("[{WEATHER_TOOL}]")).unwrap();
         let parsed = ffi_block_on(aimux_core::parse_tool_call::parse_tool_call(
             raw,
             Some(&tools),
@@ -4972,7 +4990,11 @@ mod tests {
 
         assert_eq!(calls, 0, "host function must not run after drop");
         assert_eq!(parsed.invalid, Some(true));
-        assert!(matches!(parsed.error, Some(AiMuxError::InvalidToolInput { .. })), "{:?}", parsed.error);
+        assert!(
+            matches!(parsed.error, Some(AiMuxError::InvalidToolInput { .. })),
+            "{:?}",
+            parsed.error
+        );
     }
 
     #[test]
