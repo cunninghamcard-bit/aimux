@@ -590,6 +590,125 @@ async fn vertex_provider_config() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+// Late system messages — Vertex reuses `google::convert`, so the same upstream
+// `UnsupportedFunctionalityError` semantics apply: a system message after a
+// non-system message is rejected before any HTTP request is issued.
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// `[user, system]` — a system message that appears too late.
+fn late_system_prompt() -> LanguageModelPrompt {
+    vec![
+        LanguageModelPromptMessage {
+            role: Role::User,
+            content: vec![ContentPart::text("Hi")],
+            ..Default::default()
+        },
+        LanguageModelPromptMessage {
+            role: Role::System,
+            content: vec![ContentPart::text("Late rule")],
+            ..Default::default()
+        },
+    ]
+}
+
+fn assert_unsupported(err: &aimux_core::error::AiMuxError) {
+    assert!(
+        matches!(
+            err,
+            aimux_core::error::AiMuxError::UnsupportedFunctionality(_)
+        ),
+        "expected UnsupportedFunctionality, got {err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        "unsupported functionality: system messages are only supported at the beginning of the conversation"
+    );
+}
+
+#[tokio::test]
+async fn vertex_generate_rejects_late_system_message_without_calling_the_api() {
+    let server = MockServer::start().await;
+    mock_generate_content(&server, ok_vertex_body()).await;
+    let model = make_model(&server);
+
+    let err = model
+        .do_generate(&default_options(late_system_prompt()))
+        .await
+        .expect_err("late system message must be rejected");
+    assert_unsupported(&err);
+
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert!(
+        requests.is_empty(),
+        "a rejected prompt must not reach the API, saw {} request(s)",
+        requests.len()
+    );
+}
+
+#[tokio::test]
+async fn vertex_stream_rejects_late_system_message_without_calling_the_api() {
+    let server = MockServer::start().await;
+    mock_stream_content(
+        &server,
+        &sse_stream(&[stream_chunk("ok", Some("STOP"), None, None)]),
+    )
+    .await;
+    let model = make_model(&server);
+
+    let err = model
+        .do_stream(&default_options(late_system_prompt()))
+        .await
+        .expect_err("late system message must be rejected");
+    assert_unsupported(&err);
+
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert!(
+        requests.is_empty(),
+        "a rejected prompt must not reach the API, saw {} request(s)",
+        requests.len()
+    );
+}
+
+#[tokio::test]
+async fn vertex_generate_still_aggregates_leading_system_messages() {
+    let server = MockServer::start().await;
+    mock_generate_content(&server, ok_vertex_body()).await;
+    let model = make_model(&server);
+
+    let prompt: LanguageModelPrompt = vec![
+        LanguageModelPromptMessage {
+            role: Role::System,
+            content: vec![ContentPart::text("Rule 1")],
+            ..Default::default()
+        },
+        LanguageModelPromptMessage {
+            role: Role::System,
+            content: vec![ContentPart::text("Rule 2")],
+            ..Default::default()
+        },
+        LanguageModelPromptMessage {
+            role: Role::User,
+            content: vec![ContentPart::text("Hi")],
+            ..Default::default()
+        },
+    ];
+
+    model
+        .do_generate(&default_options(prompt))
+        .await
+        .expect("leading system messages must be accepted");
+
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert_eq!(requests.len(), 1);
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("request body json");
+    assert_eq!(
+        body["systemInstruction"]["parts"],
+        json!([{ "text": "Rule 1" }, { "text": "Rule 2" }])
+    );
+    assert_eq!(body["contents"].as_array().map(Vec::len), Some(1));
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 // Additional cases — finish reasons, settings, headers, stream tool calls.
 // ═════════════════════════════════════════════════════════════════════════════
 
