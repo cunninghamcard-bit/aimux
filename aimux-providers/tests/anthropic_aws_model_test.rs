@@ -592,3 +592,69 @@ async fn anthropic_aws_stream_response_headers() {
         .expect("response_headers should be Some");
     assert_eq!(headers.get("test-header"), Some(&"test-value".to_string()));
 }
+
+/// RFC-0016 M2: the Anthropic-AWS caller reaches the same shared Anthropic
+/// stream core, so `include_raw_chunks` forwards every raw SSE event there too.
+#[tokio::test]
+async fn anthropic_aws_stream_forwards_raw_chunks_when_enabled() {
+    let server = MockServer::start().await;
+    let events = vec![
+        json!({
+            "type": "message_start",
+            "message": {
+                "id": "msg_aws",
+                "model": "claude-sonnet-4-20250514",
+                "usage": { "input_tokens": 3 }
+            }
+        }),
+        json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": { "type": "text", "text": "" }
+        }),
+        json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": { "type": "text_delta", "text": "Hi" }
+        }),
+        json!({ "type": "content_block_stop", "index": 0 }),
+        json!({
+            "type": "message_delta",
+            "delta": { "stop_reason": "end_turn" },
+            "usage": { "output_tokens": 1 }
+        }),
+        json!({ "type": "message_stop" }),
+    ];
+    mock_messages_sse(&server, &sse_stream(&events)).await;
+    let model = make_model(&server);
+    let options = CallOptions {
+        include_raw_chunks: Some(true),
+        ..default_options(test_prompt())
+    };
+
+    let parts = collect_stream(model.do_stream(&options).await.expect("do_stream")).await;
+    let raw: Vec<&Value> = parts
+        .iter()
+        .filter_map(|part| match part {
+            StreamPart::Raw { raw_value } => Some(raw_value),
+            _ => None,
+        })
+        .collect();
+    let expected: Vec<&Value> = events.iter().collect();
+    assert_eq!(raw, expected, "raw payloads: {parts:?}");
+
+    // The semantic stream is unchanged apart from the raw parts.
+    let text: Vec<&str> = parts
+        .iter()
+        .filter_map(|part| match part {
+            StreamPart::TextDelta { delta, .. } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, vec!["Hi"]);
+    assert!(matches!(
+        parts.last(),
+        Some(StreamPart::Finish { finish_reason, .. })
+            if matches!(finish_reason.unified, FinishReasonUnified::Stop)
+    ));
+}

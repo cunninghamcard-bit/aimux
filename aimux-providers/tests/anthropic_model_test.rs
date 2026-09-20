@@ -1963,3 +1963,396 @@ mod do_stream {
         );
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RFC-0016 M2 — `include_raw_chunks` on the Anthropic family
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Upstream `doStream` emits `{ type: 'raw', rawValue }` for **every** SSE
+/// chunk before it is parsed (`anthropic-language-model.ts:1740`), so the
+/// Anthropic provider must forward the raw provider events when
+/// `include_raw_chunks` is set — one per event, in provider order, before the
+/// semantic parts of that event, and without changing the stream when the
+/// option is unset or `false`.
+mod raw_chunks {
+    use super::*;
+
+    use aimux_core::error::AiMuxError;
+
+    /// The stream used by the ordering tests: `message_start` (the first event,
+    /// which the pre-stream error peek reads before the stream is built), a
+    /// text block with two deltas, the usage / stop-reason `message_delta` and
+    /// the terminal `message_stop`.
+    fn text_events() -> Vec<Value> {
+        vec![
+            json!({
+                "type": "message_start",
+                "message": {
+                    "id": "msg_1",
+                    "model": "claude-3-haiku-20240307",
+                    "usage": { "input_tokens": 17, "output_tokens": 1 },
+                },
+            }),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"!"}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":227}}),
+            json!({"type":"message_stop"}),
+        ]
+    }
+
+    /// Compact label per part, so ordering can be asserted without pinning
+    /// every field of every part.
+    fn label(part: &StreamPart) -> String {
+        match part {
+            StreamPart::StreamStart { .. } => "stream-start".to_string(),
+            StreamPart::Raw { raw_value } => {
+                format!("raw:{}", raw_value["type"].as_str().unwrap_or("<none>"))
+            }
+            StreamPart::ResponseMetadata { .. } => "response-metadata".to_string(),
+            StreamPart::TextStart { .. } => "text-start".to_string(),
+            StreamPart::TextDelta { delta, .. } => format!("text-delta:{delta}"),
+            StreamPart::TextEnd { .. } => "text-end".to_string(),
+            StreamPart::Error { .. } => "error".to_string(),
+            StreamPart::Finish { .. } => "finish".to_string(),
+            other => format!("unexpected:{other:?}"),
+        }
+    }
+
+    fn labels(parts: &[StreamPart]) -> Vec<String> {
+        parts.iter().map(label).collect()
+    }
+
+    fn raw_values(parts: &[StreamPart]) -> Vec<&Value> {
+        parts
+            .iter()
+            .filter_map(|p| match p {
+                StreamPart::Raw { raw_value } => Some(raw_value),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Drain a stream keeping recoverable error items — the core keeps the
+    /// stream alive past them.
+    async fn collect_items(result: StreamResult) -> Vec<Result<StreamPart, AiMuxError>> {
+        let mut items = Vec::new();
+        let mut stream = result.stream;
+        while let Some(item) = stream.next().await {
+            items.push(item);
+        }
+        items
+    }
+
+    fn options_with_raw() -> CallOptions {
+        CallOptions {
+            include_raw_chunks: Some(true),
+            ..default_options(test_prompt())
+        }
+    }
+
+    /// One `StreamPart::Raw` per SSE event, carrying the event payload
+    /// verbatim, emitted immediately before the parts parsed from that event.
+    /// The first event is forwarded exactly once — it is read by the pre-stream
+    /// error peek before the stream is built.
+    #[tokio::test]
+    async fn raw_chunks_are_emitted_once_per_event_before_their_parts() {
+        let server = MockServer::start().await;
+        let events = text_events();
+        mock_sse(&server, &sse_stream(&events)).await;
+        let model = make_model(&server);
+        let parts = collect_stream(model.do_stream(&options_with_raw()).await.unwrap()).await;
+
+        // Verbatim payloads, in provider order, exactly once each (no loss and
+        // no duplication for the peeked first event).
+        let expected: Vec<&Value> = events.iter().collect();
+        assert_eq!(raw_values(&parts), expected, "raw payloads: {parts:?}");
+
+        // Each raw event is immediately followed by the parts parsed from it.
+        assert_eq!(
+            labels(&parts),
+            vec![
+                "stream-start",
+                "raw:message_start",
+                "response-metadata",
+                "raw:content_block_start",
+                "raw:content_block_delta",
+                "text-start",
+                "text-delta:Hello",
+                "raw:content_block_delta",
+                "text-delta:!",
+                "raw:content_block_stop",
+                "text-end",
+                "raw:message_delta",
+                "raw:message_stop",
+                "finish",
+            ]
+        );
+    }
+
+    /// `None` (default) and `Some(false)` both leave the semantic stream
+    /// unchanged and emit no `Raw` part.
+    #[tokio::test]
+    async fn raw_chunks_opt_out_preserves_the_semantic_stream() {
+        let server = MockServer::start().await;
+        mock_sse(&server, &sse_stream(&text_events())).await;
+        let model = make_model(&server);
+
+        let default_parts = collect_stream(
+            model
+                .do_stream(&default_options(test_prompt()))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let opt_out = CallOptions {
+            include_raw_chunks: Some(false),
+            ..default_options(test_prompt())
+        };
+        let opt_out_parts = collect_stream(model.do_stream(&opt_out).await.unwrap()).await;
+
+        assert!(
+            raw_values(&default_parts).is_empty(),
+            "unset must not emit Raw: {default_parts:?}"
+        );
+        assert!(
+            raw_values(&opt_out_parts).is_empty(),
+            "false must not emit Raw: {opt_out_parts:?}"
+        );
+        assert_eq!(labels(&default_parts), labels(&opt_out_parts));
+        assert_eq!(
+            labels(&default_parts),
+            vec![
+                "stream-start",
+                "response-metadata",
+                "text-start",
+                "text-delta:Hello",
+                "text-delta:!",
+                "text-end",
+                "finish",
+            ]
+        );
+    }
+
+    /// Unknown event types (`ping`, a future event type) have no semantic
+    /// mapping — the raw part is the only visibility into them.
+    #[tokio::test]
+    async fn unknown_events_are_forwarded_raw_and_otherwise_ignored() {
+        let server = MockServer::start().await;
+        let events = vec![
+            json!({
+                "type": "message_start",
+                "message": {
+                    "id": "msg_1",
+                    "model": "claude-3-haiku-20240307",
+                    "usage": { "input_tokens": 5 },
+                },
+            }),
+            json!({ "type": "ping" }),
+            json!({ "type": "future_event_type", "payload": { "nested": [1, 2, 3] } }),
+            json!({ "type": "message_stop" }),
+        ];
+        mock_sse(&server, &sse_stream(&events)).await;
+        let model = make_model(&server);
+        let parts = collect_stream(model.do_stream(&options_with_raw()).await.unwrap()).await;
+
+        let expected: Vec<&Value> = events.iter().collect();
+        assert_eq!(raw_values(&parts), expected, "raw payloads: {parts:?}");
+        assert_eq!(
+            labels(&parts),
+            vec![
+                "stream-start",
+                "raw:message_start",
+                "response-metadata",
+                "raw:ping",
+                "raw:future_event_type",
+                "raw:message_stop",
+                "finish",
+            ]
+        );
+    }
+
+    /// The usage / stop-reason event and the terminal event are forwarded raw
+    /// without changing how usage and finish reason are derived.
+    #[tokio::test]
+    async fn usage_and_stop_events_are_forwarded_raw_without_changing_the_finish() {
+        let server = MockServer::start().await;
+        mock_sse(&server, &sse_stream(&text_events())).await;
+        let model = make_model(&server);
+        let parts = collect_stream(model.do_stream(&options_with_raw()).await.unwrap()).await;
+
+        let event_types: Vec<&str> = raw_values(&parts)
+            .into_iter()
+            .map(|v| v["type"].as_str().unwrap_or("<none>"))
+            .collect();
+        assert!(event_types.len() >= 2, "events: {event_types:?}");
+        assert_eq!(
+            event_types[event_types.len() - 2],
+            "message_delta",
+            "events: {event_types:?}"
+        );
+        assert_eq!(event_types.last().copied(), Some("message_stop"));
+
+        match parts.iter().find_map(|p| match p {
+            StreamPart::Finish {
+                finish_reason,
+                usage,
+                ..
+            } => Some((finish_reason, usage)),
+            _ => None,
+        }) {
+            Some((finish_reason, usage)) => {
+                assert_eq!(finish_reason.unified, FinishReasonUnified::Stop);
+                assert_eq!(finish_reason.raw.as_deref(), Some("end_turn"));
+                assert_eq!(usage.input_tokens.total, Some(17));
+                assert_eq!(usage.output_tokens.total, Some(227));
+            }
+            None => panic!("expected Finish, got {parts:?}"),
+        }
+    }
+
+    /// A mid-stream `error` event is forwarded raw before it becomes a
+    /// `StreamPart::Error` — upstream enqueues the raw chunk ahead of the error
+    /// part for the same chunk.
+    #[tokio::test]
+    async fn error_event_is_forwarded_raw_before_the_error_part() {
+        let server = MockServer::start().await;
+        let error_event = json!({
+            "type": "error",
+            "error": { "type": "overloaded_error", "message": "Overloaded" },
+        });
+        let events = vec![
+            json!({
+                "type": "message_start",
+                "message": {
+                    "id": "msg_1",
+                    "model": "claude-3-haiku-20240307",
+                    "usage": { "input_tokens": 10 },
+                },
+            }),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}),
+            error_event.clone(),
+        ];
+        mock_sse(&server, &sse_stream(&events)).await;
+        let model = make_model(&server);
+        let parts = collect_stream(model.do_stream(&options_with_raw()).await.unwrap()).await;
+
+        assert_eq!(
+            labels(&parts),
+            vec![
+                "stream-start",
+                "raw:message_start",
+                "response-metadata",
+                "raw:content_block_start",
+                "raw:content_block_delta",
+                "text-start",
+                "text-delta:partial",
+                "raw:error",
+                "error",
+                "finish",
+            ]
+        );
+        assert_eq!(raw_values(&parts).last().copied(), Some(&error_event));
+        match parts.iter().find_map(|p| match p {
+            StreamPart::Error { error } => Some(error),
+            _ => None,
+        }) {
+            Some(error) => assert!(error.to_string().contains("Overloaded"), "error = {error}"),
+            None => panic!("expected Error, got {parts:?}"),
+        }
+        assert!(matches!(
+            parts.last(),
+            Some(StreamPart::Finish { finish_reason, .. })
+                if matches!(finish_reason.unified, FinishReasonUnified::Error)
+        ));
+    }
+
+    /// A valid-JSON event whose shape does not match the Anthropic schema is
+    /// forwarded raw (upstream forwards `rawValue` before checking
+    /// `chunk.success`) and then reported as a recoverable error item; events
+    /// that follow still reduce.
+    #[tokio::test]
+    async fn shape_invalid_event_is_forwarded_raw_then_reported() {
+        let server = MockServer::start().await;
+        let malformed = json!({ "unexpected": true });
+        let events = vec![
+            json!({
+                "type": "message_start",
+                "message": {
+                    "id": "msg_1",
+                    "model": "claude-3-haiku-20240307",
+                    "usage": { "input_tokens": 10 },
+                },
+            }),
+            malformed.clone(),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"late"}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"message_stop"}),
+        ];
+        mock_sse(&server, &sse_stream(&events)).await;
+        let model = make_model(&server);
+        let items = collect_items(model.do_stream(&options_with_raw()).await.unwrap()).await;
+
+        let raw_idx = items
+            .iter()
+            .position(
+                |item| matches!(item, Ok(StreamPart::Raw { raw_value }) if raw_value == &malformed),
+            )
+            .expect("a Raw part for the malformed event");
+        let error_idx = items
+            .iter()
+            .position(std::result::Result::is_err)
+            .expect("an error item for the malformed event");
+        assert_eq!(
+            error_idx,
+            raw_idx + 1,
+            "the raw event precedes its parse error: {items:?}"
+        );
+        assert!(
+            matches!(items[error_idx], Err(AiMuxError::InvalidResponseData(_))),
+            "got {:?}",
+            items[error_idx]
+        );
+
+        // The stream survives the recoverable frame error.
+        assert!(
+            items.iter().any(
+                |item| matches!(item, Ok(StreamPart::TextDelta { delta, .. }) if delta == "late")
+            ),
+            "later events still reduce: {items:?}"
+        );
+        assert!(matches!(items.last(), Some(Ok(StreamPart::Finish { .. }))));
+    }
+
+    /// The user-facing `stream_text` path forwards the option to the provider.
+    #[tokio::test]
+    async fn stream_text_forwards_include_raw_chunks() {
+        let server = MockServer::start().await;
+        let events = text_events();
+        mock_sse(&server, &sse_stream(&events)).await;
+        let model = make_model(&server);
+
+        let result = stream_text(
+            &model,
+            "Hello",
+            GenerateTextOptions {
+                include_raw_chunks: Some(true),
+                ..GenerateTextOptions::default()
+            },
+        )
+        .await
+        .expect("stream_text should start");
+
+        let mut parts = Vec::new();
+        let mut stream = result.stream;
+        while let Some(part) = stream.next().await {
+            parts.push(part.expect("no stream error"));
+        }
+
+        let expected: Vec<&Value> = events.iter().collect();
+        assert_eq!(raw_values(&parts), expected, "raw payloads: {parts:?}");
+    }
+}
