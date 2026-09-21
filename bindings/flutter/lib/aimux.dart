@@ -574,7 +574,7 @@ class Model implements Finalizable {
     Map<String, dynamic>? options,
   ) {
     _checkOpen();
-    final promptJson = _promptToJson(prompt);
+    final promptJson = promptToJson(prompt);
     final optsJson = options != null ? encodeJson(options, 'options') : null;
 
     final resultStr = withUtf8(promptJson, (promptPtr) {
@@ -635,7 +635,7 @@ class Model implements Finalizable {
     Object prompt,
     Map<String, dynamic>? options,
   ) {
-    final promptJson = _promptToJson(prompt);
+    final promptJson = promptToJson(prompt);
     final optsJson = options != null ? encodeJson(options, 'options') : null;
 
     final controller = StreamController<Map<String, dynamic>>();
@@ -873,7 +873,11 @@ String getModelSpecs(String? sourceUrl) {
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-String _promptToJson(Object prompt) {
+/// The `prompt_json` string every generate/stream call sends: a bare string
+/// prompt is encoded as-is, anything else goes inside the `{"prompt": …}`
+/// wrapper the C ABI accepts. Public because tool-call repair must pass the
+/// same string the call was generated with (RFC-0035 §3.0).
+String promptToJson(Object prompt) {
   if (prompt is String) return encodeJson(prompt, 'prompt');
   return encodeJson({'prompt': prompt}, 'prompt');
 }

@@ -260,6 +260,48 @@ model.close();
 | `streamText` | `Stream<StreamPart> streamText(Object prompt, [GenerateTextOptions? options])` | Yields typed `StreamPart`s |
 | `close` | `void close()` | Release the native handle |
 
+## Tool-call repair
+
+A tool call the model got wrong never fails generation: it comes back with
+`invalid: true` and an `error`. Set `GenerateTextOptions.repairToolCall` to fix
+it host-side (RFC-0035, mirroring the AI SDK's `repairToolCall`). Every invalid
+call in the result is offered to the hook once; return a `RawToolCall` to
+replace it, `null` to leave it alone. Both `toolCalls` and the matching
+`responseMessages` part are rewritten, so the next turn replays the repaired
+arguments.
+
+```dart
+final options = GenerateTextOptions(
+  tools: [Tool.function(weather)],
+  repairToolCall: (context) {
+    // context: the raw argument text, the error, the tool's input schema,
+    // the full tool set, the messages, the instructions.
+    if (context.toolCall.toolName != 'weather') return null;
+    final wrong = jsonDecode(context.toolCall.input) as Map<String, dynamic>;
+    return RawToolCall(
+      toolCallId: context.toolCall.toolCallId,
+      toolName: context.toolCall.toolName,
+      input: jsonEncode({'city': wrong['town']}),
+    );
+  },
+);
+final result = TypedModel(model).generateText('weather in Singapore?', options);
+```
+
+The hook runs on the calling isolate after the native call has returned, so it
+may itself call back into aimux (asking a model to rewrite the arguments, for
+instance). Throwing means the repair failed: the call stays invalid and carries
+a `ToolCallRepairError` whose cause is the thrown object's `toString()`. A
+replacement that still fails schema validation does the same.
+
+`streamText` repairs the `ToolCall` part in flight — tool-input deltas are
+forwarded verbatim and in order — and is the only entry point that awaits an
+`async` hook; the synchronous ones reject a `Future` with a `StateError`.
+Repair does **not** apply to the OpenAI-format outputs
+(`generateTextAsOpenAI` / `streamTextAsOpenAI`): `ChatCompletion` carries no
+invalid marker and the chunk stream forwards the provider's argument deltas
+verbatim.
+
 ## Types
 
 `bindings/flutter/lib/types.dart` declares the typed model surface (with
@@ -267,7 +309,8 @@ model.close();
 `ReasoningEffort`, `TokenUsage`, `Usage`, `FinishReason`, `ToolCall`,
 `FunctionTool`, `Tool`, `ToolChoice`, `ResponseMetadata`, `GenerateContent`
 (sealed), `GenerateResult`, `GenerateTextResult`, `GenerateTextOptions`,
-`ModelMessage`, `StreamPart` (sealed), `FileBytes`, `FileData`, `ContentPart`.
+`ModelMessage`, `StreamPart` (sealed), `FileBytes`, `FileData`, `ContentPart`,
+`RawToolCall` / `ToolCallRepairContext` / `RepairToolCall` (tool-call repair).
 
 `ToolCall` carries `providerMetadata` plus `invalid` (set by Core when tool
 lookup, input parse, or schema validation fails, even after repair) and `error`
