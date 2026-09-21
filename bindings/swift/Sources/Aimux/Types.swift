@@ -1147,6 +1147,34 @@ public struct GenerateTextOptions: Codable, Equatable {
     public var includeRawChunks: Bool?
     public var sessionId: String?
 
+    /// One-shot host-side repair for tool calls the model got wrong
+    /// (RFC-0035), mirroring the AI SDK's `repairToolCall`.
+    ///
+    /// Runs after generation, on every tool call the engine marked invalid, in
+    /// document order and at most once per call. Return a corrected
+    /// ``RawToolCall`` (it is re-validated: still invalid means the call keeps
+    /// an `invalid` flag carrying a `ToolCallRepair` error), `nil` to leave the
+    /// call untouched with its original error, or throw to fail the repair
+    /// with the thrown error's message as cause. A call made without a tool set
+    /// is never repaired and the function is not invoked for it.
+    ///
+    /// The function runs outside any native call, so it may itself call back
+    /// into aimux — asking a model to fix the arguments is the usual reason to
+    /// set it. It is host-side only and never appears in the options JSON.
+    ///
+    /// Applies to `generateText`, `generateObject`, `consumeStreamText` and
+    /// `streamText`; it does **not** apply to the OpenAI-format outputs
+    /// (`generateTextAsOpenAI` / `streamTextAsOpenAI`), whose shape carries no
+    /// invalid marker.
+    public var repairToolCall: RepairToolCall? {
+        get { repairToolCallBox?.run }
+        set { repairToolCallBox = newValue.map(RepairToolCallBox.init(run:)) }
+    }
+
+    /// Not in `CodingKeys`, so it needs its own default for the synthesized
+    /// `init(from:)` — and stays out of the options JSON in both directions.
+    var repairToolCallBox: RepairToolCallBox? = nil
+
     enum CodingKeys: String, CodingKey {
         case maxOutputTokens = "max_output_tokens"
         case temperature
@@ -1178,7 +1206,8 @@ public struct GenerateTextOptions: Codable, Equatable {
                 bodyOverrides: JSONValue? = nil, maxRetries: UInt32? = nil,
                 timeout: TimeoutConfiguration? = nil,
                 includeRawChunks: Bool? = nil,
-                sessionId: String? = nil) {
+                sessionId: String? = nil,
+                repairToolCall: RepairToolCall? = nil) {
         self.maxOutputTokens = maxOutputTokens; self.temperature = temperature
         self.stopSequences = stopSequences; self.topP = topP; self.topK = topK
         self.presencePenalty = presencePenalty; self.frequencyPenalty = frequencyPenalty
@@ -1188,6 +1217,7 @@ public struct GenerateTextOptions: Codable, Equatable {
         self.bodyOverrides = bodyOverrides; self.maxRetries = maxRetries; self.timeout = timeout
         self.includeRawChunks = includeRawChunks
         self.sessionId = sessionId
+        self.repairToolCallBox = repairToolCall.map(RepairToolCallBox.init(run:))
     }
 }
 
@@ -1670,7 +1700,10 @@ public extension Model {
     ) throws -> GenerateTextResult {
         let promptJson = try AimuxCodable.jsonString(for: prompt)
         let optsJson = try options.map { try AimuxCodable.jsonString(for: $0) }
-        let resultJson = try generateText(prompt: promptJson, options: optsJson)
+        let resultJson = try repairedResultJson(
+            generateText(prompt: promptJson, options: optsJson),
+            promptJson: promptJson, optsJson: optsJson, options: options
+        )
         return try JSONDecoder().decode(GenerateTextResult.self, from: Data(resultJson.utf8))
     }
 
@@ -1692,7 +1725,10 @@ public extension Model {
     ) throws -> GenerateObjectResult {
         let promptJson = try AimuxCodable.jsonString(for: prompt)
         let optsJson = try options.map { try AimuxCodable.jsonString(for: $0) }
-        let resultJson = try generateObject(prompt: promptJson, options: optsJson)
+        let resultJson = try repairedResultJson(
+            generateObject(prompt: promptJson, options: optsJson),
+            promptJson: promptJson, optsJson: optsJson, options: options
+        )
         return try JSONDecoder().decode(GenerateObjectResult.self, from: Data(resultJson.utf8))
     }
 
@@ -1710,7 +1746,10 @@ public extension Model {
     ) throws -> StreamTextResultAggregated {
         let promptJson = try AimuxCodable.jsonString(for: prompt)
         let optsJson = try options.map { try AimuxCodable.jsonString(for: $0) }
-        let resultJson = try consumeStreamText(prompt: promptJson, options: optsJson)
+        let resultJson = try repairedResultJson(
+            consumeStreamText(prompt: promptJson, options: optsJson),
+            promptJson: promptJson, optsJson: optsJson, options: options
+        )
         return try JSONDecoder().decode(StreamTextResultAggregated.self, from: Data(resultJson.utf8))
     }
 
@@ -1738,9 +1777,15 @@ public extension Model {
         streamText(prompt: promptJson, options: optsJson,
                    onPart: { json in
                        do {
-                           try onPart(JSONDecoder().decode(StreamPart.self, from: Data(json.utf8)))
+                           // An invalid tool-call part is replaced by its
+                           // repaired form; every other part — argument deltas
+                           // above all — passes through untouched.
+                           let partJson = try repairedStreamPartJson(
+                               json, promptJson: promptJson, optsJson: optsJson, options: options
+                           )
+                           try onPart(JSONDecoder().decode(StreamPart.self, from: Data(partJson.utf8)))
                        } catch {
-                           onError(error) // DecodingError from JSONDecoder
+                           onError(error) // DecodingError from JSONDecoder, AimuxError from repair
                        }
                    },
                    onDone: onDone,
