@@ -61,6 +61,10 @@ func (m *Model) Generate(prompt any, opts *GenerateTextOptions) (*GenerateTextRe
 	if err != nil {
 		return nil, err
 	}
+	resultJSON, err = maybeRepairResult(resultJSON, promptJSON, optsJSON, opts)
+	if err != nil {
+		return nil, err
+	}
 	return ParseGenerateTextResult(resultJSON)
 }
 
@@ -82,6 +86,10 @@ func (m *Model) GenerateObj(prompt any, opts *GenerateTextOptions) (*GenerateObj
 	if err != nil {
 		return nil, err
 	}
+	resultJSON, err = maybeRepairResult(resultJSON, promptJSON, optsJSON, opts)
+	if err != nil {
+		return nil, err
+	}
 	return ParseGenerateObjectResult(resultJSON)
 }
 
@@ -99,6 +107,10 @@ func (m *Model) ConsumeStream(prompt any, opts *GenerateTextOptions) (*StreamTex
 		return nil, err
 	}
 	resultJSON, err := m.ConsumeStreamText(promptJSON, optsJSON)
+	if err != nil {
+		return nil, err
+	}
+	resultJSON, err = maybeRepairResult(resultJSON, promptJSON, optsJSON, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -183,6 +195,17 @@ func (m *Model) StreamContext(
 				ts.err = err
 				rawStream.cancel(err)
 				return
+			}
+			// Only a complete tool call can be repaired; input deltas are
+			// forwarded untouched, as the AI SDK does (RFC-0035 §4).
+			if sp.Tag == "ToolCall" && opts != nil && opts.RepairToolCall != nil {
+				payload, err := repairStreamToolCall(sp.Payload, promptJSON, optsJSON, opts.RepairToolCall)
+				if err != nil {
+					ts.err = err
+					rawStream.cancel(err)
+					return
+				}
+				sp.Payload = payload
 			}
 			select {
 			case ts.parts <- sp:

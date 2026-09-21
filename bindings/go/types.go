@@ -298,6 +298,15 @@ type GenerateTextOptions struct {
 	Timeout          *TimeoutConfiguration `json:"timeout,omitempty"`
 	IncludeRawChunks *bool                 `json:"include_raw_chunks,omitempty"`
 	SessionID        *string               `json:"session_id,omitempty"`
+	// RepairToolCall repairs tool calls the model got wrong (RFC-0035). It
+	// runs in Go, after generation, on every call the engine marked invalid —
+	// never serialized into the options sent to the engine.
+	//
+	// It applies to the typed entry points (Generate, GenerateObj,
+	// ConsumeStream, Stream) only. The OpenAI-format outputs
+	// (GenerateAsOpenAI, StreamAsOpenAI) carry no invalid marker, so repair
+	// does not apply there; drive it from the native result instead.
+	RepairToolCall RepairToolCallFunc `json:"-"`
 }
 
 // Tool is a function tool definition (the "function" variant).
