@@ -1,0 +1,99 @@
+# RFC-0035: 无状态工具调用修复(stateless tool-call repair)
+
+> **Status**: P1(Rust 侧)已实现;P2(各语言宿主循环)待做
+> **Date**: 2026-09-22
+> **Scope**: 让 7 个绑定拿到等价于 AI SDK `repairToolCall` 的能力,而不引入回调、句柄或会话
+> **Related**: [RFC-0016](0016-align-with-aisdk.md) §7.5(agent loop 明确不做)、[#186](https://github.com/arcships/aimux/pull/186)(函数指针回调,已否决)、[#191](https://github.com/arcships/aimux/pull/191)(有状态 operation session,已否决)
+
+---
+
+## 1. 问题
+
+`GenerateTextOptions.repair_tool_call` 是一个 `#[serde(skip)]` 闭包:只有 Rust 调用方能用。
+绑定无法把函数塞进 JSON,于是 Node / Python / Go / Java / Kotlin / Swift / Flutter 七家全部缺失这一能力(见 [docs/api/gaps.md](../docs/api/gaps.md) §8)。
+
+前两次尝试都失败在同一个地方——**把控制流搬过 ABI**:
+
+- **#186:函数指针回调**。宿主注册 `extern "C"` 回调,core 在 `parse_tool_call` 里回调过去。问题:回调在 FFI 线程栈上同步执行,而宿主的修复通常是**再发一次 LLM 请求**(异步)。要么宿主在回调里阻塞(撞上 `ffi_block_on` 的重入保护),要么 core 得把 future 挂起并交回控制权——那就是 #191。
+- **#191:有状态 operation session**。core 持有一个暂停中的生成操作,通过 `Event`/`Reply` 与宿主往返。问题:句柄生命周期、超时、取消、泄漏、7 家绑定各自的资源管理,全部翻倍;为一个一次性、纯数据的判断引入了一整套会话协议。
+
+## 2. 为什么无状态就够
+
+三个既成事实合在一起,让"暂停生成"这件事根本没必要:
+
+1. **core 的 `generate_text` / `stream_text` 是单次模型调用**。没有多步循环,没有工具执行——agent loop 按 RFC-0016 §7.5 明确不在 core 范围内。
+2. **非法工具调用是数据,不是失败**。`parse_tool_call` 从不让生成失败:解析/校验不过的调用以 `ToolCall { invalid: true, error }` 的形态返回。
+3. **同一次调用里没有任何后续逻辑依赖这个结果**。它只被放进 `GenerateTextResult.tool_calls`、`response_messages`(经 `ResponseMessageBuilder::tool_call`)和 `StreamPart::ToolCall`。
+
+所以修复不需要发生在生成过程**之中**。宿主照常调用现有入口(不传任何钩子),在结果里看到 `invalid` 的调用,用自己的语言修,再调一个**纯函数**把结果算出来。
+跨边界的只有 JSON:没有句柄,没有回调,没有会话,不新增 crate。
+
+## 3. 线上形状
+
+### 3.1 修复上下文(`tool_call_repair_context`)
+
+对齐 AI SDK `repairToolCall` 的入参:
+
+```json
+{ "tool_call": { "tool_call_id": "call-1", "tool_name": "weather",
+                 "input": "{\"town\":\"Singapore\"}", "dynamic": true },
+  "error": { "InvalidToolInput": { "tool_name": "weather", "tool_input": "…", "cause": "…" } },
+  "input_schema": { "type": "object", "required": ["city"], "…": "…" },
+  "tools": [ … ], "messages": [ … ], "instructions": null }
+```
+
+`tool_call.input` 是 provider 的**原始参数文本**(模型吐出来的那串),不是解析后的对象——这正是修复函数要看的东西。它由 `raw_tool_input` 从非法调用的 `input` 反解出来(`invalid_tool_call` 在文本是合法 JSON 时会解析它,`raw_tool_input` 是其逆运算)。
+
+`error` 直接取自调用自身的 `error` 字段,不重新推导。**这是宿主必须持有非法 `ToolCall` 原件的原因**,也是唯一的信息损失点:非法调用的 `dynamic` 一律被置为 `Some(true)`,原值不可恢复。对本流程无影响(原始 error 是读出来的,不是重算的)。
+
+### 3.2 宿主答复(`ToolCallRepairReply`)
+
+内部 tag、snake_case、`deny_unknown_fields`:
+
+```json
+{"type": "repaired", "tool_call": { "…": "RawToolCall" }}
+{"type": "unchanged"}
+{"type": "failed", "message": "repair model unavailable"}
+```
+
+语义与闭包路径逐字对应,**并且共用同一段分支代码**(`RepairOutcome` + `apply_repair_outcome`):
+
+| reply | 闭包等价物 | 结果 |
+|---|---|---|
+| `repaired` | `Ok(Some(call))` | 重新解析+校验;通过则有效调用,不通过则 `ToolCallRepair { original_error, cause }` |
+| `unchanged` | `Ok(None)` | 保留原始 error 的非法调用 |
+| `failed` | `Err(e)` | `ToolCallRepair { original_error, cause: Other(message) }` |
+
+`failed` 的 `cause` 只能是 `Other`:宿主语言的异常在这一侧没有类型对应物。
+
+### 3.3 结果补丁(`apply_tool_call_repair_to_result`)
+
+输入整份 `GenerateTextResult`(或 `GenerateObjectResult`,自动识别其 `raw` 嵌套),同时改写 `tool_calls[]` 与 `response_messages` 中对应的 tool-call part——后者沿用 builder 的 `response_tool_call_input` 规则(仍然非法且输入是原始标量时不回放)。**两处必须一起改**,否则下一轮对话会把未修复的参数发回模型。
+
+`tool_call_id` 对不上、或目标调用本来就是合法的,都返回 `InvalidArgument` 而不是静默 no-op:这类情况是宿主的 bug,静默掩盖只会更难查。
+
+## 4. OpenAI 流式输出的决定:不反映修复
+
+删除 `to_chat_completion_stream_with_deferred_tool_calls` 与 `defer_tool_calls` 标志(原先:配置了 repair 时扣住 `ToolInputDelta`,等 `StreamPart::ToolCall` 落地再一次性吐出)。
+
+理由是与 AI SDK 对齐:上游**永远**立即转发工具输入增量,不会因为配置了修复就扣住。扣住还带来两个真实代价——首字节延迟变差,以及一个只在"配了 repair"时才走的独立代码路径。
+`stream_text_as_openai` 的 rustdoc 现在写明:增量是 provider 原文,需要修复后的调用请用非流式 OpenAI 输出或原生 `stream_text`。
+
+非流式 `ChatCompletion` 同样**不提供**补丁函数:它不携带 `invalid` / `error`,宿主根本无从判断哪个调用需要修——修复只能由原生结果驱动。
+
+## 5. 暴露面
+
+| 层 | 名字 |
+|---|---|
+| core | `tool_call_repair_context` / `apply_tool_call_repair` / `apply_tool_call_repair_to_result` / `ToolCallRepairReply` |
+| C ABI | `aimux_tool_call_repair_context` / `aimux_apply_tool_call_repair` / `aimux_apply_tool_call_repair_to_result` |
+| Node | `toolCallRepairContext` / `applyToolCallRepair` / `applyToolCallRepairToResult` |
+| Python | 同 core 名 |
+
+全部同步、纯函数:无 tokio、无 I/O、无全局状态。因此它们**不经过 `ffi_block_on`**,也就不会触发重入保护——从 `aimux_stream_text` 回调里调用是安全的。
+
+现有 Rust 闭包 API(`ToolCallRepair`)原样保留,行为不变。
+
+## 6. 契约
+
+`contract-tests/fixtures/tool-call-repair.json` 固定每个分支的输入/期望输出,P2 的七家绑定对同一份文件断言。Rust 侧 `contract_fixture_matches_the_implementation` 回放同一份文件,防止其漂移。
