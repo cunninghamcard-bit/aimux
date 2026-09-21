@@ -9,6 +9,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::AiMuxError;
@@ -16,14 +17,21 @@ use crate::tool::{Tool, ToolCall};
 use crate::types::ProviderMetadata;
 
 /// Provider-facing tool call before Core parses and validates its input.
-#[derive(Debug, Clone)]
+///
+/// The wire shape matches [`ToolCall`] field for field, except that `input`
+/// is the provider's raw argument *text* rather than a parsed value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawToolCall {
     pub tool_call_id: String,
     pub tool_name: String,
     pub input: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_executed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dynamic: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thought_signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_metadata: Option<ProviderMetadata>,
 }
 
@@ -132,43 +140,58 @@ pub async fn parse_tool_call(
     match parse_and_validate_tool_call(&tool_call, tools) {
         Ok((input, dynamic)) => valid_tool_call(tool_call, input, dynamic),
         Err(original_error) => {
-            if let Some(repair_tool_call) = repair_tool_call {
-                let context = ToolCallRepairContext {
-                    instructions: instructions.map(str::to_owned),
-                    system: instructions.map(str::to_owned),
-                    messages: messages.to_vec(),
-                    tool_call: tool_call.clone(),
-                    tools: tools.to_vec(),
-                    error: original_error.clone(),
-                };
-                match repair_tool_call.repair(context).await {
-                    Ok(Some(repaired)) => match parse_and_validate_tool_call(&repaired, tools) {
-                        Ok((input, dynamic)) => return valid_tool_call(repaired, input, dynamic),
-                        Err(repaired_error) => {
-                            return invalid_tool_call(
-                                tool_call,
-                                AiMuxError::ToolCallRepair {
-                                    original_error: Box::new(original_error),
-                                    cause: Box::new(repaired_error),
-                                },
-                            );
-                        }
-                    },
-                    Ok(None) => {}
-                    Err(repair_error) => {
-                        return invalid_tool_call(
-                            tool_call,
-                            AiMuxError::ToolCallRepair {
-                                original_error: Box::new(original_error),
-                                cause: Box::new(repair_error),
-                            },
-                        );
-                    }
-                }
-            }
-            invalid_tool_call(tool_call, original_error)
+            let Some(repair_tool_call) = repair_tool_call else {
+                return invalid_tool_call(tool_call, original_error);
+            };
+            let context = ToolCallRepairContext {
+                instructions: instructions.map(str::to_owned),
+                system: instructions.map(str::to_owned),
+                messages: messages.to_vec(),
+                tool_call: tool_call.clone(),
+                tools: tools.to_vec(),
+                error: original_error.clone(),
+            };
+            let outcome = match repair_tool_call.repair(context).await {
+                Ok(Some(repaired)) => RepairOutcome::Repaired(repaired),
+                Ok(None) => RepairOutcome::Unchanged,
+                Err(repair_error) => RepairOutcome::Failed(repair_error),
+            };
+            apply_repair_outcome(tool_call, original_error, tools, outcome)
         }
     }
+}
+
+/// What a repair attempt produced, independent of how it was obtained (the
+/// in-process [`ToolCallRepair`] closure, or a host reply that crossed the
+/// bindings as JSON).
+enum RepairOutcome {
+    Repaired(RawToolCall),
+    Unchanged,
+    Failed(AiMuxError),
+}
+
+/// The AI SDK `parseToolCall` post-repair contract, shared by both paths.
+fn apply_repair_outcome(
+    tool_call: RawToolCall,
+    original_error: AiMuxError,
+    tools: &[Tool],
+    outcome: RepairOutcome,
+) -> ToolCall {
+    let cause = match outcome {
+        RepairOutcome::Repaired(repaired) => match parse_and_validate_tool_call(&repaired, tools) {
+            Ok((input, dynamic)) => return valid_tool_call(repaired, input, dynamic),
+            Err(repaired_error) => repaired_error,
+        },
+        RepairOutcome::Unchanged => return invalid_tool_call(tool_call, original_error),
+        RepairOutcome::Failed(repair_error) => repair_error,
+    };
+    invalid_tool_call(
+        tool_call,
+        AiMuxError::ToolCallRepair {
+            original_error: Box::new(original_error),
+            cause: Box::new(cause),
+        },
+    )
 }
 
 fn parse_and_validate_tool_call(
@@ -317,4 +340,210 @@ fn invalid_tool_call(tool_call: RawToolCall, error: AiMuxError) -> ToolCall {
         invalid: Some(true),
         error: Some(error),
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stateless host-side repair (RFC-0035)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A host's answer to one tool-call repair request.
+///
+/// The bindings cannot carry a [`ToolCallRepair`] closure, so a host instead
+/// reads the invalid call off the result, repairs it in its own language, and
+/// hands the answer back as this value. Wire shape:
+/// `{"type":"repaired","tool_call":{…}}`, `{"type":"unchanged"}`, or
+/// `{"type":"failed","message":"…"}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolCallRepairReply {
+    /// Re-validate this replacement call, exactly as the closure path does
+    /// for a returned `Some(call)`.
+    Repaired { tool_call: RawToolCall },
+    /// Keep the original failure — the closure path's `None`.
+    Unchanged,
+    /// The host's repair attempt itself failed. Reported as
+    /// `ToolCallRepair { cause: Other(message) }`, since a host error has no
+    /// typed counterpart on this side.
+    Failed { message: String },
+}
+
+impl From<ToolCallRepairReply> for RepairOutcome {
+    fn from(reply: ToolCallRepairReply) -> Self {
+        match reply {
+            ToolCallRepairReply::Repaired { tool_call } => RepairOutcome::Repaired(tool_call),
+            ToolCallRepairReply::Unchanged => RepairOutcome::Unchanged,
+            ToolCallRepairReply::Failed { message } => {
+                RepairOutcome::Failed(AiMuxError::Other(message))
+            }
+        }
+    }
+}
+
+/// Reconstruct the provider-facing call an invalid [`ToolCall`] was built
+/// from. [`invalid_tool_call`] parses the raw text when it is valid JSON, so
+/// [`raw_tool_input`] is its exact inverse.
+///
+/// `dynamic` is not recovered: an invalid call always reports `Some(true)`.
+/// That only matters for re-deriving the original error, which is read off the
+/// call instead.
+fn raw_from_invalid(tool_call: &ToolCall) -> Result<(RawToolCall, AiMuxError), AiMuxError> {
+    if tool_call.invalid != Some(true) {
+        return Err(AiMuxError::InvalidArgument(format!(
+            "tool call '{}' is not invalid; nothing to repair",
+            tool_call.tool_call_id
+        )));
+    }
+    let error = tool_call.error.clone().ok_or_else(|| {
+        AiMuxError::InvalidArgument(format!(
+            "invalid tool call '{}' carries no error",
+            tool_call.tool_call_id
+        ))
+    })?;
+    Ok((
+        RawToolCall {
+            tool_call_id: tool_call.tool_call_id.clone(),
+            tool_name: tool_call.tool_name.clone(),
+            input: raw_tool_input(&tool_call.input),
+            provider_executed: tool_call.provider_executed,
+            dynamic: tool_call.dynamic,
+            thought_signature: tool_call.thought_signature.clone(),
+            provider_metadata: tool_call.provider_metadata.clone(),
+        },
+        error,
+    ))
+}
+
+/// Build the repair argument a host needs, as JSON.
+///
+/// Mirrors the AI SDK `repairToolCall` argument: `{tool_call, error,
+/// input_schema, tools, messages, instructions}`. `tool_call` is the
+/// provider-facing call (raw argument *text*), `input_schema` the schema of
+/// the named tool (an empty-object schema when the name does not resolve),
+/// and `error` the serialized failure the call already carries.
+///
+/// # Errors
+///
+/// [`AiMuxError::InvalidArgument`] when `tool_call` is not an invalid call, or
+/// carries no error.
+pub fn tool_call_repair_context(
+    tool_call: &ToolCall,
+    tools: &[Tool],
+    messages: &[crate::message::ModelMessage],
+    instructions: Option<&str>,
+) -> Result<Value, AiMuxError> {
+    let (raw, error) = raw_from_invalid(tool_call)?;
+    let context = ToolCallRepairContext {
+        instructions: instructions.map(str::to_owned),
+        system: instructions.map(str::to_owned),
+        messages: messages.to_vec(),
+        tool_call: raw,
+        tools: tools.to_vec(),
+        error,
+    };
+    Ok(serde_json::json!({
+        "tool_call": context.tool_call,
+        "error": context.error,
+        "input_schema": context.input_schema(&context.tool_call.tool_name),
+        "tools": context.tools,
+        "messages": context.messages,
+        "instructions": context.instructions,
+    }))
+}
+
+/// Resolve one invalid tool call against a host's repair reply.
+///
+/// Produces the same [`ToolCall`] the in-process [`ToolCallRepair`] closure
+/// would have produced for the equivalent return value — both paths run
+/// [`apply_repair_outcome`].
+///
+/// # Errors
+///
+/// [`AiMuxError::InvalidArgument`] when `tool_call` is not an invalid call, or
+/// carries no error.
+pub fn apply_tool_call_repair(
+    tool_call: &ToolCall,
+    tools: &[Tool],
+    reply: ToolCallRepairReply,
+) -> Result<ToolCall, AiMuxError> {
+    let (raw, error) = raw_from_invalid(tool_call)?;
+    Ok(apply_repair_outcome(raw, error, tools, reply.into()))
+}
+
+/// Apply a repair reply to a serialized `GenerateTextResult` or
+/// `GenerateObjectResult`, returning the patched result.
+///
+/// Both `tool_calls[]` and the matching `response_messages[]` tool-call part
+/// are rewritten, the latter under the same rule `to_response_messages` uses
+/// (malformed primitive input is not replayed as a prompt input). A
+/// `GenerateObjectResult` is recognised by its nested `raw` result; `object`
+/// is untouched, because it is parsed from the model's text, not from a tool
+/// call.
+///
+/// The OpenAI-shaped `ChatCompletion` is deliberately not supported: it drops
+/// `invalid` and `error`, so a host cannot tell from it that a call needs
+/// repairing in the first place. Repair the native result and convert.
+///
+/// # Errors
+///
+/// [`AiMuxError::InvalidArgument`] when the document has no `tool_calls`
+/// array, when no entry matches `tool_call_id`, or when the matched call is
+/// not an invalid call.
+pub fn apply_tool_call_repair_to_result(
+    result: &Value,
+    tools: &[Tool],
+    tool_call_id: &str,
+    reply: ToolCallRepairReply,
+) -> Result<Value, AiMuxError> {
+    let mut patched = result.clone();
+    // `GenerateObjectResult` carries the whole text result under `raw`.
+    let target = if patched.get("tool_calls").is_some() {
+        &mut patched
+    } else {
+        patched
+            .get_mut("raw")
+            .ok_or_else(|| AiMuxError::InvalidArgument("result: no tool_calls array".to_string()))?
+    };
+
+    let calls = target
+        .get_mut("tool_calls")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| AiMuxError::InvalidArgument("result: no tool_calls array".to_string()))?;
+    let slot = calls
+        .iter_mut()
+        .find(|call| call.get("tool_call_id").and_then(Value::as_str) == Some(tool_call_id))
+        .ok_or_else(|| {
+            AiMuxError::InvalidArgument(format!("result: no tool call '{tool_call_id}'"))
+        })?;
+    let original: ToolCall = serde_json::from_value(slot.clone())
+        .map_err(|error| AiMuxError::InvalidArgument(format!("result.tool_calls: {error}")))?;
+
+    let repaired = apply_tool_call_repair(&original, tools, reply)?;
+    *slot = serde_json::to_value(&repaired)
+        .map_err(|error| AiMuxError::InvalidArgument(format!("tool call: {error}")))?;
+
+    // The replayed transcript must agree with `tool_calls`, or the next turn
+    // sends the model the unrepaired arguments.
+    let replay_input =
+        crate::response_messages::response_tool_call_input(&repaired.input, repaired.invalid);
+    for part in target
+        .get_mut("response_messages")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+        .filter_map(|message| message.get_mut("content")?.as_array_mut())
+        .flatten()
+    {
+        if part.get("type").and_then(Value::as_str) != Some("tool_call")
+            || part.get("tool_call_id").and_then(Value::as_str) != Some(tool_call_id)
+        {
+            continue;
+        }
+        let Some(part) = part.as_object_mut() else {
+            continue;
+        };
+        part.insert("tool_name".to_string(), repaired.tool_name.clone().into());
+        part.insert("input".to_string(), replay_input.clone());
+    }
+
+    Ok(patched)
 }
