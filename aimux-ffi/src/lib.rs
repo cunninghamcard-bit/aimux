@@ -62,8 +62,13 @@ use aimux_core::generate::{
 use aimux_core::language_model::LanguageModel;
 use aimux_core::message::ModelPrompt;
 use aimux_core::openai_output::OpenAiStreamOptions;
+use aimux_core::parse_tool_call::{
+    ToolCallRepairReply, apply_tool_call_repair, apply_tool_call_repair_to_result,
+    tool_call_repair_context,
+};
 use aimux_core::provider::Provider;
 use aimux_core::recording::RecordingError;
+use aimux_core::tool::{Tool, ToolCall};
 use aimux_core::trace::{RingTraceStore, TraceFilter, TraceLayer};
 use aimux_providers::anthropic::{AnthropicConfig, AnthropicProvider};
 use aimux_providers::anthropic_aws::{AnthropicAwsProvider, AnthropicAwsProviderConfig};
@@ -1716,6 +1721,92 @@ pub extern "C" fn aimux_stream_text_with_abort(
             stream_ctx,
             Some(abort_signal),
         )
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// C ABI: stateless tool-call repair (RFC-0035)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Build the repair argument for one invalid tool call (RFC-0035).
+///
+/// `tool_call_json` is one entry of `GenerateTextResult.tool_calls` with
+/// `"invalid": true`; `tools_json` the same `Tool[]` the call was made with;
+/// `messages_json` a `ModelMessage[]` (`"[]"` when none); `instructions` may
+/// be NULL. Writes `{tool_call, error, input_schema, tools, messages,
+/// instructions}` — the AI SDK `repairToolCall` argument — to `*out_json`.
+///
+/// Pure: no model handle, no runtime, no I/O. Safe to call from inside a
+/// stream callback (the re-entrancy guard only covers runtime `block_on`).
+#[unsafe(no_mangle)]
+pub extern "C" fn aimux_tool_call_repair_context(
+    tool_call_json: *const c_char,
+    tools_json: *const c_char,
+    messages_json: *const c_char,
+    instructions: *const c_char,
+    out_json: *mut *mut c_char,
+) -> *mut aimux_error_t {
+    with_out_string(out_json, "out_json", || {
+        let tool_call: ToolCall = parse_json_arg(tool_call_json, "tool_call_json")?;
+        let tools: Vec<Tool> = parse_json_arg(tools_json, "tools_json")?;
+        let messages: Vec<aimux_core::message::ModelMessage> =
+            parse_json_arg(messages_json, "messages_json")?;
+        let instructions = opt_str_arg(instructions, "instructions")?;
+        let context =
+            tool_call_repair_context(&tool_call, &tools, &messages, instructions.as_deref())?;
+        to_json(&context)
+    })
+}
+
+/// Resolve one invalid tool call against a host's repair reply (RFC-0035).
+///
+/// `reply_json` is `{"type":"repaired","tool_call":{…}}`,
+/// `{"type":"unchanged"}`, or `{"type":"failed","message":"…"}`. Writes the
+/// resulting `ToolCall` — valid, or invalid with the AI SDK's nested
+/// `ToolCallRepairError` — to `*out_json`. Same purity as
+/// [`aimux_tool_call_repair_context`].
+#[unsafe(no_mangle)]
+pub extern "C" fn aimux_apply_tool_call_repair(
+    tool_call_json: *const c_char,
+    tools_json: *const c_char,
+    reply_json: *const c_char,
+    out_json: *mut *mut c_char,
+) -> *mut aimux_error_t {
+    with_out_string(out_json, "out_json", || {
+        let tool_call: ToolCall = parse_json_arg(tool_call_json, "tool_call_json")?;
+        let tools: Vec<Tool> = parse_json_arg(tools_json, "tools_json")?;
+        let reply: ToolCallRepairReply = parse_json_arg(reply_json, "reply_json")?;
+        to_json(&apply_tool_call_repair(&tool_call, &tools, reply)?)
+    })
+}
+
+/// Apply a repair reply to a whole result document (RFC-0035).
+///
+/// `result_json` is a serialized `GenerateTextResult` or
+/// `GenerateObjectResult`; both `tool_calls` and the matching
+/// `response_messages` tool-call part are rewritten. The OpenAI-shaped
+/// `ChatCompletion` is not supported — it carries no `invalid`/`error`, so
+/// repair is driven from the native result. Same purity as
+/// [`aimux_tool_call_repair_context`].
+#[unsafe(no_mangle)]
+pub extern "C" fn aimux_apply_tool_call_repair_to_result(
+    result_json: *const c_char,
+    tools_json: *const c_char,
+    tool_call_id: *const c_char,
+    reply_json: *const c_char,
+    out_json: *mut *mut c_char,
+) -> *mut aimux_error_t {
+    with_out_string(out_json, "out_json", || {
+        let result: serde_json::Value = parse_json_arg(result_json, "result_json")?;
+        let tools: Vec<Tool> = parse_json_arg(tools_json, "tools_json")?;
+        let tool_call_id = str_arg(tool_call_id, "tool_call_id")?;
+        let reply: ToolCallRepairReply = parse_json_arg(reply_json, "reply_json")?;
+        to_json(&apply_tool_call_repair_to_result(
+            &result,
+            &tools,
+            &tool_call_id,
+            reply,
+        )?)
     })
 }
 

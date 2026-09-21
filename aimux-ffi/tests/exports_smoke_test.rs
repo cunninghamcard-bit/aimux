@@ -30,7 +30,7 @@
 //!
 //! ## Coverage
 //!
-//! All 114 `#[unsafe(no_mangle)]` exports in `src/lib.rs` are exercised (the
+//! All 117 `#[unsafe(no_mangle)]` exports in `src/lib.rs` are exercised (the
 //! constructor and utility classes in full; the session class one
 //! representative call per export). [`header_and_exports_agree`] pins the
 //! count against the two headers.
@@ -46,16 +46,17 @@ use aimux_ffi::{
     AIMUX_E_FFI_INVALID_WIRE_JSON, AIMUX_E_INVALID_ARGUMENT, AIMUX_OK, aimux_abort_signal_abort,
     aimux_abort_signal_drop, aimux_abort_signal_new, aimux_anthropic_aws_new,
     aimux_anthropic_aws_new_with_base, aimux_anthropic_new, aimux_anthropic_new_with_base,
-    aimux_azure_new, aimux_azure_new_with_base, aimux_bedrock_new, aimux_bedrock_new_with_base,
-    aimux_codex_refresh, aimux_cohere_embedding_new, aimux_cohere_embedding_new_with_base,
-    aimux_cohere_new, aimux_cohere_new_with_base, aimux_cohere_reranking_new,
-    aimux_cohere_reranking_new_with_base, aimux_consume_stream_text, aimux_drop_handle,
-    aimux_embed, aimux_error_available_tools, aimux_error_code, aimux_error_free,
-    aimux_error_message, aimux_error_model_id, aimux_error_model_type, aimux_error_original_error,
-    aimux_error_provider_code, aimux_error_provider_id, aimux_error_provider_message,
-    aimux_error_response_body, aimux_error_retry_ms, aimux_error_retryable, aimux_error_status,
-    aimux_error_t, aimux_error_tool_input, aimux_error_tool_name, aimux_file_upload,
-    aimux_free_string, aimux_generate_object, aimux_generate_text, aimux_generate_text_as_openai,
+    aimux_apply_tool_call_repair, aimux_apply_tool_call_repair_to_result, aimux_azure_new,
+    aimux_azure_new_with_base, aimux_bedrock_new, aimux_bedrock_new_with_base, aimux_codex_refresh,
+    aimux_cohere_embedding_new, aimux_cohere_embedding_new_with_base, aimux_cohere_new,
+    aimux_cohere_new_with_base, aimux_cohere_reranking_new, aimux_cohere_reranking_new_with_base,
+    aimux_consume_stream_text, aimux_drop_handle, aimux_embed, aimux_error_available_tools,
+    aimux_error_code, aimux_error_free, aimux_error_message, aimux_error_model_id,
+    aimux_error_model_type, aimux_error_original_error, aimux_error_provider_code,
+    aimux_error_provider_id, aimux_error_provider_message, aimux_error_response_body,
+    aimux_error_retry_ms, aimux_error_retryable, aimux_error_status, aimux_error_t,
+    aimux_error_tool_input, aimux_error_tool_name, aimux_file_upload, aimux_free_string,
+    aimux_generate_object, aimux_generate_text, aimux_generate_text_as_openai,
     aimux_get_model_specs, aimux_google_embedding_new, aimux_google_embedding_new_with_base,
     aimux_google_image_new, aimux_google_image_new_with_base, aimux_google_video_new,
     aimux_google_video_new_with_base, aimux_image_generate, aimux_init_logging, aimux_init_proxy,
@@ -72,12 +73,12 @@ use aimux_ffi::{
     aimux_session_store_init, aimux_speech_generate, aimux_stream_text,
     aimux_stream_text_as_openai, aimux_stream_text_as_openai_with_abort,
     aimux_stream_text_with_abort, aimux_tavily_search_new, aimux_tavily_search_new_with_base,
-    aimux_trace_aggregate, aimux_trace_clear, aimux_trace_export_jsonl, aimux_trace_new,
-    aimux_trace_new_audited, aimux_trace_session_chain, aimux_trace_session_trajectory,
-    aimux_transcription_generate, aimux_transcription_input_done, aimux_transcription_next_part,
-    aimux_transcription_push_audio, aimux_transcription_session_drop,
-    aimux_transcription_session_new, aimux_vertex_new, aimux_vertex_new_with_base,
-    aimux_video_generate, aimux_xai_new, aimux_xai_new_with_base,
+    aimux_tool_call_repair_context, aimux_trace_aggregate, aimux_trace_clear,
+    aimux_trace_export_jsonl, aimux_trace_new, aimux_trace_new_audited, aimux_trace_session_chain,
+    aimux_trace_session_trajectory, aimux_transcription_generate, aimux_transcription_input_done,
+    aimux_transcription_next_part, aimux_transcription_push_audio,
+    aimux_transcription_session_drop, aimux_transcription_session_new, aimux_vertex_new,
+    aimux_vertex_new_with_base, aimux_video_generate, aimux_xai_new, aimux_xai_new_with_base,
 };
 use common::{c, expect_aimux_error, expect_failure, expect_ffi_error, msg, ok, take};
 
@@ -156,7 +157,7 @@ fn header_and_exports_agree() {
     exports.sort();
     assert_eq!(
         exports.len(),
-        119,
+        122,
         "export count changed; update the headers"
     );
 
@@ -1112,4 +1113,106 @@ fn recording_exports_lifecycle_cleanly() {
         "recording_try_flush after stop",
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── stateless tool-call repair (RFC-0035, 3 exports) ────────────────────────
+
+/// The three repair exports are pure: they take JSON, return JSON, and never
+/// touch a handle or the runtime. Exercised end to end here, plus the argument
+/// failure paths (NULL / malformed JSON).
+#[test]
+fn tool_call_repair_exports_round_trip() {
+    const TOOLS: &str = r#"[{"type":"function","name":"weather","input_schema":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}]"#;
+    const INVALID: &str = r#"{"tool_call_id":"call-1","tool_name":"weather","input":{"town":"SG"},"dynamic":true,"invalid":true,"error":{"InvalidToolInput":{"tool_name":"weather","tool_input":"{\"town\":\"SG\"}","cause":"missing city"}}}"#;
+    const REPAIRED: &str = r#"{"type":"repaired","tool_call":{"tool_call_id":"call-1","tool_name":"weather","input":"{\"city\":\"SG\"}"}}"#;
+
+    let mut out: *mut c_char = ptr::null_mut();
+    let e = aimux_tool_call_repair_context(
+        c(INVALID).as_ptr(),
+        c(TOOLS).as_ptr(),
+        c("[]").as_ptr(),
+        ptr::null(),
+        &mut out,
+    );
+    ok(e, "tool_call_repair_context");
+    let context = read_and_free_json(out, "tool_call_repair_context");
+    assert!(
+        context.contains("\"input_schema\"") && context.contains("{\\\"town\\\":\\\"SG\\\"}"),
+        "context should carry the schema and the raw argument text: {context}"
+    );
+
+    let e = aimux_apply_tool_call_repair(
+        c(INVALID).as_ptr(),
+        c(TOOLS).as_ptr(),
+        c(REPAIRED).as_ptr(),
+        &mut out,
+    );
+    ok(e, "apply_tool_call_repair");
+    let repaired = read_and_free_json(out, "apply_tool_call_repair");
+    assert!(
+        repaired.contains(r#""input":{"city":"SG"}"#) && !repaired.contains("invalid"),
+        "repaired call should be valid: {repaired}"
+    );
+
+    let result = format!(r#"{{"tool_calls":[{INVALID}],"response_messages":[]}}"#);
+    let e = aimux_apply_tool_call_repair_to_result(
+        c(&result).as_ptr(),
+        c(TOOLS).as_ptr(),
+        c("call-1").as_ptr(),
+        c(r#"{"type":"unchanged"}"#).as_ptr(),
+        &mut out,
+    );
+    ok(e, "apply_tool_call_repair_to_result");
+    let patched = read_and_free_json(out, "apply_tool_call_repair_to_result");
+    assert!(patched.contains(r#""invalid":true"#), "{patched}");
+
+    // A reply naming a tool call the document does not have is an AiMuxError.
+    let e = aimux_apply_tool_call_repair_to_result(
+        c(&result).as_ptr(),
+        c(TOOLS).as_ptr(),
+        c("call-9").as_ptr(),
+        c(r#"{"type":"unchanged"}"#).as_ptr(),
+        &mut out,
+    );
+    let (code, _) = expect_aimux_error(e, "apply_tool_call_repair_to_result (unknown id)");
+    assert_eq!(code, AIMUX_E_INVALID_ARGUMENT);
+    assert!(out.is_null());
+}
+
+#[test]
+fn tool_call_repair_exports_reject_bad_arguments() {
+    const TOOLS: &str = "[]";
+    let mut out: *mut c_char = ptr::null_mut();
+
+    let e =
+        aimux_apply_tool_call_repair(ptr::null(), c(TOOLS).as_ptr(), c("{}").as_ptr(), &mut out);
+    assert_eq!(
+        expect_ffi_error(e, "apply_tool_call_repair (null tool_call_json)"),
+        "tool_call_json: must not be NULL"
+    );
+    assert!(out.is_null());
+
+    let e = aimux_tool_call_repair_context(
+        c("{ not json").as_ptr(),
+        c(TOOLS).as_ptr(),
+        c("[]").as_ptr(),
+        ptr::null(),
+        &mut out,
+    );
+    assert!(
+        expect_ffi_error(e, "tool_call_repair_context (malformed)")
+            .starts_with("tool_call_json: invalid JSON:")
+    );
+    assert!(out.is_null());
+
+    // An unknown reply tag is a wire-JSON failure, not a silent no-op.
+    let e = aimux_apply_tool_call_repair(
+        c(r#"{"tool_call_id":"c","tool_name":"t","input":{},"invalid":true,"error":{"Other":"x"}}"#)
+            .as_ptr(),
+        c(TOOLS).as_ptr(),
+        c(r#"{"type":"nonsense"}"#).as_ptr(),
+        &mut out,
+    );
+    expect_failure(e, "apply_tool_call_repair (unknown reply tag)");
+    assert!(out.is_null());
 }

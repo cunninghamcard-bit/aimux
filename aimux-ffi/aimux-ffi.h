@@ -361,6 +361,65 @@ aimux_error_t *aimux_stream_text_as_openai_with_abort(uint64_t handle, uint64_t 
                                                           void (*on_done)(void *stream_ctx),
                                                           void *stream_ctx);
 
+/* ── Stateless tool-call repair (RFC-0035) ──────────────────────────────── */
+
+/*
+ * These three take data only — no model handle, no tokio runtime, no I/O — so
+ * they are safe to call from inside an aimux_stream_text callback (the
+ * re-entrancy guard only rejects nested runtime work).
+ *
+ * The loop: run generation, find a tool call with "invalid": true in
+ * GenerateTextResult.tool_calls, build its repair argument with
+ * aimux_tool_call_repair_context, produce a reply in your own language, then
+ * apply it with aimux_apply_tool_call_repair (one call) or
+ * aimux_apply_tool_call_repair_to_result (the whole document).
+ *
+ * reply_json is one of:
+ *   {"type":"repaired","tool_call":{"tool_call_id":…,"tool_name":…,"input":"<raw text>"}}
+ *   {"type":"unchanged"}
+ *   {"type":"failed","message":"…"}
+ *
+ * The OpenAI-shaped output has no equivalent: ChatCompletion carries no
+ * invalid/error field, and aimux_stream_text_as_openai forwards the provider's
+ * argument deltas verbatim. Drive repair from the native result.
+ */
+
+/**
+ * [AiMuxError] Build the repair argument for one invalid tool call.
+ *
+ * @param tool_call_json One GenerateTextResult.tool_calls entry, "invalid": true.
+ * @param tools_json     The Tool[] the call was made with.
+ * @param messages_json  ModelMessage[] ("[]" when none).
+ * @param instructions   System instructions, or NULL.
+ * @param out_json       {tool_call, error, input_schema, tools, messages,
+ *                       instructions} — the AI SDK repairToolCall argument.
+ *                       tool_call.input is the provider's raw argument text.
+ */
+aimux_error_t *aimux_tool_call_repair_context(const char *tool_call_json,
+                                                  const char *tools_json,
+                                                  const char *messages_json,
+                                                  const char *instructions, char **out_json);
+
+/**
+ * [AiMuxError] Resolve one invalid tool call against a repair reply. Writes
+ * the resulting ToolCall — valid, or invalid carrying a nested
+ * ToolCallRepairError.
+ */
+aimux_error_t *aimux_apply_tool_call_repair(const char *tool_call_json,
+                                                const char *tools_json,
+                                                const char *reply_json, char **out_json);
+
+/**
+ * [AiMuxError] Apply a repair reply to a serialized GenerateTextResult or
+ * GenerateObjectResult. Both tool_calls and the matching response_messages
+ * tool-call part are rewritten; everything else is left as-is.
+ */
+aimux_error_t *aimux_apply_tool_call_repair_to_result(const char *result_json,
+                                                          const char *tools_json,
+                                                          const char *tool_call_id,
+                                                          const char *reply_json,
+                                                          char **out_json);
+
 /* ── Resource management ────────────────────────────────────────────────── */
 
 /**
