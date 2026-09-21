@@ -29,6 +29,8 @@ use aimux_core::generate::{
 use aimux_core::language_model::LanguageModel;
 use aimux_core::message::ModelPrompt;
 use aimux_core::openai_output::OpenAiStreamOptions;
+use aimux_core::parse_tool_call::ToolCallRepairReply;
+use aimux_core::tool::{Tool, ToolCall};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
@@ -1570,4 +1572,92 @@ fn parse_opts(json: Option<&str>) -> MResult<GenerateTextOptions> {
             parse_wire_json("opts_json", s)
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stateless tool-call repair (RFC-0035)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Build the repair argument for one invalid tool call.
+///
+/// `toolCallJson` is a `GenerateTextResult.toolCalls` entry with
+/// `invalid: true`; `toolsJson` the `Tool[]` the call was made with;
+/// `messagesJson` a `ModelMessage[]` (`"[]"` when none). Returns
+/// `{tool_call, error, input_schema, tools, messages, instructions}` — the AI
+/// SDK `repairToolCall` argument, with `tool_call.input` the provider's raw
+/// argument text.
+///
+/// Pure and synchronous: no model, no network. Throws `InvalidArgumentError`
+/// when the call is not an invalid one.
+#[napi]
+pub fn tool_call_repair_context(
+    tool_call_json: String,
+    tools_json: String,
+    messages_json: String,
+    instructions: Option<String>,
+) -> AimuxResult<String> {
+    AimuxResult((|| -> crate::error::MResult<String> {
+        let tool_call: ToolCall = parse_wire_json("tool_call_json", &tool_call_json)?;
+        let tools: Vec<Tool> = parse_wire_json("tools_json", &tools_json)?;
+        let messages: Vec<aimux_core::message::ModelMessage> =
+            parse_wire_json("messages_json", &messages_json)?;
+        let context = aimux_core::parse_tool_call::tool_call_repair_context(
+            &tool_call,
+            &tools,
+            &messages,
+            instructions.as_deref(),
+        )
+        .map_err(|e| AiMuxBindingError::from(&e))?;
+        serialize_result(&context)
+    })())
+}
+
+/// Resolve one invalid tool call against a host's repair reply.
+///
+/// `replyJson` is `{"type":"repaired","tool_call":{…}}`,
+/// `{"type":"unchanged"}`, or `{"type":"failed","message":"…"}`. Returns the
+/// resulting `ToolCall` JSON — valid, or invalid carrying a nested
+/// `ToolCallRepairError`.
+#[napi]
+pub fn apply_tool_call_repair(
+    tool_call_json: String,
+    tools_json: String,
+    reply_json: String,
+) -> AimuxResult<String> {
+    AimuxResult((|| -> crate::error::MResult<String> {
+        let tool_call: ToolCall = parse_wire_json("tool_call_json", &tool_call_json)?;
+        let tools: Vec<Tool> = parse_wire_json("tools_json", &tools_json)?;
+        let reply: ToolCallRepairReply = parse_wire_json("reply_json", &reply_json)?;
+        let repaired = aimux_core::parse_tool_call::apply_tool_call_repair(&tool_call, &tools, reply)
+            .map_err(|e| AiMuxBindingError::from(&e))?;
+        serialize_result(&repaired)
+    })())
+}
+
+/// Apply a repair reply to a serialized `GenerateTextResult` or
+/// `GenerateObjectResult`, rewriting both `tool_calls` and the matching
+/// `response_messages` tool-call part.
+///
+/// The OpenAI-shaped result has no equivalent: it carries no `invalid` /
+/// `error`, so repair is driven from the native result.
+#[napi]
+pub fn apply_tool_call_repair_to_result(
+    result_json: String,
+    tools_json: String,
+    tool_call_id: String,
+    reply_json: String,
+) -> AimuxResult<String> {
+    AimuxResult((|| -> crate::error::MResult<String> {
+        let result: serde_json::Value = parse_wire_json("result_json", &result_json)?;
+        let tools: Vec<Tool> = parse_wire_json("tools_json", &tools_json)?;
+        let reply: ToolCallRepairReply = parse_wire_json("reply_json", &reply_json)?;
+        let patched = aimux_core::parse_tool_call::apply_tool_call_repair_to_result(
+            &result,
+            &tools,
+            &tool_call_id,
+            reply,
+        )
+        .map_err(|e| AiMuxBindingError::from(&e))?;
+        serialize_result(&patched)
+    })())
 }

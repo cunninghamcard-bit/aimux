@@ -283,6 +283,26 @@ export declare function anthropicAws(apiKey: string, region: string, modelId: st
  *
  * The deployment name is passed as `model_id`; `api_version` is optional.
  */
+/**
+ * Resolve one invalid tool call against a host's repair reply.
+ *
+ * `replyJson` is `{"type":"repaired","tool_call":{…}}`,
+ * `{"type":"unchanged"}`, or `{"type":"failed","message":"…"}`. Returns the
+ * resulting `ToolCall` JSON — valid, or invalid carrying a nested
+ * `ToolCallRepairError`.
+ */
+export declare function applyToolCallRepair(toolCallJson: string, toolsJson: string, replyJson: string): AimuxResult<string>
+
+/**
+ * Apply a repair reply to a serialized `GenerateTextResult` or
+ * `GenerateObjectResult`, rewriting both `tool_calls` and the matching
+ * `response_messages` tool-call part.
+ *
+ * The OpenAI-shaped result has no equivalent: it carries no `invalid` /
+ * `error`, so repair is driven from the native result.
+ */
+export declare function applyToolCallRepairToResult(resultJson: string, toolsJson: string, toolCallId: string, replyJson: string): AimuxResult<string>
+
 export declare function azure(apiKey: string, resourceName: string, deployment: string, apiVersion?: string | undefined | null, config?: string | ProviderConfig | undefined | null): Promise<AimuxResult<Model>>
 
 /** Create a Bedrock language model instance (AWS SigV4 credentials). */
@@ -504,6 +524,21 @@ export declare function startTranscriptionSession(model: TranscriptionModel, opt
 
 /** Create a Tavily search model instance. */
 export declare function tavilySearch(apiKey: string, baseUrl?: string | undefined | null): Promise<AimuxResult<SearchModel>>
+
+/**
+ * Build the repair argument for one invalid tool call.
+ *
+ * `toolCallJson` is a `GenerateTextResult.toolCalls` entry with
+ * `invalid: true`; `toolsJson` the `Tool[]` the call was made with;
+ * `messagesJson` a `ModelMessage[]` (`"[]"` when none). Returns
+ * `{tool_call, error, input_schema, tools, messages, instructions}` — the AI
+ * SDK `repairToolCall` argument, with `tool_call.input` the provider's raw
+ * argument text.
+ *
+ * Pure and synchronous: no model, no network. Throws `InvalidArgumentError`
+ * when the call is not an invalid one.
+ */
+export declare function toolCallRepairContext(toolCallJson: string, toolsJson: string, messagesJson: string, instructions?: string | undefined | null): AimuxResult<string>
 
 /** Create a Vertex AI language model instance (GCP bearer token). */
 export declare function vertex(accessToken: string, project: string, location: string, modelId: string, config?: string | ProviderConfig | undefined | null): Promise<AimuxResult<Model>>
