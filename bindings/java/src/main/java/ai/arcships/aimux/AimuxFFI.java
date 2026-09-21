@@ -40,6 +40,12 @@ import com.sun.jna.ptr.PointerByReference;
  */
 public interface AimuxFFI extends Library {
 
+    Pointer aimux_operation_start(long model, String requestJson, LongByReference outHandle);
+    Pointer aimux_operation_next(long operation, int lane, long waitMs, PointerByReference outEvent, IntByReference outState);
+    Pointer aimux_operation_reply(long operation, String requestId, String replyJson, IntByReference outStatus);
+    Pointer aimux_operation_cancel(long operation);
+    void aimux_operation_drop(long operation);
+
     AimuxFFI INSTANCE = Native.load("aimux_ffi", AimuxFFI.class);
 
     // ── Stream callbacks (match C on_part / on_done; no on_error) ───────────

@@ -16,14 +16,18 @@ use crate::tool::{Tool, ToolCall};
 use crate::types::ProviderMetadata;
 
 /// Provider-facing tool call before Core parses and validates its input.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RawToolCall {
     pub tool_call_id: String,
     pub tool_name: String,
     pub input: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_executed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dynamic: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thought_signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_metadata: Option<ProviderMetadata>,
 }
 

@@ -47,7 +47,8 @@ class TypedModel(private val raw: Model, private val ownsModel: Boolean = false)
     fun generateText(prompt: String, options: GenerateTextOptions? = null): GenerateTextResult {
         val promptJson = AimuxJson.encodeToString(prompt)
         val optsJson = options?.let { AimuxJson.encodeToString(GenerateTextOptions.serializer(), it) }
-        val resultJson = raw.generateText(promptJson, optsJson)
+        val resultJson = options?.repairToolCall?.let { HostOperation.result(raw, "generate_text", promptJson, optsJson, it) }
+            ?: raw.generateText(promptJson, optsJson)
         return decodeResult(resultJson)
     }
 
@@ -64,7 +65,8 @@ class TypedModel(private val raw: Model, private val ownsModel: Boolean = false)
             messages,
         )
         val optsJson = options?.let { AimuxJson.encodeToString(GenerateTextOptions.serializer(), it) }
-        val resultJson = raw.generateText(promptJson, optsJson)
+        val resultJson = options?.repairToolCall?.let { HostOperation.result(raw, "generate_text", promptJson, optsJson, it) }
+            ?: raw.generateText(promptJson, optsJson)
         return decodeResult(resultJson)
     }
 
@@ -93,7 +95,8 @@ class TypedModel(private val raw: Model, private val ownsModel: Boolean = false)
     fun generateObject(prompt: String, options: GenerateTextOptions? = null): GenerateObjectResult {
         val promptJson = AimuxJson.encodeToString(prompt)
         val optsJson = options?.let { AimuxJson.encodeToString(GenerateTextOptions.serializer(), it) }
-        val resultJson = raw.generateObject(promptJson, optsJson)
+        val resultJson = options?.repairToolCall?.let { HostOperation.result(raw, "generate_object", promptJson, optsJson, it) }
+            ?: raw.generateObject(promptJson, optsJson)
         return decodeObjectResult(resultJson)
     }
 
@@ -110,7 +113,8 @@ class TypedModel(private val raw: Model, private val ownsModel: Boolean = false)
             messages,
         )
         val optsJson = options?.let { AimuxJson.encodeToString(GenerateTextOptions.serializer(), it) }
-        val resultJson = raw.generateObject(promptJson, optsJson)
+        val resultJson = options?.repairToolCall?.let { HostOperation.result(raw, "generate_object", promptJson, optsJson, it) }
+            ?: raw.generateObject(promptJson, optsJson)
         return decodeObjectResult(resultJson)
     }
 
@@ -138,7 +142,8 @@ class TypedModel(private val raw: Model, private val ownsModel: Boolean = false)
     fun consumeStreamText(prompt: String, options: GenerateTextOptions? = null): StreamTextResultAggregated {
         val promptJson = AimuxJson.encodeToString(prompt)
         val optsJson = options?.let { AimuxJson.encodeToString(GenerateTextOptions.serializer(), it) }
-        val resultJson = raw.consumeStreamText(promptJson, optsJson)
+        val resultJson = options?.repairToolCall?.let { HostOperation.result(raw, "consume_stream_text", promptJson, optsJson, it) }
+            ?: raw.consumeStreamText(promptJson, optsJson)
         return decodeAggregated(resultJson)
     }
 
@@ -156,7 +161,8 @@ class TypedModel(private val raw: Model, private val ownsModel: Boolean = false)
             messages,
         )
         val optsJson = options?.let { AimuxJson.encodeToString(GenerateTextOptions.serializer(), it) }
-        val resultJson = raw.consumeStreamText(promptJson, optsJson)
+        val resultJson = options?.repairToolCall?.let { HostOperation.result(raw, "consume_stream_text", promptJson, optsJson, it) }
+            ?: raw.consumeStreamText(promptJson, optsJson)
         return decodeAggregated(resultJson)
     }
 
@@ -230,6 +236,12 @@ class TypedModel(private val raw: Model, private val ownsModel: Boolean = false)
         onError: (String) -> Unit,
     ) {
         val optsJson = options?.let { AimuxJson.encodeToString(GenerateTextOptions.serializer(), it) }
+        options?.repairToolCall?.let { repair ->
+            HostOperation.stream(raw, "stream_text", promptJson, optsJson, repair) { wire ->
+                onPart(AimuxJson.decodeFromString(StreamPart.serializer(), wire))
+            }
+            onDone(); return
+        }
         raw.streamText(
             promptJson = promptJson,
             optsJson = optsJson,
@@ -317,7 +329,8 @@ class TypedModel(private val raw: Model, private val ownsModel: Boolean = false)
     fun generateTextAsOpenAI(prompt: String, options: GenerateTextOptions? = null): ChatCompletion {
         val promptJson = AimuxJson.encodeToString(prompt)
         val optsJson = options?.let { AimuxJson.encodeToString(GenerateTextOptions.serializer(), it) }
-        val resultJson = raw.generateTextAsOpenAI(promptJson, optsJson)
+        val resultJson = options?.repairToolCall?.let { HostOperation.result(raw, "generate_text_as_openai", promptJson, optsJson, it) }
+            ?: raw.generateTextAsOpenAI(promptJson, optsJson)
         return decodeChatCompletion(resultJson)
     }
 
@@ -337,7 +350,8 @@ class TypedModel(private val raw: Model, private val ownsModel: Boolean = false)
             messages,
         )
         val optsJson = options?.let { AimuxJson.encodeToString(GenerateTextOptions.serializer(), it) }
-        val resultJson = raw.generateTextAsOpenAI(promptJson, optsJson)
+        val resultJson = options?.repairToolCall?.let { HostOperation.result(raw, "generate_text_as_openai", promptJson, optsJson, it) }
+            ?: raw.generateTextAsOpenAI(promptJson, optsJson)
         return decodeChatCompletion(resultJson)
     }
 
@@ -410,6 +424,12 @@ class TypedModel(private val raw: Model, private val ownsModel: Boolean = false)
         onError: (String) -> Unit,
     ) {
         val optsJson = options?.let { AimuxJson.encodeToString(GenerateTextOptions.serializer(), it) }
+        options?.repairToolCall?.let { repair ->
+            HostOperation.stream(raw, "stream_text_as_openai", promptJson, optsJson, repair) { wire ->
+                onPart(AimuxJson.decodeFromString(ChatCompletionChunk.serializer(), wire))
+            }
+            onDone(); return
+        }
         raw.streamTextAsOpenAI(
             promptJson = promptJson,
             optsJson = optsJson,

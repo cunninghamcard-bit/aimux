@@ -589,6 +589,7 @@ data class TimeoutConfiguration(
  */
 @Serializable
 data class GenerateTextOptions(
+    @kotlinx.serialization.Transient val repairToolCall: ToolCallRepair? = null,
     @SerialName("max_output_tokens") val maxOutputTokens: Long? = null,
     val temperature: Double? = null,
     @SerialName("stop_sequences") val stopSequences: List<String>? = null,

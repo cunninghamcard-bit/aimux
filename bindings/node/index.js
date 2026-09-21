@@ -703,6 +703,7 @@ module.exports = nativeBinding
 module.exports.AbortBridge = nativeBinding.AbortBridge
 module.exports.EmbeddingModel = nativeBinding.EmbeddingModel
 module.exports.Files = nativeBinding.Files
+module.exports.HostOperation = nativeBinding.HostOperation
 module.exports.ImageModel = nativeBinding.ImageModel
 module.exports.Model = nativeBinding.Model
 module.exports.ProviderHandle = nativeBinding.ProviderHandle

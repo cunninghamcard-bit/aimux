@@ -1,3 +1,6 @@
+import { operationEvents, operationResult } from './operation.ts'
+import type { GenerateTextOptions } from './operation.ts'
+export type { GenerateTextOptions, RawToolCall, RepairToolCall, ToolCallRepairContext } from './operation.ts'
 // aimux — Typed wrapper layer for the Node.js (napi-rs) binding.
 //
 // The native binding speaks JSON strings:
@@ -24,7 +27,6 @@ import type { Model, ProviderConfig, ProviderHandle as RawProviderHandle } from 
 // These are type-only imports, so they are fully erased at runtime (the
 // wrapper only touches the registered raw entrypoint).
 import type {
-  GenerateTextOptions,
   GenerateTextResult,
   StreamPart,
   ModelMessage,
@@ -127,7 +129,6 @@ export { ProviderName } from './types/ProviderName.ts'
 
 // Public type surface — typed objects, no `any`.
 export type {
-  GenerateTextOptions,
   GenerateTextResult,
   StreamPart,
   ModelMessage,
@@ -172,10 +173,8 @@ export type RawModel = Model
  * @param model   - A raw model instance from `openai()`, `anthropic()`, etc.
  * @param prompt  - A plain string or an array of typed chat messages.
  * @param options - Optional typed generation options (tools, tool_choice,
- *                  temperature, response_format, …). The Rust `repair_tool_call`
- *                  callback is core-only (it cannot cross the FFI boundary);
- *                  invalid tool calls arrive with `invalid`/`error` set on the
- *                  tool call.
+ *                  temperature, response_format, …). `repairToolCall` runs locally
+ *                  in JavaScript and may return a promise.
  * @param signal  - Optional `AbortSignal`; aborting it cancels the call.
  *
  * Internally calls the raw
@@ -196,6 +195,7 @@ export async function generateText(
   options?: GenerateTextOptions,
   signal?: AbortSignal,
 ): Promise<GenerateTextResult> {
+  if (options?.repairToolCall != null) return await operationResult(model, 'generate_text', prompt, options, signal) as GenerateTextResult
   const optsJson = options ? JSON.stringify(options) : undefined
   const bridge = signal ? new AbortBridge(signal) : undefined
   const resultJson = await model.generateText(JSON.stringify(prompt), optsJson, bridge)
@@ -229,6 +229,12 @@ export async function* streamText(
   options?: GenerateTextOptions,
   signal?: AbortSignal,
 ): AsyncGenerator<StreamPart> {
+  if (options?.repairToolCall != null) {
+    for await (const event of operationEvents(model, 'stream_text', prompt, options, signal)) {
+      if (event.type === 'part') yield event.part as StreamPart
+    }
+    return
+  }
   const optsJson = options ? JSON.stringify(options) : undefined
   const bridge = signal ? new AbortBridge(signal) : undefined
   const gen = await model.streamText(JSON.stringify(prompt), optsJson, bridge)
@@ -275,6 +281,7 @@ export async function generateTextAsOpenai(
   options?: GenerateTextOptions,
   signal?: AbortSignal,
 ): Promise<ChatCompletion> {
+  if (options?.repairToolCall != null) return await operationResult(model, 'generate_text_as_openai', prompt, options, signal) as ChatCompletion
   const optsJson = options ? JSON.stringify(options) : undefined
   const bridge = signal ? new AbortBridge(signal) : undefined
   const resultJson = await model.generateTextAsOpenai(JSON.stringify(prompt), optsJson, bridge)
@@ -304,6 +311,12 @@ export async function* streamTextAsOpenai(
   options?: GenerateTextOptions,
   signal?: AbortSignal,
 ): AsyncGenerator<ChatCompletionChunk> {
+  if (options?.repairToolCall != null) {
+    for await (const event of operationEvents(model, 'stream_text_as_openai', prompt, options, signal)) {
+      if (event.type === 'part') yield event.part as ChatCompletionChunk
+    }
+    return
+  }
   const optsJson = options ? JSON.stringify(options) : undefined
   const bridge = signal ? new AbortBridge(signal) : undefined
   const gen = await model.streamTextAsOpenai(JSON.stringify(prompt), optsJson, bridge)

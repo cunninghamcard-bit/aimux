@@ -12,6 +12,7 @@
 
 mod error;
 mod multimodal;
+mod operation;
 pub use multimodal::*;
 
 use std::future::Future;

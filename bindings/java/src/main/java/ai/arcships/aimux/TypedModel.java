@@ -70,7 +70,7 @@ public class TypedModel implements Closeable {
      * @return Decoded {@link Types.GenerateTextResult}.
      */
     public Types.GenerateTextResult generateText(String prompt, Types.GenerateTextOptions options) {
-        return decodeResult(raw.generateText(encode(prompt), encodeOptions(options)));
+        return decodeResult((options != null && options.getRepairToolCall() != null ? HostOperation.result(raw, "generate_text", encode(prompt), encodeOptions(options), options.getRepairToolCall()) : raw.generateText(encode(prompt), encodeOptions(options))));
     }
 
     /**
@@ -91,7 +91,7 @@ public class TypedModel implements Closeable {
      * @return Decoded {@link Types.GenerateTextResult}.
      */
     public Types.GenerateTextResult generateText(List<Types.ModelMessage> messages, Types.GenerateTextOptions options) {
-        return decodeResult(raw.generateText(encode(messages), encodeOptions(options)));
+        return decodeResult((options != null && options.getRepairToolCall() != null ? HostOperation.result(raw, "generate_text", encode(messages), encodeOptions(options), options.getRepairToolCall()) : raw.generateText(encode(messages), encodeOptions(options))));
     }
 
     private Types.GenerateTextResult decodeResult(String resultJson) {
@@ -124,7 +124,7 @@ public class TypedModel implements Closeable {
      * @return Decoded {@link Types.GenerateObjectResult}.
      */
     public Types.GenerateObjectResult generateObject(String prompt, Types.GenerateTextOptions options) {
-        return decodeObjectResult(raw.generateObject(encode(prompt), encodeOptions(options)));
+        return decodeObjectResult((options != null && options.getRepairToolCall() != null ? HostOperation.result(raw, "generate_object", encode(prompt), encodeOptions(options), options.getRepairToolCall()) : raw.generateObject(encode(prompt), encodeOptions(options))));
     }
 
     /**
@@ -145,7 +145,7 @@ public class TypedModel implements Closeable {
      * @return Decoded {@link Types.GenerateObjectResult}.
      */
     public Types.GenerateObjectResult generateObject(List<Types.ModelMessage> messages, Types.GenerateTextOptions options) {
-        return decodeObjectResult(raw.generateObject(encode(messages), encodeOptions(options)));
+        return decodeObjectResult((options != null && options.getRepairToolCall() != null ? HostOperation.result(raw, "generate_object", encode(messages), encodeOptions(options), options.getRepairToolCall()) : raw.generateObject(encode(messages), encodeOptions(options))));
     }
 
     private Types.GenerateObjectResult decodeObjectResult(String resultJson) {
@@ -178,7 +178,7 @@ public class TypedModel implements Closeable {
      * @return Decoded {@link Types.StreamTextResultAggregated}.
      */
     public Types.StreamTextResultAggregated consumeStreamText(String prompt, Types.GenerateTextOptions options) {
-        return decodeAggregated(raw.consumeStreamText(encode(prompt), encodeOptions(options)));
+        return decodeAggregated((options != null && options.getRepairToolCall() != null ? HostOperation.result(raw, "consume_stream_text", encode(prompt), encodeOptions(options), options.getRepairToolCall()) : raw.consumeStreamText(encode(prompt), encodeOptions(options))));
     }
 
     /**
@@ -201,7 +201,7 @@ public class TypedModel implements Closeable {
      * @return Decoded {@link Types.StreamTextResultAggregated}.
      */
     public Types.StreamTextResultAggregated consumeStreamText(List<Types.ModelMessage> messages, Types.GenerateTextOptions options) {
-        return decodeAggregated(raw.consumeStreamText(encode(messages), encodeOptions(options)));
+        return decodeAggregated((options != null && options.getRepairToolCall() != null ? HostOperation.result(raw, "consume_stream_text", encode(messages), encodeOptions(options), options.getRepairToolCall()) : raw.consumeStreamText(encode(messages), encodeOptions(options))));
     }
 
     private Types.StreamTextResultAggregated decodeAggregated(String resultJson) {
@@ -244,6 +244,10 @@ public class TypedModel implements Closeable {
     public void streamText(String prompt, Types.GenerateTextOptions options,
                            Consumer<Types.StreamPart> onPart,
                            Runnable onDone, Consumer<String> onError) {
+        if (options != null && options.getRepairToolCall() != null) {
+            try (Stream<String> parts = HostOperation.stream(raw, "stream_text", encode(prompt), encodeOptions(options), options.getRepairToolCall())) { parts.forEach(p -> onPart.accept(decodePart(p))); }
+            onDone.run(); return;
+        }
         streamTextParts(encode(prompt), encodeOptions(options), onPart, onDone, onError);
     }
 
@@ -272,6 +276,10 @@ public class TypedModel implements Closeable {
     public void streamText(List<Types.ModelMessage> messages, Types.GenerateTextOptions options,
                            Consumer<Types.StreamPart> onPart,
                            Runnable onDone, Consumer<String> onError) {
+        if (options != null && options.getRepairToolCall() != null) {
+            try (Stream<String> parts = HostOperation.stream(raw, "stream_text", encode(messages), encodeOptions(options), options.getRepairToolCall())) { parts.forEach(p -> onPart.accept(decodePart(p))); }
+            onDone.run(); return;
+        }
         streamTextParts(encode(messages), encodeOptions(options), onPart, onDone, onError);
     }
 
@@ -316,6 +324,9 @@ public class TypedModel implements Closeable {
      * @return Lazy stream of decoded parts.
      */
     public Stream<Types.StreamPart> streamTextStream(String prompt, Types.GenerateTextOptions options) {
+        if (options != null && options.getRepairToolCall() != null) {
+            return HostOperation.stream(raw, "stream_text", encode(prompt), encodeOptions(options), options.getRepairToolCall()).map(TypedModel::decodePart);
+        }
         return streamTextStreamParts(encode(prompt), encodeOptions(options));
     }
 
@@ -337,6 +348,9 @@ public class TypedModel implements Closeable {
      * @return Lazy stream of decoded parts.
      */
     public Stream<Types.StreamPart> streamTextStream(List<Types.ModelMessage> messages, Types.GenerateTextOptions options) {
+        if (options != null && options.getRepairToolCall() != null) {
+            return HostOperation.stream(raw, "stream_text", encode(messages), encodeOptions(options), options.getRepairToolCall()).map(TypedModel::decodePart);
+        }
         return streamTextStreamParts(encode(messages), encodeOptions(options));
     }
 
@@ -413,7 +427,7 @@ public class TypedModel implements Closeable {
      * @return Decoded {@link Types.ChatCompletion}.
      */
     public Types.ChatCompletion generateTextAsOpenAI(String prompt, Types.GenerateTextOptions options) {
-        return decodeChatCompletion(raw.generateTextAsOpenAI(encode(prompt), encodeOptions(options)));
+        return decodeChatCompletion((options != null && options.getRepairToolCall() != null ? HostOperation.result(raw, "generate_text_as_openai", encode(prompt), encodeOptions(options), options.getRepairToolCall()) : raw.generateTextAsOpenAI(encode(prompt), encodeOptions(options))));
     }
 
     /**
@@ -434,7 +448,7 @@ public class TypedModel implements Closeable {
      * @return Decoded {@link Types.ChatCompletion}.
      */
     public Types.ChatCompletion generateTextAsOpenAI(List<Types.ModelMessage> messages, Types.GenerateTextOptions options) {
-        return decodeChatCompletion(raw.generateTextAsOpenAI(encode(messages), encodeOptions(options)));
+        return decodeChatCompletion((options != null && options.getRepairToolCall() != null ? HostOperation.result(raw, "generate_text_as_openai", encode(messages), encodeOptions(options), options.getRepairToolCall()) : raw.generateTextAsOpenAI(encode(messages), encodeOptions(options))));
     }
 
     private Types.ChatCompletion decodeChatCompletion(String resultJson) {
@@ -472,6 +486,10 @@ public class TypedModel implements Closeable {
     public void streamTextAsOpenAI(String prompt, Types.GenerateTextOptions options,
                                    Consumer<Types.ChatCompletionChunk> onPart,
                                    Runnable onDone, Consumer<String> onError) {
+        if (options != null && options.getRepairToolCall() != null) {
+            try (Stream<String> parts = HostOperation.stream(raw, "stream_text_as_openai", encode(prompt), encodeOptions(options), options.getRepairToolCall())) { parts.forEach(p -> onPart.accept(decodeChunk(p))); }
+            onDone.run(); return;
+        }
         streamTextAsOpenAIChunks(encode(prompt), encodeOptions(options), onPart, onDone, onError);
     }
 
@@ -500,6 +518,10 @@ public class TypedModel implements Closeable {
     public void streamTextAsOpenAI(List<Types.ModelMessage> messages, Types.GenerateTextOptions options,
                                    Consumer<Types.ChatCompletionChunk> onPart,
                                    Runnable onDone, Consumer<String> onError) {
+        if (options != null && options.getRepairToolCall() != null) {
+            try (Stream<String> parts = HostOperation.stream(raw, "stream_text_as_openai", encode(messages), encodeOptions(options), options.getRepairToolCall())) { parts.forEach(p -> onPart.accept(decodeChunk(p))); }
+            onDone.run(); return;
+        }
         streamTextAsOpenAIChunks(encode(messages), encodeOptions(options), onPart, onDone, onError);
     }
 
@@ -536,6 +558,9 @@ public class TypedModel implements Closeable {
      * @return Lazy stream of decoded chunks.
      */
     public Stream<Types.ChatCompletionChunk> streamTextAsOpenAIStream(String prompt, Types.GenerateTextOptions options) {
+        if (options != null && options.getRepairToolCall() != null) {
+            return HostOperation.stream(raw, "stream_text_as_openai", encode(prompt), encodeOptions(options), options.getRepairToolCall()).map(TypedModel::decodeChunk);
+        }
         return streamTextAsOpenAIChunksStream(encode(prompt), encodeOptions(options));
     }
 
@@ -557,6 +582,9 @@ public class TypedModel implements Closeable {
      * @return Lazy stream of decoded chunks.
      */
     public Stream<Types.ChatCompletionChunk> streamTextAsOpenAIStream(List<Types.ModelMessage> messages, Types.GenerateTextOptions options) {
+        if (options != null && options.getRepairToolCall() != null) {
+            return HostOperation.stream(raw, "stream_text_as_openai", encode(messages), encodeOptions(options), options.getRepairToolCall()).map(TypedModel::decodeChunk);
+        }
         return streamTextAsOpenAIChunksStream(encode(messages), encodeOptions(options));
     }
 

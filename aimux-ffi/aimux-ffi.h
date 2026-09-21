@@ -361,6 +361,29 @@ aimux_error_t *aimux_stream_text_as_openai_with_abort(uint64_t handle, uint64_t 
                                                           void (*on_done)(void *stream_ctx),
                                                           void *stream_ctx);
 
+/* ── Host-driven operations (RFC-0035, protocol_version=1) ─────────────── */
+enum aimux_operation_lane { AIMUX_OPERATION_CONTROL=0, AIMUX_OPERATION_OUTPUT=1, AIMUX_OPERATION_ANY=2, AIMUX_OPERATION_TERMINAL=3 };
+enum aimux_operation_next_state { AIMUX_OPERATION_EVENT=0, AIMUX_OPERATION_WAIT_TIMEOUT=1,
+    AIMUX_OPERATION_ENDED=2, AIMUX_OPERATION_READER_BUSY=3 };
+enum aimux_operation_reply_status { AIMUX_OPERATION_ACCEPTED=0, AIMUX_OPERATION_ALREADY_REPLIED=1,
+    AIMUX_OPERATION_UNKNOWN_REQUEST=2, AIMUX_OPERATION_ENDED_REPLY=3 };
+/* request_json: {protocol_version:1, mode, prompt, options, enabled_hooks:[]}.
+ * No host function pointer or callback handle crosses this boundary.
+ * All input strings are borrowed only until the function returns. */
+aimux_error_t *aimux_operation_start(uint64_t model, const char *request_json, uint64_t *out_operation);
+/* wait_ms: -1 waits, 0 polls, >0 bounded wait. One reader per lane; ANY owns both.
+ * TERMINAL observes termination without consuming output or errors; multiple observers allowed.
+ * EVENT strings are freed with aimux_free_string. Failure returns aimux_error_t;
+ * the output lane reports a terminal failure once, then ENDED. */
+aimux_error_t *aimux_operation_next(uint64_t operation, int32_t lane, int64_t wait_ms,
+    char **out_event_json, int32_t *out_state);
+aimux_error_t *aimux_operation_reply(uint64_t operation, const char *request_id,
+    const char *reply_json, int32_t *out_status);
+aimux_error_t *aimux_operation_cancel(uint64_t operation);
+/* Idempotent. Cancels the Rust driver; never waits for host user code.
+ * aimux_drop_handle performs the same cleanup. */
+void aimux_operation_drop(uint64_t operation);
+
 /* ── Resource management ────────────────────────────────────────────────── */
 
 /**

@@ -98,6 +98,10 @@ pub struct GenerateTextOptions {
     #[serde(skip)]
     #[ts(skip)]
     pub repair_tool_call: Option<ToolCallRepair>,
+    /// A shared absolute generation budget for a host operation driver.
+    #[serde(skip)]
+    #[ts(skip)]
+    pub operation_control: Option<crate::generation_control::GenerationControl>,
 }
 
 impl GenerateTextOptions {
@@ -551,6 +555,13 @@ pub async fn generate_text(
     prompt: impl Into<ModelPrompt>,
     options: GenerateTextOptions,
 ) -> Result<GenerateTextResult, AiMuxError> {
+    let control = match options.operation_control.clone() {
+        Some(control) => control,
+        None => crate::generation_control::GenerationControl::new(
+            options.timeout.unwrap_or_default(),
+            options.abort_signal.clone(),
+        )?,
+    };
     // 1. Convert user prompt to provider-facing prompt.
     let repair_tool_call = options.repair_tool_call.clone();
     let tools = options.tools.clone();
@@ -560,9 +571,9 @@ pub async fn generate_text(
 
     // 2. Build CallOptions.
     let mut call_options = options.into_call_options(lm_prompt);
-    let operation_timeout =
-        timeout::OperationTimeout::new(call_options.timeout.unwrap_or_default())?;
-    let abort_signal = call_options.abort_signal.clone();
+    let operation_timeout = control.timeout;
+    let abort_signal = control.signal();
+    call_options.abort_signal = abort_signal.clone();
     let retries = retry::prepare_retries(
         call_options.max_retries,
         model.retry_config(),
@@ -666,22 +677,38 @@ pub async fn generate_text(
                 provider_metadata,
                 ..
             } => {
-                let parsed = parse_tool_call(
-                    RawToolCall {
-                        tool_call_id: tool_call_id.clone(),
-                        tool_name: tool_name.clone(),
-                        input: input.clone(),
-                        provider_executed: *provider_executed,
-                        dynamic: *dynamic,
-                        thought_signature: thought_signature.clone(),
-                        provider_metadata: provider_metadata.clone(),
-                    },
-                    tools.as_deref(),
-                    repair_tool_call.as_ref(),
-                    &messages,
-                    operation_instructions.as_deref(),
-                )
-                .await;
+                let parsed = control
+                    .run(async {
+                        Ok(parse_tool_call(
+                            RawToolCall {
+                                tool_call_id: tool_call_id.clone(),
+                                tool_name: tool_name.clone(),
+                                input: input.clone(),
+                                provider_executed: *provider_executed,
+                                dynamic: *dynamic,
+                                thought_signature: thought_signature.clone(),
+                                provider_metadata: provider_metadata.clone(),
+                            },
+                            tools.as_deref(),
+                            repair_tool_call.as_ref(),
+                            &messages,
+                            operation_instructions.as_deref(),
+                        )
+                        .await)
+                    })
+                    .await;
+                let parsed = match parsed {
+                    Ok(parsed) => parsed,
+                    Err(error) => {
+                        if let (Some(rec), Some(call_id)) = (&recorder, &call_id) {
+                            rec.record_outcome(
+                                call_id,
+                                &crate::recording::OutcomeRecord::from_error(&error),
+                            );
+                        }
+                        return Err(error);
+                    }
+                };
                 rm.tool_call(&parsed);
                 tool_calls.push(parsed);
             }
@@ -895,6 +922,13 @@ pub async fn stream_text(
     prompt: impl Into<ModelPrompt>,
     options: GenerateTextOptions,
 ) -> Result<StreamTextResult, AiMuxError> {
+    let control = match options.operation_control.clone() {
+        Some(control) => control,
+        None => crate::generation_control::GenerationControl::new(
+            options.timeout.unwrap_or_default(),
+            options.abort_signal.clone(),
+        )?,
+    };
     // 1. Convert user prompt to provider-facing prompt.
     let repair_tool_call = options.repair_tool_call.clone();
     let tools = options.tools.clone();
@@ -905,16 +939,14 @@ pub async fn stream_text(
     // 2. Build CallOptions.
     let mut call_options = options.into_call_options(lm_prompt);
     let stream_timeout = call_options.timeout.unwrap_or_default();
-    let operation_timeout = timeout::OperationTimeout::new(stream_timeout)?;
+    let operation_timeout = control.timeout;
     // Armed at operation start: providers await their first SSE event inside
     // do_stream, so the first-chunk budget must already be counting there —
     // a 200-then-silence server is otherwise unbounded when only
     // first_chunk_ms is configured.
-    let first_chunk_deadline = stream_timeout
-        .first_chunk_ms
-        .map(|duration_ms| timeout::TimeoutDeadline::from_now("First chunk", duration_ms))
-        .transpose()?;
-    let abort_signal = call_options.abort_signal.clone();
+    let first_chunk_deadline = control.first_chunk;
+    let abort_signal = control.signal();
+    call_options.abort_signal = abort_signal.clone();
     let retries = retry::prepare_retries(
         call_options.max_retries,
         model.retry_config(),
@@ -1111,7 +1143,7 @@ pub async fn stream_text(
                         provider_metadata,
                         ..
                     }) => {
-                        let parsed = parse_tool_call(
+                        let parsed = control.run(async { Ok(parse_tool_call(
                             RawToolCall {
                                 tool_call_id,
                                 tool_name,
@@ -1125,7 +1157,11 @@ pub async fn stream_text(
                             repair_tool_call.as_ref(),
                             &messages,
                             operation_instructions.as_deref(),
-                        ).await;
+                        ).await) }).await;
+                        let parsed = match parsed {
+                            Ok(parsed) => parsed,
+                            Err(error) => { yield Err(error); break; }
+                        };
                         yield Ok(StreamPart::ToolCall {
                             tool_call_id: parsed.tool_call_id,
                             tool_name: parsed.tool_name,

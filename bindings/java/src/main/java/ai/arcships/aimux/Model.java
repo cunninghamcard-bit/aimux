@@ -47,6 +47,16 @@ import java.util.stream.StreamSupport;
  */
 public class Model implements Closeable {
 
+    // The operation clones the native model; release the model lock before
+    // executing any host code so repair can safely nest calls or close it.
+    long startOperation(String request) {
+        lock.readLock().lock();
+        try {
+            LongByReference out = new LongByReference();
+            return AimuxResult.extractHandle(AimuxFFI.INSTANCE.aimux_operation_start(requireHandleLocked(), request, out), out, "operation_start");
+        } finally { lock.readLock().unlock(); }
+    }
+
     // Go-style read/write lock: every FFI call holds the read lock for its
     // entire duration; close() takes the write lock and thus blocks until all
     // in-flight calls finish before dropping the native handle. This closes the

@@ -4,6 +4,9 @@ This wrapper layer parses JSON strings from the native layer into Python dicts,
 providing a Pythonic API surface.
 """
 
+from .operation import RepairToolCall
+from . import operation as _operation
+
 import json
 from typing import Any, AsyncIterator, Dict, List, Optional, Union
 
@@ -151,6 +154,9 @@ __all__ = [
     "google_video",
     "tavily_search",
     "generate_text",
+    "generate_text_async",
+    "stream_text_async",
+    "RepairToolCall",
     "generate_object",
     "consume_stream_text",
     "stream_text",
@@ -255,6 +261,8 @@ def generate_text(
     Returns:
         Dict with keys: text, tool_calls, finish_reason, usage, warnings, raw.
     """
+    if options and options.get("repair_tool_call") is not None:
+        return _operation.result(model, "generate_text", _prompt_to_json(prompt), options, options["repair_tool_call"])
     prompt_json = _prompt_to_json(prompt)
     opts_json = _opts_to_json(options)
     result_json = model.generate_text(prompt_json, opts_json)
@@ -281,6 +289,8 @@ def generate_object(
         Dict with keys: object, finish_reason, raw_finish_reason, usage,
         warnings, reasoning, provider_metadata, response, raw.
     """
+    if options and options.get("repair_tool_call") is not None:
+        return _operation.result(model, "generate_object", _prompt_to_json(prompt), options, options["repair_tool_call"])
     prompt_json = _prompt_to_json(prompt)
     opts_json = _opts_to_json(options)
     result_json = model.generate_object(prompt_json, opts_json)
@@ -306,6 +316,8 @@ def consume_stream_text(
     Returns:
         Dict with the aggregated stream result.
     """
+    if options and options.get("repair_tool_call") is not None:
+        return _operation.result(model, "consume_stream_text", _prompt_to_json(prompt), options, options["repair_tool_call"])
     prompt_json = _prompt_to_json(prompt)
     opts_json = _opts_to_json(options)
     result_json = model.consume_stream_text(prompt_json, opts_json)
@@ -324,6 +336,15 @@ def stream_text(
             if "TextDelta" in part:
                 print(part["TextDelta"]["delta"], end="")
     """
+    if options and options.get("repair_tool_call") is not None:
+        iterator = _operation.events(model, "stream_text", _prompt_to_json(prompt), options, options["repair_tool_call"])
+        try:
+            for event in iterator:
+                if event["type"] == "part":
+                    yield event["part"]
+        finally:
+            iterator.close()
+        return
     prompt_json = _prompt_to_json(prompt)
     opts_json = _opts_to_json(options)
     iterator = model.stream_text(prompt_json, opts_json)
@@ -350,6 +371,8 @@ def generate_text_as_openai(
         Dict with OpenAI Chat Completion keys: id, object, created, model,
         choices, usage, system_fingerprint.
     """
+    if options and options.get("repair_tool_call") is not None:
+        return _operation.result(model, "generate_text_as_openai", _prompt_to_json(prompt), options, options["repair_tool_call"])
     prompt_json = _prompt_to_json(prompt)
     opts_json = _opts_to_json(options)
     result_json = model.generate_text_as_openai(prompt_json, opts_json)
@@ -376,8 +399,33 @@ def stream_text_as_openai(
                 if "content" in delta:
                     print(delta["content"], end="")
     """
+    if options and options.get("repair_tool_call") is not None:
+        iterator = _operation.events(model, "stream_text_as_openai", _prompt_to_json(prompt), options, options["repair_tool_call"])
+        try:
+            for event in iterator:
+                if event["type"] == "part":
+                    yield event["part"]
+        finally:
+            iterator.close()
+        return
     prompt_json = _prompt_to_json(prompt)
     opts_json = _opts_to_json(options)
     iterator = model.stream_text_as_openai(prompt_json, opts_json)
     for chunk_json in iterator:
         yield json.loads(chunk_json)
+
+
+async def generate_text_async(model, prompt, options=None):
+    """Async generation; host repair runs on the caller's asyncio loop."""
+    return await _operation.async_result(model, "generate_text", _prompt_to_json(prompt), options, (options or {}).get("repair_tool_call"))
+
+
+async def stream_text_async(model, prompt, options=None):
+    """Async parts with operation-owned cancellation and local async repair."""
+    iterator = _operation.async_events(model, "stream_text", _prompt_to_json(prompt), options, (options or {}).get("repair_tool_call"))
+    try:
+        async for event in iterator:
+            if event["type"] == "part":
+                yield event["part"]
+    finally:
+        await iterator.aclose()

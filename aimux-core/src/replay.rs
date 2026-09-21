@@ -1005,6 +1005,7 @@ fn generate_options_from_call_options(o: CallOptions) -> GenerateTextOptions {
         abort_signal: None,
         include_raw_chunks: o.include_raw_chunks,
         repair_tool_call: None,
+        operation_control: None,
     }
 }
 

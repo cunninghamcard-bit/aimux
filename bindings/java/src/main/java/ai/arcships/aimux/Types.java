@@ -494,6 +494,102 @@ public final class Types {
         }
     }
 
+    /**
+     * A tool call before Core parses its input: {@code input} is the model's
+     * argument text verbatim, possibly malformed. Both directions of
+     * {@link ToolCallRepairFunction}.
+     */
+    public static class RawToolCall {
+        @JsonProperty("tool_call_id") private String toolCallId = "";
+        @JsonProperty("tool_name") private String toolName = "";
+        @JsonProperty("input") private String input = "";
+        @JsonProperty("provider_executed") private Boolean providerExecuted;
+        @JsonProperty("dynamic") private Boolean dynamic;
+        @JsonProperty("thought_signature") private String thoughtSignature;
+        @JsonProperty("provider_metadata") private JsonNode providerMetadata;
+
+        @JsonCreator
+        RawToolCall() {}
+
+        private RawToolCall(String toolCallId, String toolName, String input, Boolean providerExecuted,
+                            Boolean dynamic, String thoughtSignature, JsonNode providerMetadata) {
+            this.toolCallId = toolCallId;
+            this.toolName = toolName;
+            this.input = input;
+            this.providerExecuted = providerExecuted;
+            this.dynamic = dynamic;
+            this.thoughtSignature = thoughtSignature;
+            this.providerMetadata = providerMetadata;
+        }
+
+        public String getToolCallId() { return toolCallId; }
+        public String getToolName() { return toolName; }
+        /** The raw argument text, as the model emitted it. */
+        public String getInput() { return input; }
+        public Boolean getProviderExecuted() { return providerExecuted; }
+        public Boolean getDynamic() { return dynamic; }
+        public String getThoughtSignature() { return thoughtSignature; }
+        public JsonNode getProviderMetadata() { return providerMetadata; }
+
+        /** This call with repaired argument text — the common repair. */
+        public RawToolCall withInput(String input) {
+            return new RawToolCall(toolCallId, toolName, input, providerExecuted, dynamic,
+                thoughtSignature, providerMetadata);
+        }
+
+        public static Builder builder() { return new Builder(); }
+
+        public static class Builder {
+            private String toolCallId = "";
+            private String toolName = "";
+            private String input = "";
+            private Boolean providerExecuted;
+            private Boolean dynamic;
+            private String thoughtSignature;
+            private JsonNode providerMetadata;
+
+            public Builder toolCallId(String v) { this.toolCallId = v; return this; }
+            public Builder toolName(String v) { this.toolName = v; return this; }
+            public Builder input(String v) { this.input = v; return this; }
+            public Builder providerExecuted(Boolean v) { this.providerExecuted = v; return this; }
+            public Builder dynamic(Boolean v) { this.dynamic = v; return this; }
+            public Builder thoughtSignature(String v) { this.thoughtSignature = v; return this; }
+            public Builder providerMetadata(JsonNode v) { this.providerMetadata = v; return this; }
+
+            public RawToolCall build() {
+                return new RawToolCall(toolCallId, toolName, input, providerExecuted, dynamic,
+                    thoughtSignature, providerMetadata);
+            }
+        }
+    }
+
+    /**
+     * What a {@link ToolCallRepairFunction} receives — the AI SDK
+     * {@code repairToolCall} arguments.
+     */
+    public static class ToolCallRepairContext {
+        @JsonProperty("tool_call") private RawToolCall toolCall = new RawToolCall();
+        @JsonProperty("error") private JsonNode error;
+        @JsonProperty("input_schema") private JsonNode inputSchema;
+        @JsonProperty("tools") private List<Tool> tools = new ArrayList<>();
+        @JsonProperty("messages") private List<JsonNode> messages = new ArrayList<>();
+        @JsonProperty("instructions") private String instructions;
+
+        @JsonCreator
+        ToolCallRepairContext() {}
+
+        /** The call that failed tool lookup, JSON parsing, or schema validation. */
+        public RawToolCall getToolCall() { return toolCall; }
+        /** The typed failure ({@code NoSuchTool} / {@code InvalidToolInput}) as wire JSON, like {@link ToolCall#getError()}. */
+        public JsonNode getError() { return error; }
+        /** JSON Schema of the called tool; an empty-object schema when the tool is unknown. */
+        public JsonNode getInputSchema() { return inputSchema; }
+        public List<Tool> getTools() { return tools; }
+        /** The prompt of the current step as wire JSON ({@code ModelMessage} shape). */
+        public List<JsonNode> getMessages() { return messages; }
+        public String getInstructions() { return instructions; }
+    }
+
     // ─────────────────────────────────────────────────────────────────────────────
     // Tools (input side of GenerateTextOptions).
     //
@@ -1716,6 +1812,8 @@ public final class Types {
      * sets are serialized onto the wire.
      */
     public static class GenerateTextOptions {
+        @com.fasterxml.jackson.annotation.JsonIgnore private ToolCallRepairFunction repairToolCall;
+        @com.fasterxml.jackson.annotation.JsonIgnore public ToolCallRepairFunction getRepairToolCall() { return repairToolCall; }
         @JsonProperty("max_output_tokens") private Long maxOutputTokens;
         @JsonProperty("temperature") private Double temperature;
         @JsonProperty("stop_sequences") private List<String> stopSequences;
@@ -1746,7 +1844,7 @@ public final class Types {
                                     Map<String, String> headers, Map<String, JsonNode> providerOptions,
                                     ReasoningEffort reasoning, String instructions,
                                     JsonNode bodyOverrides, Long maxRetries, Boolean includeRawChunks,
-                                    TimeoutConfiguration timeout, String sessionId) {
+                                    TimeoutConfiguration timeout, String sessionId, ToolCallRepairFunction repairToolCall) {
             this.maxOutputTokens = maxOutputTokens;
             this.temperature = temperature;
             this.stopSequences = stopSequences;
@@ -1767,6 +1865,7 @@ public final class Types {
             this.includeRawChunks = includeRawChunks;
             this.timeout = timeout;
             this.sessionId = sessionId;
+            this.repairToolCall = repairToolCall;
         }
 
         public Long getMaxOutputTokens() { return maxOutputTokens; }
@@ -1793,6 +1892,8 @@ public final class Types {
         public static Builder builder() { return new Builder(); }
 
         public static class Builder {
+            private ToolCallRepairFunction repairToolCall;
+            public Builder repairToolCall(ToolCallRepairFunction value) { repairToolCall = value; return this; }
             private Long maxOutputTokens;
             private Double temperature;
             private List<String> stopSequences;
@@ -1839,7 +1940,7 @@ public final class Types {
                 return new GenerateTextOptions(maxOutputTokens, temperature, stopSequences, topP, topK,
                     presencePenalty, frequencyPenalty, responseFormat, seed, tools, toolChoice, headers,
                     providerOptions, reasoning, instructions, bodyOverrides, maxRetries, includeRawChunks,
-                    timeout, sessionId);
+                    timeout, sessionId, repairToolCall);
             }
         }
 

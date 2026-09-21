@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "aimux-core",
+    "aimux-operation",
     "aimux-ffi",
     "aimux-provider-utils",
     "aimux-providers",
@@ -71,6 +72,7 @@ jsonschema = { version = "0.50.1", default-features = false }
 
 # Internal crates
 aimux-core = { path = "aimux-core", version = "0.3.0" }
+aimux-operation = { path = "aimux-operation", version = "0.3.0" }
 aimux-providers = { path = "aimux-providers", version = "0.3.0" }
 aimux-stream = { path = "aimux-stream", version = "0.3.0" }
 aimux-provider-utils = { path = "aimux-provider-utils", version = "0.3.0" }

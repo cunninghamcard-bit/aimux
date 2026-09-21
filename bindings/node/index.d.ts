@@ -50,6 +50,14 @@ export declare class Files {
   uploadFile(dataBase64: string, mediaType: string, optsJson?: string | undefined | null): Promise<string>
 }
 
+export declare class HostOperation {
+  next(lane: number): Promise<AimuxResult<any | undefined | null>>
+  reply(requestId: string, reply: any): AimuxResult<number>
+  cancel(): void
+  finished(): Promise<void>
+  close(): Promise<void>
+}
+
 export declare class ImageModel {
   /**
    * Generate images. `opts_json` is JSON-serialized ImageCallOptions.
@@ -60,6 +68,7 @@ export declare class ImageModel {
 }
 
 export declare class Model {
+  startOperation(request: any): Promise<AimuxResult<HostOperation>>
   /**
    * Wrap this model in a cache-probe layer (RFC-0015). The returned
    * model records fingerprints/verdicts on every call and exposes the

@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 aimux-core = { path = "../../aimux-core" }
+aimux-operation = { path = "../../aimux-operation" }
 aimux-providers = { path = "../../aimux-providers" }
 aimux-provider-utils = { path = "../../aimux-provider-utils" }
 serde = { version = "1", features = ["derive"] }

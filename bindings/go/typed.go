@@ -57,7 +57,12 @@ func (m *Model) Generate(prompt any, opts *GenerateTextOptions) (*GenerateTextRe
 	if err != nil {
 		return nil, err
 	}
-	resultJSON, err := m.GenerateText(promptJSON, optsJSON)
+	var resultJSON string
+	if opts != nil && opts.RepairToolCall != nil {
+		resultJSON, err = m.generateOperation("generate_text", promptJSON, optsJSON, opts.RepairToolCall)
+	} else {
+		resultJSON, err = m.GenerateText(promptJSON, optsJSON)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -78,7 +83,12 @@ func (m *Model) GenerateObj(prompt any, opts *GenerateTextOptions) (*GenerateObj
 	if err != nil {
 		return nil, err
 	}
-	resultJSON, err := m.GenerateObject(promptJSON, optsJSON)
+	var resultJSON string
+	if opts != nil && opts.RepairToolCall != nil {
+		resultJSON, err = m.generateOperation("generate_object", promptJSON, optsJSON, opts.RepairToolCall)
+	} else {
+		resultJSON, err = m.GenerateObject(promptJSON, optsJSON)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +108,12 @@ func (m *Model) ConsumeStream(prompt any, opts *GenerateTextOptions) (*StreamTex
 	if err != nil {
 		return nil, err
 	}
-	resultJSON, err := m.ConsumeStreamText(promptJSON, optsJSON)
+	var resultJSON string
+	if opts != nil && opts.RepairToolCall != nil {
+		resultJSON, err = m.generateOperation("consume_stream_text", promptJSON, optsJSON, opts.RepairToolCall)
+	} else {
+		resultJSON, err = m.ConsumeStreamText(promptJSON, optsJSON)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +172,12 @@ func (m *Model) StreamContext(
 		return nil, err
 	}
 
-	rawStream := m.StreamTextContext(ctx, promptJSON, optsJSON)
+	var rawStream *Stream
+	if opts != nil && opts.RepairToolCall != nil {
+		rawStream = m.streamOperation(ctx, "stream_text", promptJSON, optsJSON, opts.RepairToolCall)
+	} else {
+		rawStream = m.StreamTextContext(ctx, promptJSON, optsJSON)
+	}
 	ts := &TypedStream{
 		raw:   rawStream,
 		parts: make(chan *StreamPart, 256),
@@ -215,7 +235,12 @@ func (m *Model) GenerateAsOpenAI(prompt any, opts *GenerateTextOptions) (*ChatCo
 	if err != nil {
 		return nil, err
 	}
-	resultJSON, err := m.GenerateTextAsOpenAI(promptJSON, optsJSON)
+	var resultJSON string
+	if opts != nil && opts.RepairToolCall != nil {
+		resultJSON, err = m.generateOperation("generate_text_as_openai", promptJSON, optsJSON, opts.RepairToolCall)
+	} else {
+		resultJSON, err = m.GenerateTextAsOpenAI(promptJSON, optsJSON)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -275,7 +300,12 @@ func (m *Model) StreamAsOpenAIContext(
 		return nil, err
 	}
 
-	rawStream := m.StreamTextAsOpenAIContext(ctx, promptJSON, optsJSON)
+	var rawStream *Stream
+	if opts != nil && opts.RepairToolCall != nil {
+		rawStream = m.streamOperation(ctx, "stream_text_as_openai", promptJSON, optsJSON, opts.RepairToolCall)
+	} else {
+		rawStream = m.StreamTextAsOpenAIContext(ctx, promptJSON, optsJSON)
+	}
 	ts := &OpenAIStream{
 		raw:   rawStream,
 		parts: make(chan *ChatCompletionChunk, 256),

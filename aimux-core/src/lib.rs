@@ -24,6 +24,7 @@ pub mod embedding_model;
 pub mod error;
 pub mod files_model;
 pub mod generate;
+pub mod generation_control;
 pub mod image_model;
 pub mod json_repair;
 pub mod language_model;

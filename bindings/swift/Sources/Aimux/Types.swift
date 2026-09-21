@@ -1666,8 +1666,17 @@ public extension Model {
     /// - Returns: A decoded `GenerateTextResult`.
     func generateText(
         prompt: ModelPrompt,
-        options: GenerateTextOptions? = nil
+        options: GenerateTextOptions? = nil,
+        repairToolCall: ToolCallRepair? = nil
     ) throws -> GenerateTextResult {
+        if let repairToolCall {
+            var value: GenerateTextResult?
+            try runHostOperation(startHostOperation(mode: "generate_text", prompt: prompt, options: options), repair: repairToolCall) { wire in
+                value = try JSONDecoder().decode(GenerateTextResult.self, from: Data(wire.utf8))
+            }
+            guard let value else { throw invariant("operation ended without result") }
+            return value
+        }
         let promptJson = try AimuxCodable.jsonString(for: prompt)
         let optsJson = try options.map { try AimuxCodable.jsonString(for: $0) }
         let resultJson = try generateText(prompt: promptJson, options: optsJson)
@@ -1688,8 +1697,17 @@ public extension Model {
     /// - Returns: A decoded `GenerateObjectResult`.
     func generateObject(
         prompt: ModelPrompt,
-        options: GenerateTextOptions? = nil
+        options: GenerateTextOptions? = nil,
+        repairToolCall: ToolCallRepair? = nil
     ) throws -> GenerateObjectResult {
+        if let repairToolCall {
+            var value: GenerateObjectResult?
+            try runHostOperation(startHostOperation(mode: "generate_object", prompt: prompt, options: options), repair: repairToolCall) { wire in
+                value = try JSONDecoder().decode(GenerateObjectResult.self, from: Data(wire.utf8))
+            }
+            guard let value else { throw invariant("operation ended without result") }
+            return value
+        }
         let promptJson = try AimuxCodable.jsonString(for: prompt)
         let optsJson = try options.map { try AimuxCodable.jsonString(for: $0) }
         let resultJson = try generateObject(prompt: promptJson, options: optsJson)
@@ -1706,8 +1724,17 @@ public extension Model {
     /// - Returns: A decoded `StreamTextResultAggregated`.
     func consumeStreamText(
         prompt: ModelPrompt,
-        options: GenerateTextOptions? = nil
+        options: GenerateTextOptions? = nil,
+        repairToolCall: ToolCallRepair? = nil
     ) throws -> StreamTextResultAggregated {
+        if let repairToolCall {
+            var value: StreamTextResultAggregated?
+            try runHostOperation(startHostOperation(mode: "consume_stream_text", prompt: prompt, options: options), repair: repairToolCall) { wire in
+                value = try JSONDecoder().decode(StreamTextResultAggregated.self, from: Data(wire.utf8))
+            }
+            guard let value else { throw invariant("operation ended without result") }
+            return value
+        }
         let promptJson = try AimuxCodable.jsonString(for: prompt)
         let optsJson = try options.map { try AimuxCodable.jsonString(for: $0) }
         let resultJson = try consumeStreamText(prompt: promptJson, options: optsJson)
@@ -1722,10 +1749,20 @@ public extension Model {
     func streamText(
         prompt: ModelPrompt,
         options: GenerateTextOptions? = nil,
+        repairToolCall: ToolCallRepair? = nil,
         onPart: @escaping (StreamPart) -> Void,
         onDone: @escaping () -> Void,
         onError: @escaping (any Error) -> Void
     ) {
+        if let repairToolCall {
+            do {
+                try runHostOperation(startHostOperation(mode: "stream_text", prompt: prompt, options: options), repair: repairToolCall) { wire in
+                    onPart(try JSONDecoder().decode(StreamPart.self, from: Data(wire.utf8)))
+                }
+                onDone()
+            } catch { onError(error) }
+            return
+        }
         let promptJson: String
         let optsJson: String?
         do {
@@ -1777,8 +1814,17 @@ public extension Model {
     /// - Returns: A decoded `ChatCompletion`.
     func generateTextAsOpenAI(
         prompt: ModelPrompt,
-        options: GenerateTextOptions? = nil
+        options: GenerateTextOptions? = nil,
+        repairToolCall: ToolCallRepair? = nil
     ) throws -> ChatCompletion {
+        if let repairToolCall {
+            var value: ChatCompletion?
+            try runHostOperation(startHostOperation(mode: "generate_text_as_openai", prompt: prompt, options: options), repair: repairToolCall) { wire in
+                value = try JSONDecoder().decode(ChatCompletion.self, from: Data(wire.utf8))
+            }
+            guard let value else { throw invariant("operation ended without result") }
+            return value
+        }
         let promptJson = try AimuxCodable.jsonString(for: prompt)
         let optsJson = try options.map { try AimuxCodable.jsonString(for: $0) }
         let resultJson = try generateTextAsOpenAI(prompt: promptJson, options: optsJson)
@@ -1796,10 +1842,20 @@ public extension Model {
     func streamTextAsOpenAI(
         prompt: ModelPrompt,
         options: GenerateTextOptions? = nil,
+        repairToolCall: ToolCallRepair? = nil,
         onPart: @escaping (ChatCompletionChunk) -> Void,
         onDone: @escaping () -> Void,
         onError: @escaping (any Error) -> Void
     ) {
+        if let repairToolCall {
+            do {
+                try runHostOperation(startHostOperation(mode: "stream_text_as_openai", prompt: prompt, options: options), repair: repairToolCall) { wire in
+                    onPart(try JSONDecoder().decode(ChatCompletionChunk.self, from: Data(wire.utf8)))
+                }
+                onDone()
+            } catch { onError(error) }
+            return
+        }
         let promptJson: String
         let optsJson: String?
         do {

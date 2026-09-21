@@ -18,6 +18,8 @@
 //   - Usage / TokenUsage   (types.rs:33, types.rs:44)
 //   - FinishReason         (types.rs:10)
 
+import 'repair.dart';
+
 import 'package:json_annotation/json_annotation.dart';
 
 part 'types.g.dart';
@@ -774,6 +776,8 @@ class TimeoutConfiguration {
 /// `GenerateTextOptions.ts`.
 @JsonSerializable()
 class GenerateTextOptions {
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  final ToolCallRepair? repairToolCall;
   @JsonKey(name: 'max_output_tokens')
   final int? maxOutputTokens;
   final double? temperature;
@@ -809,6 +813,7 @@ class GenerateTextOptions {
   final String? sessionId;
 
   GenerateTextOptions({
+    this.repairToolCall,
     this.maxOutputTokens,
     this.temperature,
     this.stopSequences,

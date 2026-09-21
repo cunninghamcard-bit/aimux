@@ -25,6 +25,9 @@ from typing import Annotated, Any, Dict, Iterator, List, Literal, Optional, Unio
 from pydantic import BaseModel, ConfigDict, Field, RootModel, model_serializer, model_validator
 
 from .aimux import Model
+from .operation import RepairToolCall
+from . import operation as _operation
+from pydantic.json_schema import SkipJsonSchema
 
 __all__ = [
     # type aliases
@@ -834,8 +837,7 @@ class GenerateTextOptions(BaseModel):
     Mirrors Rust ``GenerateTextOptions``. All fields are optional; unset fields
     default to ``None`` (Rust treats absent / ``null`` as ``None``).
 
-    The Rust ``repair_tool_call`` callback is core-only (it cannot cross the
-    FFI boundary); invalid tool calls arrive with ``invalid``/``error`` set on
+    ``repair_tool_call`` executes in Python on the calling thread; invalid tool calls arrive with ``invalid``/``error`` set on
     the tool call.
     """
 
@@ -865,6 +867,7 @@ class GenerateTextOptions(BaseModel):
     """
     timeout: Optional[TimeoutConfiguration] = None
     include_raw_chunks: Optional[bool] = None
+    repair_tool_call: SkipJsonSchema[Optional[RepairToolCall]] = Field(default=None, exclude=True)
 
 
 class GenerateResult(BaseModel):
@@ -1147,6 +1150,9 @@ def generate_text(
         A :class:`GenerateTextResult` with ``.text``, ``.tool_calls``,
         ``.finish_reason``, ``.usage``, ``.warnings`` and ``.raw``.
     """
+    if options is not None and options.repair_tool_call is not None:
+        result = _operation.result(model, "generate_text", _prompt_to_json(prompt), json.loads(_opts_to_json(options)), options.repair_tool_call)
+        return GenerateTextResult.model_validate(result)
     prompt_json = _prompt_to_json(prompt)
     opts_json = _opts_to_json(options)
     result_json = model.generate_text(prompt_json, opts_json)
@@ -1170,6 +1176,15 @@ def stream_text(
             if "TextDelta" in part:
                 print(part["TextDelta"]["delta"], end="")
     """
+    if options is not None and options.repair_tool_call is not None:
+        iterator = _operation.events(model, "stream_text", _prompt_to_json(prompt), json.loads(_opts_to_json(options)), options.repair_tool_call)
+        try:
+            for event in iterator:
+                if event["type"] == "part":
+                    yield event["part"]
+        finally:
+            iterator.close()
+        return
     prompt_json = _prompt_to_json(prompt)
     opts_json = _opts_to_json(options)
     for part_json in model.stream_text(prompt_json, opts_json):
@@ -1200,6 +1215,9 @@ def generate_text_as_openai(
     Returns:
         A :class:`ChatCompletion` with ``.id``, ``.choices``, ``.usage``, …
     """
+    if options is not None and options.repair_tool_call is not None:
+        result = _operation.result(model, "generate_text_as_openai", _prompt_to_json(prompt), json.loads(_opts_to_json(options)), options.repair_tool_call)
+        return ChatCompletion.model_validate(result)
     prompt_json = _prompt_to_json(prompt)
     opts_json = _opts_to_json(options)
     result_json = model.generate_text_as_openai(prompt_json, opts_json)
@@ -1226,6 +1244,15 @@ def stream_text_as_openai(
             if chunk.choices and chunk.choices[0].delta.content:
                 print(chunk.choices[0].delta.content, end="")
     """
+    if options is not None and options.repair_tool_call is not None:
+        iterator = _operation.events(model, "stream_text_as_openai", _prompt_to_json(prompt), json.loads(_opts_to_json(options)), options.repair_tool_call)
+        try:
+            for event in iterator:
+                if event["type"] == "part":
+                    yield ChatCompletionChunk.model_validate(event["part"])
+        finally:
+            iterator.close()
+        return
     prompt_json = _prompt_to_json(prompt)
     opts_json = _opts_to_json(options)
     for chunk_json in model.stream_text_as_openai(prompt_json, opts_json):

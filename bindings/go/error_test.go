@@ -423,8 +423,11 @@ func TestMarshalledOptionsRejectRawPassThrough(t *testing.T) {
 		// invalid UTF-8 becomes U+FFFD, NUL becomes a \u0000 escape. No error here.
 		{"plain string field is sanitized, not rejected", func() error {
 			s, e := marshalJSON("opts", &SpeechCallOptions{Text: "hi\xffthere\x00"})
-			if e == nil && !strings.Contains(s, `"hi\ufffdthere\u0000"`) {
-				t.Errorf("expected U+FFFD / \\u0000 coercion, got %s", s)
+			if e == nil {
+				var decoded SpeechCallOptions
+				if err := json.Unmarshal([]byte(s), &decoded); err != nil || decoded.Text != "hi\uFFFDthere\x00" {
+					t.Errorf("expected U+FFFD / NUL values in valid JSON, got %s (%v)", s, err)
+				}
 			}
 			return e
 		}, ""},

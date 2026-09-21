@@ -102,6 +102,7 @@ enum HandleEntry {
     /// Live transcription streaming session (RFC-0028 Phase 2).
     TranscriptionSession(Arc<transcription_session::TranscriptionFfiSession>),
     Abort(AbortSignal),
+    Operation(Arc<aimux_operation::Operation>),
 }
 
 type Registry = HashMap<u64, HandleEntry>;
@@ -178,8 +179,13 @@ fn drop_handle(handle: u64) {
     // A transcription session owns a driver task: abort and join it here too,
     // so the generic drop is never a silent leak (the registry mutex is
     // already released — the join must not hold it).
-    if let Some(HandleEntry::TranscriptionSession(s)) = removed {
-        s.terminate();
+    match removed {
+        Some(HandleEntry::TranscriptionSession(s)) => s.terminate(),
+        Some(HandleEntry::Operation(operation)) => {
+            operation.cancel();
+            let _ = ffi_block_on(operation.close());
+        }
+        _ => {}
     }
     if let Some(stores) = TRACE_STORES.get() {
         stores
@@ -198,8 +204,10 @@ fn drop_abort_signal(handle: u64) {
     }
 }
 
+mod operation;
 /// Transcription streaming sessions (RFC-0028 Phase 2).
 mod transcription_session;
+pub use operation::*;
 
 /// The shared tokio runtime driving all async provider calls.
 fn runtime() -> &'static Runtime {

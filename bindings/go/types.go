@@ -278,6 +278,7 @@ type TimeoutConfiguration struct {
 
 // GenerateTextOptions mirrors the shared wire options.
 type GenerateTextOptions struct {
+	RepairToolCall   ToolCallRepairFunc    `json:"-"`
 	MaxOutputTokens  *uint32               `json:"max_output_tokens,omitempty"`
 	Temperature      *float64              `json:"temperature,omitempty"`
 	StopSequences    []string              `json:"stop_sequences,omitempty"`

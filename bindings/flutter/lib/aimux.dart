@@ -44,6 +44,8 @@ import 'dart:ffi';
 import 'package:ffi/ffi.dart';
 
 import 'errors.dart';
+import 'operation_transport.dart';
+export 'repair.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // FFI type aliases. `_Err` is `aimux_error_t *` (opaque; NULL = success);
@@ -371,6 +373,9 @@ int _construct4(
 /// Implements [Finalizable] so a [NativeFinalizer] can release the handle if
 /// [close] is forgotten (T9).
 class Model implements Finalizable {
+  /// Internal data transport used by typed host-operation wrappers.
+  int startOperation(Map<String, dynamic> request) =>
+      startHostOperation(_requireHandle(), encodeJson(request, 'operation request'));
   final int _handle;
   bool _closed = false;
 

@@ -33,6 +33,12 @@ import java.util.concurrent.locks.ReentrantReadWriteLock
 // ─────────────────────────────────────────────────────────────────────────────
 
 internal interface AimuxFFI : Library {
+    fun aimux_operation_start(model: Long, request: String, out: LongByReference): Pointer?
+    fun aimux_operation_next(operation: Long, lane: Int, waitMs: Long, out: PointerByReference, state: IntByReference): Pointer?
+    fun aimux_operation_reply(operation: Long, requestId: String, reply: String, status: IntByReference): Pointer?
+    fun aimux_operation_cancel(operation: Long): Pointer?
+    fun aimux_operation_drop(operation: Long)
+
     // apiKey nullable only so tests can exercise the NULL-argument C ABI failure; Model.openai never passes null.
     fun aimux_openai_new(apiKey: String?, modelId: String, outHandle: LongByReference): Pointer?
     fun aimux_anthropic_new(apiKey: String, modelId: String, outHandle: LongByReference): Pointer?
@@ -383,6 +389,15 @@ internal inline fun stringResult(context: String = "", block: (PointerByReferenc
  * ```
  */
 class Model internal constructor(handle: Long) : Closeable {
+
+    internal fun startOperation(request: String): Long {
+        lock.readLock().lock()
+        try {
+            val out = LongByReference()
+            FFI.lib.aimux_operation_start(requireHandleLocked(), request, out)?.let { throw expectAimuxError(it) }
+            return out.value
+        } finally { lock.readLock().unlock() }
+    }
     // Go-style read/write lock: every FFI call holds the read lock for its
     // entire duration; close() takes the write lock and thus blocks until all
     // in-flight calls finish before dropping the native handle. This closes the

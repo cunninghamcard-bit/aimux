@@ -23,7 +23,10 @@ For the project README, quickstart, and provider/binding tables, see the
 ## Design docs (RFCs)
 
 Design decisions are recorded as RFCs under [`../rfc/`](../rfc/). See the
-README for the full list.
+[project README](../README.md#design-docs-rfcs) for the full list.
+
+Local implementation: [RFC-0035 — 宿主驱动的跨语言操作](../rfc/0035-host-driven-operations.md).
+[技术债清理与消融记录](host-operation-ablation.md) includes the retained mechanisms and validation scope.
 
 ## Internal notes
 

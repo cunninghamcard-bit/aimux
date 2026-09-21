@@ -9,6 +9,7 @@
 
 mod error;
 mod multimodal;
+mod operation;
 pub use multimodal::*;
 
 use std::sync::Arc;
@@ -49,6 +50,12 @@ struct Model {
 
 #[pymethods]
 impl Model {
+    fn start_operation(&self, request_json: &str) -> PyResult<operation::HostOperation> {
+        let request: aimux_operation::StartRequest = wire_json("request_json", request_json)?;
+        let _entered = crate::runtime().enter();
+        Ok(operation::HostOperation { inner: aimux_operation::Operation::start(self.inner.clone(), request).map_err(|e| to_py_err(&e))? })
+    }
+
     /// Wrap this model in a cache-probe layer (RFC-0015) WITHOUT an
     /// auditor (records fingerprints only; verdicts stay None).
     fn trace(&self) -> PyResult<Model> {
@@ -1037,6 +1044,7 @@ struct RouterFfiConfig {
 fn aimux(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     crate::error::register(m)?;
     m.add_class::<Model>()?;
+    m.add_class::<operation::HostOperation>()?;
     m.add_class::<StreamIterator>()?;
     m.add_function(wrap_pyfunction!(init_logging, m)?)?;
     m.add_function(wrap_pyfunction!(init_session_store, m)?)?;

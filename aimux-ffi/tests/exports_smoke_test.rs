@@ -30,7 +30,7 @@
 //!
 //! ## Coverage
 //!
-//! All 114 `#[unsafe(no_mangle)]` exports in `src/lib.rs` are exercised (the
+//! All 124 `#[unsafe(no_mangle)]` exports in `src/lib.rs` are exercised (the
 //! constructor and utility classes in full; the session class one
 //! representative call per export). [`header_and_exports_agree`] pins the
 //! count against the two headers.
@@ -144,7 +144,8 @@ extern "C-unwind" fn smoke_on_done(_ctx: *mut c_void) {
 #[test]
 fn header_and_exports_agree() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let lib = std::fs::read_to_string(root.join("src/lib.rs")).unwrap();
+    let lib = std::fs::read_to_string(root.join("src/lib.rs")).unwrap()
+        + &std::fs::read_to_string(root.join("src/operation.rs")).unwrap();
     let mut exports: Vec<String> = lib
         .split("#[unsafe(no_mangle)]")
         .skip(1)
@@ -156,7 +157,7 @@ fn header_and_exports_agree() {
     exports.sort();
     assert_eq!(
         exports.len(),
-        119,
+        124,
         "export count changed; update the headers"
     );
 

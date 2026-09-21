@@ -7,6 +7,7 @@
 // working byte-for-byte.
 
 import 'dart:async';
+import 'operation.dart';
 
 import 'package:aimux/aimux.dart';
 import 'package:aimux/types.dart';
@@ -42,7 +43,10 @@ class TypedModel {
     String prompt, [
     GenerateTextOptions? options,
   ]) {
-    final result = _raw.generateText(prompt, options?.toJson());
+    final result = options?.repairToolCall == null
+        ? _raw.generateText(prompt, options?.toJson())
+        : hostResultSync(_raw, 'generate_text', prompt, options?.toJson(),
+            options!.repairToolCall!);
     return GenerateTextResult.fromJson(result);
   }
 
@@ -55,7 +59,10 @@ class TypedModel {
     GenerateTextOptions? options,
   ]) {
     final prompt = messages.map((m) => m.toJson()).toList();
-    final result = _raw.generateText(prompt, options?.toJson());
+    final result = options?.repairToolCall == null
+        ? _raw.generateText(prompt, options?.toJson())
+        : hostResultSync(_raw, 'generate_text', prompt, options?.toJson(),
+            options!.repairToolCall!);
     return GenerateTextResult.fromJson(result);
   }
 
@@ -71,7 +78,10 @@ class TypedModel {
     String prompt, [
     GenerateTextOptions? options,
   ]) {
-    final result = _raw.generateObject(prompt, options?.toJson());
+    final result = options?.repairToolCall == null
+        ? _raw.generateObject(prompt, options?.toJson())
+        : hostResultSync(_raw, 'generate_object', prompt, options?.toJson(),
+            options!.repairToolCall!);
     return GenerateObjectResult.fromJson(result);
   }
 
@@ -82,7 +92,10 @@ class TypedModel {
     GenerateTextOptions? options,
   ]) {
     final prompt = messages.map((m) => m.toJson()).toList();
-    final result = _raw.generateObject(prompt, options?.toJson());
+    final result = options?.repairToolCall == null
+        ? _raw.generateObject(prompt, options?.toJson())
+        : hostResultSync(_raw, 'generate_object', prompt, options?.toJson(),
+            options!.repairToolCall!);
     return GenerateObjectResult.fromJson(result);
   }
 
@@ -94,7 +107,10 @@ class TypedModel {
     String prompt, [
     GenerateTextOptions? options,
   ]) {
-    final result = _raw.consumeStreamText(prompt, options?.toJson());
+    final result = options?.repairToolCall == null
+        ? _raw.consumeStreamText(prompt, options?.toJson())
+        : hostResultSync(_raw, 'consume_stream_text', prompt, options?.toJson(),
+            options!.repairToolCall!);
     return StreamTextResultAggregated.fromJson(result);
   }
 
@@ -105,7 +121,10 @@ class TypedModel {
     GenerateTextOptions? options,
   ]) {
     final prompt = messages.map((m) => m.toJson()).toList();
-    final result = _raw.consumeStreamText(prompt, options?.toJson());
+    final result = options?.repairToolCall == null
+        ? _raw.consumeStreamText(prompt, options?.toJson())
+        : hostResultSync(_raw, 'consume_stream_text', prompt, options?.toJson(),
+            options!.repairToolCall!);
     return StreamTextResultAggregated.fromJson(result);
   }
 
@@ -118,6 +137,12 @@ class TypedModel {
     Object prompt, [
     GenerateTextOptions? options,
   ]) {
+    if (options?.repairToolCall != null) {
+      return hostEvents(_raw, 'stream_text', prompt, options?.toJson(),
+              options!.repairToolCall!)
+          .where((e) => e['type'] == 'part')
+          .map((e) => StreamPart.fromJson(e['part']));
+    }
     return _raw.streamText(prompt, options?.toJson()).map(StreamPart.fromJson);
   }
 
@@ -130,7 +155,10 @@ class TypedModel {
     String prompt, [
     GenerateTextOptions? options,
   ]) {
-    final result = _raw.generateTextAsOpenAI(prompt, options?.toJson());
+    final result = options?.repairToolCall == null
+        ? _raw.generateTextAsOpenAI(prompt, options?.toJson())
+        : hostResultSync(_raw, 'generate_text_as_openai', prompt,
+            options?.toJson(), options!.repairToolCall!);
     return ChatCompletion.fromJson(result);
   }
 
@@ -141,7 +169,10 @@ class TypedModel {
     GenerateTextOptions? options,
   ]) {
     final prompt = messages.map((m) => m.toJson()).toList();
-    final result = _raw.generateTextAsOpenAI(prompt, options?.toJson());
+    final result = options?.repairToolCall == null
+        ? _raw.generateTextAsOpenAI(prompt, options?.toJson())
+        : hostResultSync(_raw, 'generate_text_as_openai', prompt,
+            options?.toJson(), options!.repairToolCall!);
     return ChatCompletion.fromJson(result);
   }
 
@@ -155,9 +186,47 @@ class TypedModel {
     Object prompt, [
     GenerateTextOptions? options,
   ]) {
+    if (options?.repairToolCall != null) {
+      return hostEvents(_raw, 'stream_text_as_openai', prompt,
+              options?.toJson(), options!.repairToolCall!)
+          .where((e) => e['type'] == 'part')
+          .map((e) => ChatCompletionChunk.fromJson(e['part']));
+    }
     return _raw
         .streamTextAsOpenAI(prompt, options?.toJson())
         .map(ChatCompletionChunk.fromJson);
+  }
+
+  /// Asynchronous generation; repair stays on this isolate and may await.
+  Future<GenerateTextResult> generateTextAsync(Object prompt,
+      [GenerateTextOptions? options]) async {
+    final result = await hostResult(_raw, 'generate_text', prompt,
+        options?.toJson(), options?.repairToolCall);
+    return GenerateTextResult.fromJson(result);
+  }
+
+  /// Asynchronous generation; repair stays on this isolate and may await.
+  Future<GenerateObjectResult> generateObjectAsync(Object prompt,
+      [GenerateTextOptions? options]) async {
+    final result = await hostResult(_raw, 'generate_object', prompt,
+        options?.toJson(), options?.repairToolCall);
+    return GenerateObjectResult.fromJson(result);
+  }
+
+  /// Asynchronous generation; repair stays on this isolate and may await.
+  Future<StreamTextResultAggregated> consumeStreamTextAsync(Object prompt,
+      [GenerateTextOptions? options]) async {
+    final result = await hostResult(_raw, 'consume_stream_text', prompt,
+        options?.toJson(), options?.repairToolCall);
+    return StreamTextResultAggregated.fromJson(result);
+  }
+
+  /// Asynchronous generation; repair stays on this isolate and may await.
+  Future<ChatCompletion> generateTextAsOpenAIAsync(Object prompt,
+      [GenerateTextOptions? options]) async {
+    final result = await hostResult(_raw, 'generate_text_as_openai', prompt,
+        options?.toJson(), options?.repairToolCall);
+    return ChatCompletion.fromJson(result);
   }
 
   /// Release the native handle. Delegates to the wrapped [Model]; safe to

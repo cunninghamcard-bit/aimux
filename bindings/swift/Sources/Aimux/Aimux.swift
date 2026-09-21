@@ -18,7 +18,7 @@ import Foundation
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Copy a caller-owned C string and free it (`aimux_free_string`).
-private func takeCString(_ p: UnsafeMutablePointer<CChar>?) -> String? {
+func takeCString(_ p: UnsafeMutablePointer<CChar>?) -> String? {
     guard let p else { return nil }
     defer { aimux_free_string(p) }
     return String(cString: p)
@@ -523,6 +523,19 @@ public struct RecordingError: Error, LocalizedError, CustomStringConvertible, Eq
 ///
 /// The C handle is automatically released when this object is deallocated.
 public final class Model: @unchecked Sendable {
+
+    func startHostOperation(mode: String, prompt: ModelPrompt, options: GenerateTextOptions?) throws -> OperationTransport {
+        let request: [String: Any] = [
+            "protocol_version": 1, "mode": mode,
+            "prompt": try JSONSerialization.jsonObject(with: JSONEncoder().encode(prompt), options: .fragmentsAllowed),
+            "options": try options.map { try JSONSerialization.jsonObject(with: JSONEncoder().encode($0)) } ?? [:],
+            "repair_tool_call": true,
+        ]
+        let json = String(decoding: try JSONSerialization.data(withJSONObject: request), as: UTF8.self)
+        var operation: UInt64 = 0
+        if let e = aimux_operation_start(handle, json, &operation) { throw expectAimuxError(e, context: "operation_start") }
+        return OperationTransport(operation)
+    }
 
     // The opaque handle from aimux-ffi. 0 means invalid/freed.
     private var handle: UInt64

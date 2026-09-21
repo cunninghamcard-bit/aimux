@@ -1,0 +1,17 @@
+{
+  "options": {
+    "tools": [{"type": "function", "name": "weather", "input_schema": {"type": "object"}}]
+  },
+  "response": {
+    "id": "host-operation-test",
+    "model": "mock",
+    "choices": [{
+      "message": {"role": "assistant", "tool_calls": [{
+        "id": "call-1", "type": "function",
+        "function": {"name": "weather", "arguments": "{"}
+      }]},
+      "finish_reason": "tool_calls"
+    }],
+    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+  }
+}
