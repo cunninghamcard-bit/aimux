@@ -253,6 +253,53 @@ and `(List<ModelMessage> messages, options)` overloads.
 > Stream part variants are documented in the
 > [API overview](../API.md#streaming-generation).
 
+## Tool-Call Repair
+
+An unparseable tool call never fails generation: it comes back as a
+`ToolCall` with `getInvalid() == true` and `getError()`. Set
+`repairToolCall` on the options to fix such a call in Java, the way the AI SDK
+`repairToolCall` does (RFC-0035). It may do anything to produce the
+replacement — including a second `generateText` against a repair model. That
+holds on the stream too: the FFI re-entrancy guard is thread-local, so the
+binding runs a stream hook on its own thread (the stream thread waits for it,
+so part order is unaffected) instead of on the native callback thread, where
+any generate call would fail with `AIMUX_E_FFI_REENTRANT_CALL`.
+
+```java
+Types.GenerateTextOptions options = Types.GenerateTextOptions.builder()
+    .tools(Collections.singletonList(weatherTool()))
+    .repairToolCall(context -> {
+        // context: the raw call (input is the provider's argument TEXT), the
+        // error, the tool's input schema, and the tools/messages/instructions
+        // the call was generated with.
+        String fixed = context.getToolCall().getInput().replace("city", "location");
+        return Types.RawToolCall.builder()
+            .toolCallId(context.getToolCall().getToolCallId())
+            .toolName(context.getToolCall().getToolName())
+            .input(fixed)                // raw argument text, re-validated by aimux
+            .build();
+    })
+    .build();
+
+Types.ToolCall call = model.generateText("Weather in Tokyo?", options)
+    .getToolCalls().get(0);            // repaired: getInvalid() == null
+```
+
+- Return `null` to leave the call as it was (invalid, original error).
+- Throw to report a failed attempt: the call stays invalid with a
+  `ToolCallRepair` error carrying the exception's message. The replacement is
+  re-parsed and re-validated; if it is still invalid, the same error reports
+  both the original and the new cause.
+- Called at most once per tool call, never for a valid one, and never when the
+  options carry no tool set.
+- Applies to `TypedModel` `generateText` / `generateObject` /
+  `consumeStreamText` / `streamText` / `streamTextStream`. It is never
+  serialized into the options JSON, and it does **not** apply to the
+  OpenAI-format outputs (`generateTextAsOpenAI` / `streamTextAsOpenAI`), whose
+  wire shape carries no invalid marker. On the stream the repaired
+  `StreamPart.ToolCall` replaces the original; tool input deltas are forwarded
+  verbatim, repair or not.
+
 ## TypedModel
 
 | API | Signature |
@@ -375,6 +422,10 @@ custom serializer for the scalar-or-object wire form), `ContentPart` (sealed),
 `FileBytes` / `FileData`, `GenerateContent`, `GenerateResult`,
 `GenerateTextResult`, `StreamPart` (sealed). All sealed hierarchies serialize
 in the wrapper-object wire form (e.g. `{"TextDelta":{...}}`).
+
+`RawToolCall` and `ToolCallRepairContext` serve
+[tool-call repair](#tool-call-repair); `ToolCallRepair` (the hook itself) is a
+top-level functional interface, not nested in `Types`.
 
 `ToolCall` (top-level and `StreamPart.ToolCall`) carries `getProviderMetadata()`
 plus `getInvalid()` (set by Core when tool lookup, input parse, or schema

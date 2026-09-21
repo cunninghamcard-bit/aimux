@@ -149,6 +149,28 @@ public interface AimuxFFI extends Library {
                                         StreamPartCallback onPart, StreamDoneCallback onDone,
                                         Pointer streamCtx);
 
+    // ── Stateless tool-call repair (RFC-0035) ───────────────────────────────
+    // Pure data functions: no handle, no tokio runtime, no I/O — safe to call
+    // from inside a stream callback (the re-entrancy guard only rejects nested
+    // runtime work). Each writes owned JSON to outJson (free with
+    // aimux_free_string); returns the error or null.
+
+    /**
+     * Repair argument for one invalid tool call, or the JSON literal
+     * {@code "null"} when the options carried no tool set (never repair such a
+     * call — that is a SUCCESS, not an error).
+     */
+    Pointer aimux_tool_call_repair_context(String toolCallJson, String promptJson, String optsJson,
+                                           PointerByReference outJson);
+
+    /** Resolve one invalid tool call against a repair reply; writes the resulting ToolCall. */
+    Pointer aimux_apply_tool_call_repair(String toolCallJson, String optsJson, String replyJson,
+                                         PointerByReference outJson);
+
+    /** Patch a serialized GenerateTextResult / GenerateObjectResult (tool_calls and response_messages). */
+    Pointer aimux_apply_tool_call_repair_to_result(String resultJson, String optsJson, String toolCallId,
+                                                   String replyJson, PointerByReference outJson);
+
     // ── Resource management ─────────────────────────────────────────────────
 
     void aimux_drop_handle(long handle);
