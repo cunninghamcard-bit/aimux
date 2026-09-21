@@ -279,11 +279,6 @@ export declare function anthropic(apiKey: string, modelId: string, config?: stri
 export declare function anthropicAws(apiKey: string, region: string, modelId: string, config?: string | ProviderConfig | undefined | null): Promise<AimuxResult<Model>>
 
 /**
- * Create an Azure OpenAI language model instance (API key + resource name).
- *
- * The deployment name is passed as `model_id`; `api_version` is optional.
- */
-/**
  * Resolve one invalid tool call against a host's repair reply.
  *
  * `optsJson` is the same string the call was generated with; the tool set
@@ -309,6 +304,11 @@ export declare function applyToolCallRepair(toolCallJson: string, optsJson: stri
  */
 export declare function applyToolCallRepairToResult(resultJson: string, optsJson: string | undefined | null, toolCallId: string, replyJson: string): AimuxResult<string>
 
+/**
+ * Create an Azure OpenAI language model instance (API key + resource name).
+ *
+ * The deployment name is passed as `model_id`; `api_version` is optional.
+ */
 export declare function azure(apiKey: string, resourceName: string, deployment: string, apiVersion?: string | undefined | null, config?: string | ProviderConfig | undefined | null): Promise<AimuxResult<Model>>
 
 /** Create a Bedrock language model instance (AWS SigV4 credentials). */
