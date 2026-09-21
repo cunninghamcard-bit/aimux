@@ -5,7 +5,9 @@ providing a Pythonic API surface.
 """
 
 import json
-from typing import Any, AsyncIterator, Dict, List, Optional, Union
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Union
+
+from . import _repair
 
 from .aimux import (
     AimuxError,
@@ -42,6 +44,9 @@ from .aimux import (
     provider as _native_provider,
     create_provider as _native_create_provider,
     get_model_specs as _native_get_model_specs,
+    tool_call_repair_context,
+    apply_tool_call_repair,
+    apply_tool_call_repair_to_result,
     ProviderHandle,
     init_session_store,
     init_session_infer,
@@ -114,6 +119,9 @@ __all__ = [
     "provider",
     "create_provider",
     "get_model_specs",
+    "tool_call_repair_context",
+    "apply_tool_call_repair",
+    "apply_tool_call_repair_to_result",
     "ProviderHandle",
     "init_session_store",
     "init_session_infer",
@@ -150,6 +158,7 @@ __all__ = [
     "google_image",
     "google_video",
     "tavily_search",
+    "RepairToolCall",
     "generate_text",
     "generate_object",
     "consume_stream_text",
@@ -233,11 +242,37 @@ def _prompt_to_json(prompt: Union[str, List[Dict[str, Any]]]) -> str:
     return json.dumps({"prompt": prompt})
 
 
+#: The ``options["repair_tool_call"]`` function (RFC-0035), the equivalent of
+#: the AI SDK ``repairToolCall``.
+#:
+#: It is called once per tool call that came back ``invalid``, with the repair
+#: context ``{tool_call, error, input_schema, tools, messages, instructions}``
+#: — ``tool_call["input"]`` being the provider's raw argument text. Return a
+#: replacement raw tool call (same shape, ``input`` a string) to re-validate,
+#: or ``None`` to leave the call invalid. Raising marks the repair failed: the
+#: call keeps its original error with the exception message as the cause.
+#:
+#: It runs outside the native call, so it may itself call back into aimux (for
+#: example ask a model to rewrite the arguments). Calls made without ``tools``
+#: are never repaired, and the OpenAI-format outputs
+#: (``generate_text_as_openai`` / ``stream_text_as_openai``) do not support
+#: repair at all — their shape carries no ``invalid`` marker.
+RepairToolCall = Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]
+
+
 def _opts_to_json(options: Optional[Dict[str, Any]]) -> Optional[str]:
-    """Convert options dict to JSON string."""
+    """Convert options dict to JSON string.
+
+    ``repair_tool_call`` is a Python callable and stays on this side of the
+    boundary; everything else is passed through to the native layer.
+    """
     if options is None:
         return None
-    return json.dumps(options)
+    return json.dumps({k: v for k, v in options.items() if k != "repair_tool_call"})
+
+
+def _repair_fn(options: Optional[Dict[str, Any]]) -> Optional["RepairToolCall"]:
+    return options.get("repair_tool_call") if options else None
 
 
 def generate_text(
@@ -258,6 +293,9 @@ def generate_text(
     prompt_json = _prompt_to_json(prompt)
     opts_json = _opts_to_json(options)
     result_json = model.generate_text(prompt_json, opts_json)
+    repair = _repair_fn(options)
+    if repair is not None:
+        result_json = _repair.repair_result(result_json, prompt_json, opts_json, repair)
     return json.loads(result_json)
 
 
@@ -284,6 +322,9 @@ def generate_object(
     prompt_json = _prompt_to_json(prompt)
     opts_json = _opts_to_json(options)
     result_json = model.generate_object(prompt_json, opts_json)
+    repair = _repair_fn(options)
+    if repair is not None:
+        result_json = _repair.repair_result(result_json, prompt_json, opts_json, repair)
     return json.loads(result_json)
 
 
@@ -309,6 +350,9 @@ def consume_stream_text(
     prompt_json = _prompt_to_json(prompt)
     opts_json = _opts_to_json(options)
     result_json = model.consume_stream_text(prompt_json, opts_json)
+    repair = _repair_fn(options)
+    if repair is not None:
+        result_json = _repair.repair_result(result_json, prompt_json, opts_json, repair)
     return json.loads(result_json)
 
 
@@ -327,7 +371,12 @@ def stream_text(
     prompt_json = _prompt_to_json(prompt)
     opts_json = _opts_to_json(options)
     iterator = model.stream_text(prompt_json, opts_json)
+    repair = _repair_fn(options)
     for part_json in iterator:
+        if repair is not None:
+            part_json = _repair.repair_stream_part(
+                part_json, prompt_json, opts_json, repair
+            )
         yield json.loads(part_json)
 
 
