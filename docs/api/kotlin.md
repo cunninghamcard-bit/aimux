@@ -194,6 +194,45 @@ println(result.usage?.inputTokens?.total)
 `TypedModel` is `Closeable` (use `use { }`); `AiMuxError` values surface as
 typed `AimuxException` subclasses (see [Errors](#errors)).
 
+## Tool-Call Repair
+
+A tool call whose arguments do not parse or do not match the schema never fails
+generation — it comes back as `ToolCall(invalid = true, error = …)`. Set
+`GenerateTextOptions.repairToolCall` to get one repair attempt per invalid call
+(RFC-0035, the AI SDK's `repairToolCall`). It runs on the JVM after the call
+returns, so it may block and may itself call aimux:
+
+```kotlin
+val options = GenerateTextOptions(
+    tools = listOf(weatherTool),
+    repairToolCall = { context ->
+        // context.toolCall.input is the RAW argument text the model emitted;
+        // context.error, .inputSchema, .tools, .messages, .instructions describe the failure.
+        val fixed = repairModel.generateText("Fix these arguments: ${context.toolCall.input}")
+        context.toolCall.copy(input = fixed.text)   // null = leave the call invalid
+    },
+)
+val result = typedModel.generateText("weather in Singapore?", options)
+```
+
+| Return / throw | Result |
+|---|---|
+| a `RawToolCall` | re-parsed and re-validated; a still-invalid repair carries `ToolCallRepair` |
+| `null` | the call stays invalid with its original error |
+| throws | the call carries `ToolCallRepair` with the exception's message as cause |
+
+Honoured by `generateText`, `generateObject`, `consumeStreamText` and
+`streamText` / `streamTextSequence` (the invalid `StreamPart.ToolCall` is
+replaced; tool-input deltas are the provider's text and pass through
+untouched). On the streaming path the function runs on a worker thread rather
+than the stream-callback thread — the native re-entrancy guard is thread-local,
+so a hook calling aimux from the callback thread would fail; the stream simply
+waits for it, so part order is unaffected. **Not** honoured by `generateTextAsOpenAI` / `streamTextAsOpenAI`:
+`ChatCompletion` carries no `invalid` marker. The raw JSON-string `Model` never
+sees typed options; to drive repair from it, call `toolCallRepairContext`,
+`applyToolCallRepair` and `applyToolCallRepairToResult` directly — they are
+pure JSON-in / JSON-out functions.
+
 ## Streaming Transcription (STT)
 
 Realtime transcription models (e.g. OpenAI `gpt-realtime-whisper`) support

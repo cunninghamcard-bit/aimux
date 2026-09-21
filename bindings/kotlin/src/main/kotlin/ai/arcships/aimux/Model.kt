@@ -101,6 +101,19 @@ internal interface AimuxFFI : Library {
         streamCtx: Pointer?,
     ): Pointer?
 
+    // ── Stateless tool-call repair (RFC-0035) ───────────────────────────────
+    // Pure functions: no handle, no I/O. promptJson/optsJson are the SAME
+    // strings passed to aimux_generate_text / aimux_stream_text.
+    fun aimux_tool_call_repair_context(
+        toolCallJson: String, promptJson: String, optsJson: String?, outJson: PointerByReference
+    ): Pointer?
+    fun aimux_apply_tool_call_repair(
+        toolCallJson: String, optsJson: String?, replyJson: String, outJson: PointerByReference
+    ): Pointer?
+    fun aimux_apply_tool_call_repair_to_result(
+        resultJson: String, optsJson: String?, toolCallId: String, replyJson: String, outJson: PointerByReference
+    ): Pointer?
+
     fun aimux_drop_handle(handle: Long)
     fun aimux_free_string(ptr: Pointer?)
 

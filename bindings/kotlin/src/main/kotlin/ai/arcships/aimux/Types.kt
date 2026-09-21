@@ -17,6 +17,7 @@ import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
+import kotlinx.serialization.Transient
 import kotlinx.serialization.descriptors.SerialDescriptor
 import kotlinx.serialization.descriptors.buildClassSerialDescriptor
 import kotlinx.serialization.encoding.Decoder
@@ -615,6 +616,19 @@ data class GenerateTextOptions(
     @SerialName("timeout") val timeout: TimeoutConfiguration? = null,
     /** Session identifier (RFC-0024): groups consecutive calls into a session. */
     @SerialName("session_id") val sessionId: String? = null,
+    /**
+     * One repair attempt per invalid tool call (RFC-0035), run on the JVM after
+     * the call returns. Mirrors AI SDK `repairToolCall`.
+     *
+     * [Transient]: a function cannot be serialized, and core never sees it —
+     * [TypedModel] runs it host-side. Honoured by `generateText`,
+     * `generateObject`, `consumeStreamText` and `streamText`; the
+     * OpenAI-format outputs (`generateTextAsOpenAI` / `streamTextAsOpenAI`)
+     * ignore it, because `ChatCompletion` carries no `invalid` marker and the
+     * OpenAI stream forwards provider argument deltas verbatim. The raw
+     * JSON-string [Model] ignores it too — it never sees typed options.
+     */
+    @Transient val repairToolCall: RepairToolCall? = null,
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
