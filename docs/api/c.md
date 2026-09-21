@@ -368,7 +368,7 @@ its error becomes `ToolCallRepair { original_error, cause }`. `failed` reports
 |------|------|
 | `aimux_tool_call_repair_context(tool_call_json, prompt_json, opts_json, char **out_json)` | [AiMuxError] `{tool_call, error, input_schema, tools, messages, instructions}` — the AI SDK `repairToolCall` argument — **or the JSON literal `null`** |
 | `aimux_apply_tool_call_repair(tool_call_json, opts_json, reply_json, char **out_json)` | [AiMuxError] Resolve one call; writes the resulting `ToolCall` JSON |
-| `aimux_apply_tool_call_repair_to_result(result_json, opts_json, tool_call_id, reply_json, char **out_json)` | [AiMuxError] Patch a `GenerateTextResult` / `GenerateObjectResult`: rewrites `tool_calls` **and** the matching `response_messages` tool-call part (its `tool_call_id` included — a repair may rename the call) |
+| `aimux_apply_tool_call_repair_to_result(result_json, opts_json, tool_call_id, reply_json, char **out_json)` | [AiMuxError] Patch a `GenerateTextResult` / `GenerateObjectResult` / `StreamTextResultAggregated`: rewrites `tool_calls` **and** the matching `response_messages` tool-call part (its `tool_call_id` included — a repair may rename the call) |
 
 **`opts_json` with no `tools` is not an error for the context call**: it writes
 the JSON literal `null`, which means "this call is not repairable — skip it".

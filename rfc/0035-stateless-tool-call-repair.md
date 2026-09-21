@@ -89,7 +89,7 @@ AI SDK 的规则是"没给工具集的调用从不修复",宿主看到 `null` �
 
 ### 3.3 结果补丁(`apply_tool_call_repair_to_result`)
 
-输入整份 `GenerateTextResult`(或 `GenerateObjectResult`,自动识别其 `raw` 嵌套),同时改写 `tool_calls[]` 与 `response_messages` 中对应的 tool-call part——后者沿用 builder 的 `response_tool_call_input` 规则(仍然非法且输入是原始标量时不回放),并且连 `tool_call_id` 一起改:修复可以换掉调用 id,transcript 必须继续指向 `tool_calls` 里的同一条。**两处必须一起改**,否则下一轮对话会把未修复的参数发回模型。
+输入整份 `GenerateTextResult`、`StreamTextResultAggregated`(两者顶层字段同形)或 `GenerateObjectResult`(自动识别其 `raw` 嵌套),同时改写 `tool_calls[]` 与 `response_messages` 中对应的 tool-call part——后者沿用 builder 的 `response_tool_call_input` 规则(仍然非法且输入是原始标量时不回放),并且连 `tool_call_id` 一起改:修复可以换掉调用 id,transcript 必须继续指向 `tool_calls` 里的同一条。**两处必须一起改**,否则下一轮对话会把未修复的参数发回模型。
 
 `tool_call_id` 对不上、或目标调用本来就是合法的,都返回 `InvalidArgument` 而不是静默 no-op:这类情况是宿主的 bug,静默掩盖只会更难查。
 

@@ -313,6 +313,35 @@ async fn patching_a_generate_object_result_reaches_into_raw() {
 }
 
 #[tokio::test]
+async fn patching_an_aggregated_stream_result_round_trips_through_its_type() {
+    // Bindings patch the output of `consume_stream_text` with the same
+    // function; the patched document must still decode as that type.
+    let call = invalid_call(BAD).await;
+    let mut aggregated: aimux_core::result::StreamTextResultAggregated = serde_json::from_value(
+        json!({ "text": "", "finish_reason": { "unified": "tool-calls", "raw": null } }),
+    )
+    .unwrap();
+    let shape = result_with(&call);
+    aggregated.tool_calls = vec![call];
+    aggregated.response_messages =
+        serde_json::from_value(shape["response_messages"].clone()).unwrap();
+
+    let patched = apply_tool_call_repair_to_result(
+        &serde_json::to_value(&aggregated).unwrap(),
+        Some(&[weather_tool()]),
+        "call-1",
+        ToolCallRepairReply::Repaired {
+            tool_call: raw("weather", r#"{"city":"Singapore"}"#),
+        },
+    )
+    .unwrap();
+    let decoded: aimux_core::result::StreamTextResultAggregated =
+        serde_json::from_value(patched).unwrap();
+    assert_eq!(decoded.tool_calls[0].invalid, None);
+    assert_eq!(decoded.tool_calls[0].input, json!({"city":"Singapore"}));
+}
+
+#[tokio::test]
 async fn patching_a_primitive_input_is_not_replayed_into_the_transcript() {
     // A still-invalid call whose input is a bare string: `tool_calls` keeps it,
     // the replay transcript must not.

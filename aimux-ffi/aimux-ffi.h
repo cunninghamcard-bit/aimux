@@ -421,8 +421,9 @@ aimux_error_t *aimux_apply_tool_call_repair(const char *tool_call_json,
                                                 const char *reply_json, char **out_json);
 
 /**
- * [AiMuxError] Apply a repair reply to a serialized GenerateTextResult or
- * GenerateObjectResult. Both tool_calls and the matching response_messages
+ * [AiMuxError] Apply a repair reply to a serialized GenerateTextResult,
+ * GenerateObjectResult, or StreamTextResultAggregated (the output of
+ * aimux_consume_stream_text). Both tool_calls and the matching response_messages
  * tool-call part are rewritten (tool_call_id included — a repair may rename
  * the call); everything else is left as-is.
  */

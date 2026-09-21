@@ -57,6 +57,8 @@ import type {
   VideoPollOptions,
   AiMuxError,
   JsonValue,
+  RawToolCall,
+  ToolCallRepairReply,
 } from './types'
 
 // Error hierarchy (throw/catch). Wire payload type `AiMuxError` lives under StreamPart only.
@@ -175,20 +177,6 @@ export type RawModel = Model
 // Tool-call repair (RFC-0035) — host-side, mirroring AI SDK `repairToolCall`
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * A tool call as the model emitted it: `input` is the provider's raw argument
- * text, not a parsed object. This is what a repair function reads and returns.
- */
-export type RawToolCall = {
-  tool_call_id: string
-  tool_name: string
-  input: string
-  provider_executed?: boolean | null
-  dynamic?: boolean | null
-  thought_signature?: string | null
-  provider_metadata?: JsonValue | null
-}
-
 /** The argument passed to a {@link RepairToolCall} function. */
 export type ToolCallRepairContext = {
   tool_call: RawToolCall
@@ -230,11 +218,6 @@ export type GenerateTextOptionsWithRepair = GenerateTextOptions & {
   repairToolCall?: RepairToolCall
 }
 
-type RepairReply =
-  | { type: 'repaired'; tool_call: RawToolCall }
-  | { type: 'unchanged' }
-  | { type: 'failed'; message: string }
-
 /**
  * Run the user's repair function for one invalid call and turn its outcome
  * into the wire reply. Returns `null` when the call is not repairable at all
@@ -251,7 +234,7 @@ async function repairReplyFor(
   ) as ToolCallRepairContext | null
   if (context === null) return null
 
-  let reply: RepairReply
+  let reply: ToolCallRepairReply
   try {
     const replacement = await repair(context)
     reply = replacement ? { type: 'repaired', tool_call: replacement } : { type: 'unchanged' }

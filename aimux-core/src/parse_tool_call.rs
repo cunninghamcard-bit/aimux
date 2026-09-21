@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use ts_rs::TS;
 
 use crate::error::AiMuxError;
 use crate::tool::{Tool, ToolCall};
@@ -20,7 +21,8 @@ use crate::types::ProviderMetadata;
 ///
 /// The wire shape matches [`ToolCall`] field for field, except that `input`
 /// is the provider's raw argument *text* rather than a parsed value.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct RawToolCall {
     pub tool_call_id: String,
     pub tool_name: String,
@@ -353,8 +355,9 @@ fn invalid_tool_call(tool_call: RawToolCall, error: AiMuxError) -> ToolCall {
 /// hands the answer back as this value. Wire shape:
 /// `{"type":"repaired","tool_call":{…}}`, `{"type":"unchanged"}`, or
 /// `{"type":"failed","message":"…"}`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[ts(export)]
 pub enum ToolCallRepairReply {
     /// Re-validate this replacement call, exactly as the closure path does
     /// for a returned `Some(call)`.
@@ -511,7 +514,8 @@ pub fn apply_tool_call_repair(
 }
 
 /// Apply a repair reply to a serialized `GenerateTextResult` or
-/// `GenerateObjectResult`, returning the patched result.
+/// `GenerateObjectResult`, or `StreamTextResultAggregated`, returning the
+/// patched result.
 ///
 /// Both `tool_calls[]` and the matching `response_messages[]` tool-call part
 /// are rewritten, the latter under the same rule `to_response_messages` uses
