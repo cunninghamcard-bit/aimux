@@ -6,7 +6,7 @@
 
 use aimux_core::error::AiMuxError;
 use aimux_core::generate::GenerateTextOptions;
-use aimux_core::message::{ModelMessage, ModelPrompt};
+use aimux_core::message::ModelPrompt;
 use aimux_core::parse_tool_call::{
     RawToolCall, ToolCallRepair, ToolCallRepairReply, apply_tool_call_repair,
     apply_tool_call_repair_to_result, parse_tool_call, tool_call_repair_context,
