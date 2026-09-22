@@ -495,8 +495,8 @@ pub fn tool_call_repair_context(
 /// Resolve one invalid tool call against a host's repair reply.
 ///
 /// Produces the same [`ToolCall`] the in-process [`ToolCallRepair`] closure
-/// would have produced for the equivalent return value — both paths run
-/// [`apply_repair_outcome`].
+/// would have produced for the equivalent return value; both paths share
+/// the same post-repair logic.
 ///
 /// # Errors
 ///

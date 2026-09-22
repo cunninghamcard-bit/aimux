@@ -156,7 +156,7 @@ Map<String, dynamic> repairResultToolCalls(
     }
     if (reply == null) {
       if (replacement is Future) _asyncHookInSyncCall();
-      reply = _replyFor(replacement as RawToolCall?);
+      reply = _replyFor(replacement);
     }
 
     current = jsonDecode(_call4(
