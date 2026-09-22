@@ -342,6 +342,47 @@ async fn patching_an_aggregated_stream_result_round_trips_through_its_type() {
 }
 
 #[tokio::test]
+async fn context_keeps_the_provider_argument_text_verbatim() {
+    // A bare JSON string literal parses fine, so `input` holds `Tokyo`
+    // without quotes; the host must still see the provider's `"Tokyo"`, or a
+    // repair that only renames the tool re-validates the wrong text.
+    let call = invalid_call(r#""Tokyo""#).await;
+    assert_eq!(call.input, json!("Tokyo"));
+    let context = tool_call_repair_context(&call, Some(&[weather_tool()]), &[], None)
+        .unwrap()
+        .expect("a tool set was supplied");
+    assert_eq!(context["tool_call"]["input"], json!(r#""Tokyo""#));
+
+    let spaced = invalid_call(r#"{ "town" : "Tokyo" }"#).await;
+    let context = tool_call_repair_context(&spaced, Some(&[weather_tool()]), &[], None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        context["tool_call"]["input"],
+        json!(r#"{ "town" : "Tokyo" }"#)
+    );
+}
+
+#[tokio::test]
+async fn patching_refuses_a_duplicated_tool_call_id() {
+    let call = invalid_call(BAD).await;
+    let mut result = result_with(&call);
+    let dup = result["tool_calls"][0].clone();
+    result["tool_calls"].as_array_mut().unwrap().push(dup);
+    let error = apply_tool_call_repair_to_result(
+        &result,
+        Some(&[weather_tool()]),
+        "call-1",
+        ToolCallRepairReply::Unchanged,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, AiMuxError::InvalidArgument(ref m) if m.contains("not unique")),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
 async fn patching_a_primitive_input_is_not_replayed_into_the_transcript() {
     // A still-invalid call whose input is a bare string: `tool_calls` keeps it,
     // the replay transcript must not.

@@ -382,9 +382,26 @@ impl From<ToolCallRepairReply> for RepairOutcome {
     }
 }
 
+/// The provider's verbatim argument text, when the error kept it.
+pub(crate) fn raw_tool_call_text(error: &AiMuxError) -> Option<String> {
+    match error {
+        AiMuxError::InvalidToolInput { tool_input, .. } => Some(tool_input.clone()),
+        AiMuxError::NoSuchTool { tool_input, .. } => tool_input.clone(),
+        AiMuxError::ToolCallRepair { original_error, .. } => raw_tool_call_text(original_error),
+        _ => None,
+    }
+}
+
 /// Reconstruct the provider-facing call an invalid [`ToolCall`] was built
-/// from. [`invalid_tool_call`] parses the raw text when it is valid JSON, so
-/// [`raw_tool_input`] is its exact inverse.
+/// from.
+///
+/// The argument text comes from the error, which keeps it verbatim.
+/// [`invalid_tool_call`] parses the text into `input` when it is valid JSON,
+/// and that loses the JSON string quoting of a bare literal (`"Tokyo"` would
+/// come back as `Tokyo`), duplicate keys, number spelling and whitespace, all
+/// of which matter when a host re-submits the text unchanged under a new tool
+/// name. Only errors from before the text was recorded fall back to
+/// [`raw_tool_input`].
 ///
 /// `dynamic` is not recovered: an invalid call always reports `Some(true)`.
 /// That only matters for re-deriving the original error, which is read off the
@@ -406,7 +423,7 @@ fn raw_from_invalid(tool_call: &ToolCall) -> Result<(RawToolCall, AiMuxError), A
         RawToolCall {
             tool_call_id: tool_call.tool_call_id.clone(),
             tool_name: tool_call.tool_name.clone(),
-            input: raw_tool_input(&tool_call.input),
+            input: raw_tool_call_text(&error).unwrap_or_else(|| raw_tool_input(&tool_call.input)),
             provider_executed: tool_call.provider_executed,
             dynamic: tool_call.dynamic,
             thought_signature: tool_call.thought_signature.clone(),
@@ -553,12 +570,20 @@ pub fn apply_tool_call_repair_to_result(
         .get_mut("tool_calls")
         .and_then(Value::as_array_mut)
         .ok_or_else(|| AiMuxError::InvalidArgument("result: no tool_calls array".to_string()))?;
-    let slot = calls
+    // Both `tool_calls` and the transcript are keyed by id here, so a
+    // duplicated id cannot be patched unambiguously; refuse rather than
+    // rewrite the first entry twice.
+    let mut matches = calls
         .iter_mut()
-        .find(|call| call.get("tool_call_id").and_then(Value::as_str) == Some(tool_call_id))
-        .ok_or_else(|| {
-            AiMuxError::InvalidArgument(format!("result: no tool call '{tool_call_id}'"))
-        })?;
+        .filter(|call| call.get("tool_call_id").and_then(Value::as_str) == Some(tool_call_id));
+    let slot = matches.next().ok_or_else(|| {
+        AiMuxError::InvalidArgument(format!("result: no tool call '{tool_call_id}'"))
+    })?;
+    if matches.next().is_some() {
+        return Err(AiMuxError::InvalidArgument(format!(
+            "result: tool call id '{tool_call_id}' is not unique"
+        )));
+    }
     let original: ToolCall = serde_json::from_value(slot.clone())
         .map_err(|error| AiMuxError::InvalidArgument(format!("result.tool_calls: {error}")))?;
 

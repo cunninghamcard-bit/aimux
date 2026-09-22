@@ -34,6 +34,7 @@ use serde_json::Value;
 use ts_rs::TS;
 
 use crate::error::AiMuxError;
+use crate::parse_tool_call::raw_tool_call_text;
 use crate::result::GenerateContent;
 use crate::result::GenerateResult;
 use crate::shared::FileData;
@@ -1019,15 +1020,6 @@ fn now_unix() -> u64 {
 
 // Rejected repairs retain the original call. Recover its text from the
 // original error, never from the replacement's validation failure.
-fn raw_tool_call_text(error: &AiMuxError) -> Option<String> {
-    match error {
-        AiMuxError::InvalidToolInput { tool_input, .. } => Some(tool_input.clone()),
-        AiMuxError::NoSuchTool { tool_input, .. } => tool_input.clone(),
-        AiMuxError::ToolCallRepair { original_error, .. } => raw_tool_call_text(original_error),
-        _ => None,
-    }
-}
-
 /// Render a Core-parsed `StreamPart::ToolCall`'s arguments as OpenAI-compatible
 /// wire text: the provider's raw argument text verbatim for an invalid call,
 /// compact JSON of the parsed value otherwise.
