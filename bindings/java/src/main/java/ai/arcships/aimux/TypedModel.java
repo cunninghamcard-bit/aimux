@@ -300,7 +300,7 @@ public class TypedModel implements Closeable {
                     // repaired call. The three repair functions are pure data
                     // calls, safe to make from inside the native callback.
                     onPart.accept(decodePart(
-                        ToolCallRepairs.repairStreamPart(partJson, promptJson, optsJson, hook)));
+                        ToolCallRepairs.repairStreamPart(partJson, promptJson, optsJson, hook, raw)));
                 } catch (RuntimeException e) {
                     onError.accept("failed to decode StreamPart: " + e.getMessage());
                 }

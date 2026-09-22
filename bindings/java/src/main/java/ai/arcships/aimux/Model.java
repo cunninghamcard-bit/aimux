@@ -6,6 +6,7 @@ import com.sun.jna.ptr.PointerByReference;
 
 import java.io.Closeable;
 import java.util.Objects;
+import java.util.concurrent.Callable;
 import java.util.Spliterator;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -57,6 +58,51 @@ public class Model implements Closeable {
     private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock(true);
     private long handle;
     private boolean closed;
+
+    // A repair hook invoked from a stream callback runs on a worker thread while
+    // the streaming thread stays blocked on its result — and that streaming
+    // thread holds this model's read lock for the whole stream. The worker may
+    // therefore reach back into THIS model without taking the lock itself: the
+    // handle provably cannot be dropped while the lender is blocked. It must not
+    // take the lock, in fact — the lock is fair, so a close() queued behind the
+    // stream would make the worker wait for a writer that waits for the lender.
+    // Only this model is lent; any other model's lock is held by nobody.
+    //
+    // Invariant: the lend is valid ONLY while the lending thread blocks holding
+    // the read lock. The worker thread is created per repair and dies right
+    // after, so the lent state can never leak into unrelated work; but extra
+    // threads the hook spawns itself do NOT inherit it, take the lock normally,
+    // and would deadlock against a concurrent close(). Hooks must call the model
+    // from the thread they are invoked on.
+    private static final ThreadLocal<Model> LENT_READ_HOLD = new ThreadLocal<Model>();
+
+    /** Take the read lock, unless this thread was lent a hold on this model. */
+    void acquireRead() {
+        if (LENT_READ_HOLD.get() != this) {
+            lock.readLock().lock();
+        }
+    }
+
+    /** Counterpart of {@link #acquireRead()}. */
+    void releaseRead() {
+        if (LENT_READ_HOLD.get() != this) {
+            lock.readLock().unlock();
+        }
+    }
+
+    /**
+     * Run {@code body} on this thread with this model's read hold lent to it —
+     * see {@code LENT_READ_HOLD}. Only call this from a thread whose caller
+     * blocks holding the read lock for the whole duration.
+     */
+    <T> T withLentReadHold(Callable<T> body) throws Exception {
+        LENT_READ_HOLD.set(this);
+        try {
+            return body.call();
+        } finally {
+            LENT_READ_HOLD.remove();
+        }
+    }
 
     // Package-private: ProviderHandle.model() (same package) needs to construct
     // a Model; external callers can still only go through the static factories
@@ -113,11 +159,11 @@ public class Model implements Closeable {
 
     /** Package-private handle read for composite-model factories (router/moa). */
     long handle() {
-        lock.readLock().lock();
+        acquireRead();
         try {
             return requireHandleLocked();
         } finally {
-            lock.readLock().unlock();
+            releaseRead();
         }
     }
 
@@ -481,7 +527,7 @@ public class Model implements Closeable {
     public String generateText(String promptJson, String optsJson) {
         AimuxResult.requireJsonNonNull(promptJson, "promptJson");
         AimuxResult.requireJson(optsJson, "optsJson");
-        lock.readLock().lock();
+        acquireRead();
         try {
             long h = requireHandleLocked();
             PointerByReference out = new PointerByReference();
@@ -490,7 +536,7 @@ public class Model implements Closeable {
                 out,
                 "generate_text");
         } finally {
-            lock.readLock().unlock();
+            releaseRead();
         }
     }
 
@@ -515,7 +561,7 @@ public class Model implements Closeable {
     public String generateObject(String promptJson, String optsJson) {
         AimuxResult.requireJsonNonNull(promptJson, "promptJson");
         AimuxResult.requireJson(optsJson, "optsJson");
-        lock.readLock().lock();
+        acquireRead();
         try {
             long h = requireHandleLocked();
             PointerByReference out = new PointerByReference();
@@ -524,7 +570,7 @@ public class Model implements Closeable {
                 out,
                 "generate_object");
         } finally {
-            lock.readLock().unlock();
+            releaseRead();
         }
     }
 
@@ -548,7 +594,7 @@ public class Model implements Closeable {
     public String consumeStreamText(String promptJson, String optsJson) {
         AimuxResult.requireJsonNonNull(promptJson, "promptJson");
         AimuxResult.requireJson(optsJson, "optsJson");
-        lock.readLock().lock();
+        acquireRead();
         try {
             long h = requireHandleLocked();
             PointerByReference out = new PointerByReference();
@@ -557,7 +603,7 @@ public class Model implements Closeable {
                 out,
                 "consume_stream_text");
         } finally {
-            lock.readLock().unlock();
+            releaseRead();
         }
     }
 
@@ -609,7 +655,7 @@ public class Model implements Closeable {
         // Hold the read lock for the whole blocking stream so close() cannot
         // drop the handle mid-stream (it blocks on the write lock until the
         // stream completes).
-        lock.readLock().lock();
+        acquireRead();
         try {
             long h = requireHandleLocked();
             Pointer e = AimuxFFI.INSTANCE.aimux_stream_text(
@@ -619,7 +665,7 @@ public class Model implements Closeable {
                 throw AimuxResult.expectAimuxError(e, null);
             }
         } finally {
-            lock.readLock().unlock();
+            releaseRead();
         }
     }
 
@@ -706,7 +752,7 @@ public class Model implements Closeable {
     public String generateTextAsOpenAI(String promptJson, String optsJson) {
         AimuxResult.requireJsonNonNull(promptJson, "promptJson");
         AimuxResult.requireJson(optsJson, "optsJson");
-        lock.readLock().lock();
+        acquireRead();
         try {
             long h = requireHandleLocked();
             PointerByReference out = new PointerByReference();
@@ -715,7 +761,7 @@ public class Model implements Closeable {
                 out,
                 "generate_text_as_openai");
         } finally {
-            lock.readLock().unlock();
+            releaseRead();
         }
     }
 
@@ -757,7 +803,7 @@ public class Model implements Closeable {
 
         // Hold the read lock for the whole blocking stream so close() cannot
         // drop the handle mid-stream.
-        lock.readLock().lock();
+        acquireRead();
         try {
             long h = requireHandleLocked();
             Pointer e = AimuxFFI.INSTANCE.aimux_stream_text_as_openai(
@@ -766,7 +812,7 @@ public class Model implements Closeable {
                 throw AimuxResult.expectAimuxError(e, null);
             }
         } finally {
-            lock.readLock().unlock();
+            releaseRead();
         }
     }
 

@@ -1894,6 +1894,12 @@ public final class Types {
          * never serialized into the options JSON, and it does NOT apply to the
          * OpenAI-format outputs ({@code generateTextAsOpenAI} /
          * {@code streamTextAsOpenAI}), whose shape carries no invalid marker.
+         *
+         * <p>A stream hook may call back into the model being streamed, but
+         * only from the thread it is invoked on: that thread borrows the
+         * stream's read hold on the model, while extra threads the hook starts
+         * itself do not and would deadlock against a concurrent
+         * {@link Model#close()}.
          */
         public ToolCallRepair getRepairToolCall() { return repairToolCall; }
 

@@ -8,6 +8,7 @@ import com.sun.jna.ptr.PointerByReference;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 
@@ -90,9 +91,13 @@ final class ToolCallRepairs {
      * Repair an invalid tool-call stream part. Every other part — tool input
      * deltas included — passes straight through, as in the AI SDK.
      *
+     * @param model The model being streamed, whose read hold is lent to the
+     *              repair worker thread (may be {@code null} in unit tests that
+     *              drive this loop without a model).
      * @return The part JSON to deliver.
      */
-    static String repairStreamPart(String partJson, String promptJson, String optsJson, ToolCallRepair hook) {
+    static String repairStreamPart(String partJson, String promptJson, String optsJson,
+                                   ToolCallRepair hook, Model model) {
         if (hook == null) {
             return partJson;
         }
@@ -105,7 +110,7 @@ final class ToolCallRepairs {
         if (isNull(contextJson)) {
             return partJson;
         }
-        String repaired = apply(call.toString(), optsJson, reply(offCallbackThread(hook), contextJson));
+        String repaired = apply(call.toString(), optsJson, reply(offCallbackThread(hook, model), contextJson));
         ObjectNode out = Types.AimuxJson.MAPPER.createObjectNode();
         out.set("ToolCall", parse(repaired));
         return out.toString();
@@ -126,10 +131,21 @@ final class ToolCallRepairs {
      * <p>The callback thread blocks on the result, so stream part ordering is
      * unchanged. Only the stream path needs this: by the time the non-streaming
      * loop runs, the native call has already returned.
+     *
+     * <p>Because that thread stays blocked holding {@code model}'s read lock,
+     * the worker runs with the hold lent to it ({@link Model#withLentReadHold})
+     * so a hook calling back into the SAME model does not queue behind a
+     * pending {@code close()} — which would deadlock the three threads against
+     * each other. The worker dies with the repair, so the lend cannot leak.
      */
-    private static ToolCallRepair offCallbackThread(final ToolCallRepair hook) {
+    private static ToolCallRepair offCallbackThread(final ToolCallRepair hook, final Model model) {
         return context -> {
-            FutureTask<Types.RawToolCall> task = new FutureTask<>(() -> hook.repair(context));
+            final Callable<Types.RawToolCall> repair = () -> hook.repair(context);
+            Callable<Types.RawToolCall> work = repair;
+            if (model != null) {
+                work = () -> model.withLentReadHold(repair);
+            }
+            FutureTask<Types.RawToolCall> task = new FutureTask<>(work);
             Thread thread = new Thread(task, "aimux-tool-call-repair");
             thread.setDaemon(true);
             thread.start();

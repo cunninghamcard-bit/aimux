@@ -263,7 +263,11 @@ replacement — including a second `generateText` against a repair model. That
 holds on the stream too: the FFI re-entrancy guard is thread-local, so the
 binding runs a stream hook on its own thread (the stream thread waits for it,
 so part order is unaffected) instead of on the native callback thread, where
-any generate call would fail with `AIMUX_E_FFI_REENTRANT_CALL`.
+any generate call would fail with `AIMUX_E_FFI_REENTRANT_CALL`. A stream hook
+may also call back into **the model being streamed**, but only from the thread
+it is invoked on: that thread borrows the stream's read hold on the model, so it
+does not queue behind a pending `close()`. Extra threads the hook starts itself
+do not borrow it and would deadlock against a concurrent `close()`.
 
 ```java
 Types.GenerateTextOptions options = Types.GenerateTextOptions.builder()

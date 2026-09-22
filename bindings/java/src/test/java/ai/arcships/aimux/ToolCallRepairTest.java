@@ -8,15 +8,19 @@ import org.junit.jupiter.api.Test;
 
 import java.io.File;
 import java.io.IOException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 /**
  * Host-side tool-call repair (RFC-0035).
@@ -196,12 +200,13 @@ class ToolCallRepairTest {
         String delta = "{\"ToolInputDelta\":{\"id\":\"call-1\",\"delta\":\"{\\\"town\\\":\"}}";
         assertThat(ToolCallRepairs.repairStreamPart(delta, PROMPT, opts(true), context -> {
             throw new AssertionError("deltas must never be repaired");
-        })).isSameAs(delta);
+        }, null)).isSameAs(delta);
 
         String part = "{\"ToolCall\":" + invalidCall() + "}";
         JsonNode repaired = json(ToolCallRepairs.repairStreamPart(part, PROMPT, opts(true), context ->
             Types.RawToolCall.builder()
-                .toolCallId("call-1").toolName("weather").input("{\"city\":\"Singapore\"}").build()));
+                .toolCallId("call-1").toolName("weather").input("{\"city\":\"Singapore\"}").build(),
+            null));
         assertThat(repaired.get("ToolCall").get("input").get("city").asText()).isEqualTo("Singapore");
         assertThat(repaired.get("ToolCall").path("invalid").isMissingNode()).isTrue();
 
@@ -218,7 +223,7 @@ class ToolCallRepairTest {
             + "\"input\":{\"city\":\"Singapore\"}}}";
         assertThat(ToolCallRepairs.repairStreamPart(part, PROMPT, opts(true), context -> {
             throw new AssertionError("a valid call must never be repaired");
-        })).isSameAs(part);
+        }, null)).isSameAs(part);
     }
 
     // ── end to end through TypedModel (mock provider) ────────────────────────
@@ -348,6 +353,74 @@ class ToolCallRepairTest {
                     .collect(Collectors.joining())).contains("city");
             }
         }
+    }
+
+    @Test
+    void aStreamHookMayGenerateWithTheSameModelWhileCloseIsPending() {
+        // Regression: the stream holds Model's (fair) read lock for its whole
+        // duration, a queued close() waits for it, and a hook generating with
+        // the SAME model used to queue behind that writer — S waits for R waits
+        // for C waits for S. The stream thread lends its read hold to the repair
+        // worker so the hook's call takes no lock at all.
+        assertTimeoutPreemptively(Duration.ofSeconds(30), () -> {
+            try (MockProviderServer server = new MockProviderServer()) {
+                server.setContentType("text/event-stream");
+                server.setResponses(toolCallSse("{\"city\":\"Tokyo\"}"),
+                                    textResponse("{\"location\":\"Tokyo\"}"));
+
+                final Model raw =
+                    Model.openaiWithBase("sk-test-fake-key", "gpt-4o", server.baseUrl());
+                final TypedModel model = TypedModel.of(raw);
+                final CountDownLatch hookStarted = new CountDownLatch(1);
+                final AtomicReference<Throwable> closerFailure = new AtomicReference<>();
+                Thread closer = new Thread(() -> {
+                    try {
+                        hookStarted.await();
+                        raw.close();
+                    } catch (Throwable t) {
+                        closerFailure.set(t);
+                    }
+                }, "closer");
+                closer.start();
+
+                Types.GenerateTextOptions options = Types.GenerateTextOptions.builder()
+                    .tools(Collections.singletonList(strictWeatherTool()))
+                    .repairToolCall(context -> {
+                        hookStarted.countDown();
+                        // Let the closer actually enqueue for the write lock;
+                        // without it the race the test reproduces may not happen.
+                        Thread.sleep(200);
+                        // The mock server's content type is global, so flip it
+                        // now that the SSE response has already been written.
+                        server.setContentType("application/json");
+                        return Types.RawToolCall.builder()
+                            .toolCallId(context.getToolCall().getToolCallId())
+                            .toolName(context.getToolCall().getToolName())
+                            .input(model.generateText(
+                                "fix these arguments: " + context.getToolCall().getInput())
+                                .getText())
+                            .build();
+                    })
+                    .build();
+
+                List<Types.StreamPart> parts = new ArrayList<>();
+                model.streamText("What is the weather in Tokyo?", options,
+                    parts::add, () -> {}, error -> { throw new AssertionError(error); });
+
+                closer.join(10_000);
+                assertThat(closer.isAlive()).isFalse();
+                assertThat(closerFailure.get()).isNull();
+
+                List<Types.StreamPart.ToolCall> calls = parts.stream()
+                    .filter(p -> p instanceof Types.StreamPart.ToolCall)
+                    .map(p -> (Types.StreamPart.ToolCall) p)
+                    .collect(Collectors.toList());
+                assertThat(calls).hasSize(1);
+                assertThat(calls.get(0).getInvalid()).isNull();
+                assertThat(calls.get(0).getInput().get("location").asText()).isEqualTo("Tokyo");
+                raw.close(); // idempotent; the closer already did it
+            }
+        });
     }
 
     @Test
