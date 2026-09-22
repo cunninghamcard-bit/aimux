@@ -1036,7 +1036,7 @@ struct RouterFfiConfig {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Stateless tool-call repair (RFC-0035)
+// Host-side tool-call repair (RFC-0035)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Build the repair argument for one invalid tool call.

@@ -1716,7 +1716,7 @@ public final class Types {
      * default; combined with NON_NULL inclusion, only the fields the caller
      * sets are serialized onto the wire.
      */
-    // ── Stateless tool-call repair (RFC-0035) ────────────────────────────────
+    // ── Host-side tool-call repair (RFC-0035) ───────────────────────────────
 
     /**
      * A tool call as the provider emitted it: {@code input} is the raw argument

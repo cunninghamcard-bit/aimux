@@ -25,7 +25,7 @@ import 'errors.dart';
 import 'types.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// FFI (aimux-ffi.h §"Stateless tool-call repair")
+// FFI (aimux-ffi.h §"Host-side tool-call repair")
 // ─────────────────────────────────────────────────────────────────────────────
 
 // (const char *, const char *, const char *, char **out_json) → error:

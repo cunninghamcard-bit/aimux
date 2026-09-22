@@ -1,5 +1,5 @@
 {
-  "description": "Stateless host-side tool-call repair (RFC-0035). Every case is pure: feed `input`, expect `expected` (deep-equal) or the named `expected_error` variant. `prompt` and `opts` are the SAME values the call was generated with; a host serializes them to JSON strings before passing them. A `null` `opts` means defaults. An `expected` of null is the literal JSON null the context function writes for a call made without a tool set.",
+  "description": "Host-side tool-call repair (RFC-0035). Every case is pure: feed `input`, expect `expected` (deep-equal) or the named `expected_error` variant. `prompt` and `opts` are the SAME values the call was generated with; a host serializes them to JSON strings before passing them. A `null` `opts` means defaults. An `expected` of null is the literal JSON null the context function writes for a call made without a tool set.",
   "cases": [
     {
       "name": "context_string_prompt",

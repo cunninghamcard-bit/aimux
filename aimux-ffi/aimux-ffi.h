@@ -361,7 +361,7 @@ aimux_error_t *aimux_stream_text_as_openai_with_abort(uint64_t handle, uint64_t 
                                                           void (*on_done)(void *stream_ctx),
                                                           void *stream_ctx);
 
-/* ── Stateless tool-call repair (RFC-0035) ──────────────────────────────── */
+/* ── Host-side tool-call repair (RFC-0035) ─────────────────────────────── */
 
 /*
  * These three take data only — no model handle, no tokio runtime, no I/O — so

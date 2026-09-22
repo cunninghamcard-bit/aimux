@@ -1,6 +1,6 @@
-# RFC-0035: 无状态工具调用修复(stateless tool-call repair)
+# RFC-0035: 宿主侧工具调用修复(host-side tool-call repair)
 
-> **Status**: P1(Rust 侧)已实现;P2(各语言宿主循环)待做
+> **Status**: Implemented
 > **Date**: 2026-09-22
 > **Scope**: 让 7 个绑定拿到等价于 AI SDK `repairToolCall` 的能力,而不引入回调、句柄或会话
 > **Related**: [RFC-0016](0016-align-with-aisdk.md) §7.5(agent loop 明确不做)、[#186](https://github.com/arcships/aimux/pull/186)(函数指针回调,已否决)、[#191](https://github.com/arcships/aimux/pull/191)(有状态 operation session,已否决)
@@ -17,7 +17,7 @@
 - **#186:函数指针回调**。宿主注册 `extern "C"` 回调,core 在 `parse_tool_call` 里回调过去。问题:回调在 FFI 线程栈上同步执行,而宿主的修复通常是**再发一次 LLM 请求**(异步)。要么宿主在回调里阻塞(撞上 `ffi_block_on` 的重入保护),要么 core 得把 future 挂起并交回控制权——那就是 #191。
 - **#191:有状态 operation session**。core 持有一个暂停中的生成操作,通过 `Event`/`Reply` 与宿主往返。问题:句柄生命周期、超时、取消、泄漏、7 家绑定各自的资源管理,全部翻倍;为一个一次性、纯数据的判断引入了一整套会话协议。
 
-## 2. 为什么无状态就够
+## 2. 为什么宿主侧后处理就够
 
 三个既成事实合在一起,让"暂停生成"这件事根本没必要:
 
@@ -63,7 +63,7 @@ AI SDK 的规则是"没给工具集的调用从不修复",宿主看到 `null` �
   "tools": [ … ], "messages": [ … ], "instructions": null }
 ```
 
-`tool_call.input` 是 provider 的**原始参数文本**(模型吐出来的那串),不是解析后的对象——这正是修复函数要看的东西。它由 `raw_tool_input` 从非法调用的 `input` 反解出来(`invalid_tool_call` 在文本是合法 JSON 时会解析它,`raw_tool_input` 是其逆运算)。
+`tool_call.input` 是 provider 的**原始参数文本**(模型吐出来的那串),不是解析后的对象——这正是修复函数要看的东西。原文保存在调用携带的 `InvalidToolInput.tool_input` / `NoSuchTool.tool_input` 中;不能从解析后的 JSON 值反推,因为解析会丢失字符串引号、重复 key、数字表示与空白。
 
 `error` 直接取自调用自身的 `error` 字段,不重新推导。**这是宿主必须持有非法 `ToolCall` 原件的原因**,也是唯一的信息损失点:非法调用的 `dynamic` 一律被置为 `Some(true)`,原值不可恢复。对本流程无影响(原始 error 是读出来的,不是重算的)。
 
@@ -91,7 +91,7 @@ AI SDK 的规则是"没给工具集的调用从不修复",宿主看到 `null` �
 
 输入整份 `GenerateTextResult`、`StreamTextResultAggregated`(两者顶层字段同形)或 `GenerateObjectResult`(自动识别其 `raw` 嵌套),同时改写 `tool_calls[]` 与 `response_messages` 中对应的 tool-call part——后者沿用 builder 的 `response_tool_call_input` 规则(仍然非法且输入是原始标量时不回放),并且连 `tool_call_id` 一起改:修复可以换掉调用 id,transcript 必须继续指向 `tool_calls` 里的同一条。**两处必须一起改**,否则下一轮对话会把未修复的参数发回模型。
 
-`tool_call_id` 对不上、或目标调用本来就是合法的,都返回 `InvalidArgument` 而不是静默 no-op:这类情况是宿主的 bug,静默掩盖只会更难查。
+`tool_call_id` 对不上、在结果中重复、目标调用本来就是合法的,或修复后的 id 与另一条调用冲突,都返回 `InvalidArgument` 而不是静默 no-op:补丁和 transcript 都按 id 对应,只有唯一 id 才能无歧义更新;静默选择任意一条只会破坏下一轮消息。
 
 ## 4. OpenAI 流式输出的决定:不反映修复
 

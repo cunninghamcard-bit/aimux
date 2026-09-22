@@ -13,7 +13,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 
 /**
- * Host-side tool-call repair (RFC-0035): the three stateless native functions
+ * Host-side tool-call repair (RFC-0035): the three pure native functions
  * and the post-processing loops that drive them.
  *
  * <p>Repair is pure post-processing — generation runs with no hook at all, the

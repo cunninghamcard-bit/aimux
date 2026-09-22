@@ -149,7 +149,7 @@ public interface AimuxFFI extends Library {
                                         StreamPartCallback onPart, StreamDoneCallback onDone,
                                         Pointer streamCtx);
 
-    // ── Stateless tool-call repair (RFC-0035) ───────────────────────────────
+    // ── Host-side tool-call repair (RFC-0035) ──────────────────────────────
     // Pure data functions: no handle, no tokio runtime, no I/O — safe to call
     // from inside a stream callback (the re-entrancy guard only rejects nested
     // runtime work). Each writes owned JSON to outJson (free with

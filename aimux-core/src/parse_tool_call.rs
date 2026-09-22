@@ -345,7 +345,7 @@ fn invalid_tool_call(tool_call: RawToolCall, error: AiMuxError) -> ToolCall {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Stateless host-side repair (RFC-0035)
+// Host-side tool-call repair (RFC-0035)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// A host's answer to one tool-call repair request.
@@ -548,8 +548,9 @@ pub fn apply_tool_call_repair(
 /// # Errors
 ///
 /// [`AiMuxError::InvalidArgument`] when `tools` is `None`, when the document
-/// has no `tool_calls` array, when no entry matches `tool_call_id`, or when
-/// the matched call is not an invalid call.
+/// has no `tool_calls` array, when `tool_call_id` is missing or ambiguous,
+/// when the matched call is not invalid, or when a replacement id conflicts
+/// with another call.
 pub fn apply_tool_call_repair_to_result(
     result: &Value,
     tools: Option<&[Tool]>,
@@ -573,22 +574,38 @@ pub fn apply_tool_call_repair_to_result(
     // Both `tool_calls` and the transcript are keyed by id here, so a
     // duplicated id cannot be patched unambiguously; refuse rather than
     // rewrite the first entry twice.
-    let mut matches = calls
-        .iter_mut()
-        .filter(|call| call.get("tool_call_id").and_then(Value::as_str) == Some(tool_call_id));
-    let slot = matches.next().ok_or_else(|| {
-        AiMuxError::InvalidArgument(format!("result: no tool call '{tool_call_id}'"))
-    })?;
-    if matches.next().is_some() {
+    let target_index = calls
+        .iter()
+        .position(|call| {
+            call.get("tool_call_id").and_then(Value::as_str) == Some(tool_call_id)
+        })
+        .ok_or_else(|| {
+            AiMuxError::InvalidArgument(format!("result: no tool call '{tool_call_id}'"))
+        })?;
+    if calls[target_index + 1..].iter().any(|call| {
+        call.get("tool_call_id").and_then(Value::as_str) == Some(tool_call_id)
+    }) {
         return Err(AiMuxError::InvalidArgument(format!(
             "result: tool call id '{tool_call_id}' is not unique"
         )));
     }
-    let original: ToolCall = serde_json::from_value(slot.clone())
+    let original: ToolCall = serde_json::from_value(calls[target_index].clone())
         .map_err(|error| AiMuxError::InvalidArgument(format!("result.tool_calls: {error}")))?;
 
     let repaired = apply_tool_call_repair(&original, tools, reply)?;
-    *slot = serde_json::to_value(&repaired)
+    if repaired.tool_call_id != tool_call_id
+        && calls.iter().enumerate().any(|(index, call)| {
+            index != target_index
+                && call.get("tool_call_id").and_then(Value::as_str)
+                    == Some(repaired.tool_call_id.as_str())
+        })
+    {
+        return Err(AiMuxError::InvalidArgument(format!(
+            "result: repaired tool call id '{}' already exists",
+            repaired.tool_call_id
+        )));
+    }
+    calls[target_index] = serde_json::to_value(&repaired)
         .map_err(|error| AiMuxError::InvalidArgument(format!("tool call: {error}")))?;
 
     // The replayed transcript must agree with `tool_calls`, or the next turn

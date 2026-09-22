@@ -1115,7 +1115,7 @@ fn recording_exports_lifecycle_cleanly() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// ── stateless tool-call repair (RFC-0035, 3 exports) ────────────────────────
+// ── host-side tool-call repair (RFC-0035, 3 exports) ───────────────────────
 
 const REPAIR_TOOLS: &str = r#"[{"type":"function","name":"weather","input_schema":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}]"#;
 const REPAIR_INVALID: &str = r#"{"tool_call_id":"call-1","tool_name":"weather","input":{"town":"SG"},"dynamic":true,"invalid":true,"error":{"InvalidToolInput":{"tool_name":"weather","tool_input":"{\"town\":\"SG\"}","cause":"missing city"}}}"#;

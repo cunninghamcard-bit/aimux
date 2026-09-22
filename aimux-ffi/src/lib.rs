@@ -1725,7 +1725,7 @@ pub extern "C" fn aimux_stream_text_with_abort(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// C ABI: stateless tool-call repair (RFC-0035)
+// C ABI: host-side tool-call repair (RFC-0035)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Build the repair argument for one invalid tool call (RFC-0035).
