@@ -39,8 +39,11 @@ final class ToolCallRepairTests: XCTestCase {
                     }
                 }
             } else {
-                XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(run().utf8)) as! NSObject,
-                               testCase["expected"] as! NSObject, name)
+                // `XCTAssertEqual` rethrows, so the throwing call cannot sit in its
+                // argument. `.fragmentsAllowed`: the no-tools context case answers
+                // with the bare JSON literal `null`.
+                let actual = try JSONSerialization.jsonObject(with: Data(run().utf8), options: [.fragmentsAllowed])
+                XCTAssertEqual(actual as! NSObject, testCase["expected"] as! NSObject, name)
             }
         }
     }
@@ -133,9 +136,9 @@ private let streamBody = [
     ["id": "1", "model": "gpt-4o", "choices": [["delta": ["role": "assistant", "tool_calls": [["index": 0,
         "id": "call-1", "type": "function", "function": ["name": "weather", "arguments": ""]]]]]]],
     ["id": "1", "model": "gpt-4o", "choices": [["delta": ["tool_calls": [["index": 0,
-        "function": ["arguments": "{\"town\":" ]]]]]]]],
+        "function": ["arguments": "{\"town\":"]]]]]]],
     ["id": "1", "model": "gpt-4o", "choices": [["delta": ["tool_calls": [["index": 0,
-        "function": ["arguments": "\"Singapore\"}"]]]]]]]],
+        "function": ["arguments": "\"Singapore\"}"]]]]]]],
     ["id": "1", "model": "gpt-4o", "choices": [["delta": [String: Any](), "finish_reason": "tool_calls"]],
         "usage": ["prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2]],
 ].map { "data: " + json($0) }.joined(separator: "\n\n") + "\n\ndata: [DONE]\n\n"
