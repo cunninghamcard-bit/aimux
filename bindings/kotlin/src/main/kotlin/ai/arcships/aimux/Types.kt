@@ -627,6 +627,14 @@ data class GenerateTextOptions(
      * ignore it, because `ChatCompletion` carries no `invalid` marker and the
      * OpenAI stream forwards provider argument deltas verbatim. The raw
      * JSON-string [Model] ignores it too — it never sees typed options.
+     *
+     * While streaming, the hook runs on a worker thread that is lent the
+     * stream's read hold on this model, so it may call this same model even
+     * against a concurrent `close()`. The lend is valid only while the stream
+     * thread blocks holding that read lock, and only on the thread the hook is
+     * invoked on: extra threads the hook starts itself take the lock normally
+     * and would deadlock against a concurrent `close()`. Call the model from
+     * the thread the hook is invoked on.
      */
     @Transient val repairToolCall: RepairToolCall? = null,
 )

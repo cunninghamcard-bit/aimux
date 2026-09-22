@@ -248,7 +248,7 @@ class TypedModel(private val raw: Model, private val ownsModel: Boolean = false)
         val optsJson = options?.let { AimuxJson.encodeToString(GenerateTextOptions.serializer(), it) }
         // Off the callback thread: the native re-entrancy guard is thread-local
         // (see offCallbackThread), so a hook calling aimux would fail with 204.
-        val repair = options?.repairToolCall?.let(::offCallbackThread)
+        val repair = options?.repairToolCall?.let { offCallbackThread(raw, it) }
         raw.streamText(
             promptJson = promptJson,
             optsJson = optsJson,

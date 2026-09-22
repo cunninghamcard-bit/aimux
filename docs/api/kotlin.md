@@ -227,7 +227,13 @@ replaced; tool-input deltas are the provider's text and pass through
 untouched). On the streaming path the function runs on a worker thread rather
 than the stream-callback thread — the native re-entrancy guard is thread-local,
 so a hook calling aimux from the callback thread would fail; the stream simply
-waits for it, so part order is unaffected. **Not** honoured by `generateTextAsOpenAI` / `streamTextAsOpenAI`:
+waits for it, so part order is unaffected. That worker is lent the stream's
+read hold on the streaming model, so the hook may call that same model even
+while another thread calls `close()`; the lend is valid only while the stream
+thread blocks holding the read lock, and only on the thread the hook is invoked
+on — extra threads the hook starts itself take the lock normally and would
+deadlock against a concurrent `close()`, so call the model from the thread the
+hook is invoked on. **Not** honoured by `generateTextAsOpenAI` / `streamTextAsOpenAI`:
 `ChatCompletion` carries no `invalid` marker. The raw JSON-string `Model` never
 sees typed options; to drive repair from it, call `toolCallRepairContext`,
 `applyToolCallRepair` and `applyToolCallRepairToResult` directly — they are

@@ -372,6 +372,11 @@ internal inline fun stringResult(context: String = "", block: (PointerByReferenc
 // Model — Closeable wrapper around a C ABI handle.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// The model whose read hold the current thread was lent, if any — see
+// Model.withLentReadHold. File-private rather than per-instance: it is a
+// property of the thread, not of the model.
+private val lentReadHold = ThreadLocal<Model?>()
+
 /**
  * A model instance backed by a Rust `Arc<dyn LanguageModel>`.
  *
@@ -441,15 +446,47 @@ class Model internal constructor(handle: Long) : Closeable {
         return handle
     }
 
-    /** Internal handle read for composite-model factories (router/moa). */
-    internal fun handle(): Long {
-        lock.readLock().lock()
+    /**
+     * Run [block] with the native handle, holding the read lock — unless this
+     * thread was *lent* the hold of a blocked caller (see [withLentReadHold]),
+     * in which case the hold already exists and re-taking it would deadlock.
+     */
+    private inline fun <T> withRead(block: (Long) -> T): T {
+        val lent = lentReadHold.get() === this
+        if (!lent) lock.readLock().lock()
         try {
-            return requireHandleLocked()
+            return block(requireHandleLocked())
         } finally {
-            lock.readLock().unlock()
+            if (!lent) lock.readLock().unlock()
         }
     }
+
+    /**
+     * Run [block] on this thread as if it held this model's read lock, without
+     * taking it.
+     *
+     * Only legal while ANOTHER thread is blocked inside a call on this model
+     * holding the read lock, and is waiting for [block] to finish: that thread's
+     * hold is what keeps the handle alive, and because the lock is fair a fresh
+     * reader here would queue behind any waiting `close()` writer and deadlock
+     * the three of them (blocked caller → this thread → closer → blocked
+     * caller).
+     *
+     * The thread-local cannot leak: the only caller creates a thread per repair
+     * and that thread dies when [block] returns.
+     */
+    internal fun <T> withLentReadHold(block: () -> T): T {
+        val previous = lentReadHold.get()
+        lentReadHold.set(this)
+        try {
+            return block()
+        } finally {
+            lentReadHold.set(previous)
+        }
+    }
+
+    /** Internal handle read for composite-model factories (router/moa). */
+    internal fun handle(): Long = withRead { it }
 
     protected fun finalize() {
         close()
@@ -469,14 +506,10 @@ class Model internal constructor(handle: Long) : Closeable {
     fun generateText(promptJson: String, optsJson: String? = null): String {
         requireJsonRequired("promptJson", promptJson)
         requireJson("optsJson", optsJson)
-        lock.readLock().lock()
-        try {
-            val h = requireHandleLocked()
-            return stringResult { out ->
+        return withRead { h ->
+            stringResult { out ->
                 FFI.lib.aimux_generate_text(h, promptJson, optsJson, out)
             }
-        } finally {
-            lock.readLock().unlock()
         }
     }
 
@@ -497,14 +530,10 @@ class Model internal constructor(handle: Long) : Closeable {
     fun generateObject(promptJson: String, optsJson: String? = null): String {
         requireJsonRequired("promptJson", promptJson)
         requireJson("optsJson", optsJson)
-        lock.readLock().lock()
-        try {
-            val h = requireHandleLocked()
-            return stringResult { out ->
+        return withRead { h ->
+            stringResult { out ->
                 FFI.lib.aimux_generate_object(h, promptJson, optsJson, out)
             }
-        } finally {
-            lock.readLock().unlock()
         }
     }
 
@@ -524,14 +553,10 @@ class Model internal constructor(handle: Long) : Closeable {
     fun consumeStreamText(promptJson: String, optsJson: String? = null): String {
         requireJsonRequired("promptJson", promptJson)
         requireJson("optsJson", optsJson)
-        lock.readLock().lock()
-        try {
-            val h = requireHandleLocked()
-            return stringResult { out ->
+        return withRead { h ->
+            stringResult { out ->
                 FFI.lib.aimux_consume_stream_text(h, promptJson, optsJson, out)
             }
-        } finally {
-            lock.readLock().unlock()
         }
     }
 
@@ -577,13 +602,9 @@ class Model internal constructor(handle: Long) : Closeable {
         // Hold the read lock for the whole blocking stream so close() cannot
         // drop the handle mid-stream (it blocks on the write lock until the
         // stream completes).
-        lock.readLock().lock()
-        try {
-            val h = requireHandleLocked()
+        withRead { h ->
             FFI.lib.aimux_stream_text(h, promptJson, optsJson, partCb, doneCb, null)
                 ?.let { throw expectAimuxError(it, "streamText") }
-        } finally {
-            lock.readLock().unlock()
         }
     }
 
@@ -639,14 +660,10 @@ class Model internal constructor(handle: Long) : Closeable {
     fun generateTextAsOpenAI(promptJson: String, optsJson: String? = null): String {
         requireJsonRequired("promptJson", promptJson)
         requireJson("optsJson", optsJson)
-        lock.readLock().lock()
-        try {
-            val h = requireHandleLocked()
-            return stringResult { out ->
+        return withRead { h ->
+            stringResult { out ->
                 FFI.lib.aimux_generate_text_as_openai(h, promptJson, optsJson, out)
             }
-        } finally {
-            lock.readLock().unlock()
         }
     }
 
@@ -681,13 +698,9 @@ class Model internal constructor(handle: Long) : Closeable {
 
         // Hold the read lock for the whole blocking stream so close() cannot
         // drop the handle mid-stream.
-        lock.readLock().lock()
-        try {
-            val h = requireHandleLocked()
+        withRead { h ->
             FFI.lib.aimux_stream_text_as_openai(h, promptJson, optsJson, partCb, doneCb, null)
                 ?.let { throw expectAimuxError(it, "streamTextAsOpenAI") }
-        } finally {
-            lock.readLock().unlock()
         }
     }
 

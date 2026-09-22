@@ -225,9 +225,16 @@ internal fun repairToolCallsInResult(
  * hook must not run on the callback thread. The three repair functions
  * themselves are pure and stay where they are. Part ordering is unchanged:
  * the callback thread blocks until the hook returns.
+ *
+ * [model] is the streaming model, whose read hold is lent to the worker for
+ * the duration of the hook: the callback thread is blocked in `task.get()`
+ * still holding it, so the handle cannot be dropped, while a fresh read
+ * acquisition here would queue behind a waiting `close()` writer (the lock is
+ * fair) and deadlock all three. The lend covers [model] only, and only on the
+ * worker thread — a thread the hook starts itself still takes the lock.
  */
-internal fun offCallbackThread(repair: RepairToolCall): RepairToolCall = { context ->
-    val task = FutureTask { repair(context) }
+internal fun offCallbackThread(model: Model, repair: RepairToolCall): RepairToolCall = { context ->
+    val task = FutureTask { model.withLentReadHold { repair(context) } }
     Thread(task, "aimux-tool-call-repair").start()
     try {
         task.get()
