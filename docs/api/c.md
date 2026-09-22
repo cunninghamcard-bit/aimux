@@ -342,6 +342,12 @@ The loop: generate → find an entry with `"invalid": true` →
 `aimux_apply_tool_call_repair` (one call) or
 `aimux_apply_tool_call_repair_to_result` (the whole document).
 
+`prompt_json` and `opts_json` are **the same two strings you already passed to
+`aimux_generate_text` / `aimux_stream_text`** — messages, instructions, and the
+tool set are derived from them inside the library, including the
+`{"prompt": …}` wrapper and the usual `opts_json` rule (NULL / empty /
+`"null"` means defaults). No host reimplements that.
+
 `reply_json` is one of:
 
 ```jsonc
@@ -360,13 +366,20 @@ its error becomes `ToolCallRepair { original_error, cause }`. `failed` reports
 
 | Function | Description |
 |------|------|
-| `aimux_tool_call_repair_context(tool_call_json, tools_json, messages_json, instructions, char **out_json)` | [AiMuxError] `{tool_call, error, input_schema, tools, messages, instructions}` — the AI SDK `repairToolCall` argument. `messages_json` is a `ModelMessage[]` (`"[]"` when none); `instructions` may be NULL |
-| `aimux_apply_tool_call_repair(tool_call_json, tools_json, reply_json, char **out_json)` | [AiMuxError] Resolve one call; writes the resulting `ToolCall` JSON |
-| `aimux_apply_tool_call_repair_to_result(result_json, tools_json, tool_call_id, reply_json, char **out_json)` | [AiMuxError] Patch a `GenerateTextResult` / `GenerateObjectResult`: rewrites `tool_calls` **and** the matching `response_messages` tool-call part |
+| `aimux_tool_call_repair_context(tool_call_json, prompt_json, opts_json, char **out_json)` | [AiMuxError] `{tool_call, error, input_schema, tools, messages, instructions}` — the AI SDK `repairToolCall` argument — **or the JSON literal `null`** |
+| `aimux_apply_tool_call_repair(tool_call_json, opts_json, reply_json, char **out_json)` | [AiMuxError] Resolve one call; writes the resulting `ToolCall` JSON |
+| `aimux_apply_tool_call_repair_to_result(result_json, opts_json, tool_call_id, reply_json, char **out_json)` | [AiMuxError] Patch a `GenerateTextResult` / `GenerateObjectResult`: rewrites `tool_calls` **and** the matching `response_messages` tool-call part (its `tool_call_id` included — a repair may rename the call) |
 
-All three reject a call that is not invalid, and
+**`opts_json` with no `tools` is not an error for the context call**: it writes
+the JSON literal `null`, which means "this call is not repairable — skip it".
+That is the AI SDK rule (a call made without a tool set is never repaired),
+decided once in the library so every host agrees. The two `apply_*` functions
+reject such options with `AIMUX_E_INVALID_ARGUMENT`, because a host that
+honoured the `null` never reaches them.
+
+They also reject a call that is not invalid, and
 `aimux_apply_tool_call_repair_to_result` rejects a `tool_call_id` the document
-does not carry — both `AIMUX_E_INVALID_ARGUMENT`, never a silent no-op.
+does not carry — again `AIMUX_E_INVALID_ARGUMENT`, never a silent no-op.
 
 The OpenAI-compatible output has no equivalent. `ChatCompletion` carries no
 `invalid` / `error` field, so a host cannot tell from it that a call needs

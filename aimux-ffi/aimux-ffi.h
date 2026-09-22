@@ -374,6 +374,12 @@ aimux_error_t *aimux_stream_text_as_openai_with_abort(uint64_t handle, uint64_t 
  * apply it with aimux_apply_tool_call_repair (one call) or
  * aimux_apply_tool_call_repair_to_result (the whole document).
  *
+ * prompt_json and opts_json are the SAME two strings you passed to
+ * aimux_generate_text / aimux_stream_text: messages, instructions, and the
+ * tool set are derived from them inside the library, so no host reimplements
+ * that. opts_json follows the usual rule — NULL, empty, or "null" means
+ * defaults.
+ *
  * reply_json is one of:
  *   {"type":"repaired","tool_call":{"tool_call_id":…,"tool_name":…,"input":"<raw text>"}}
  *   {"type":"unchanged"}
@@ -388,34 +394,40 @@ aimux_error_t *aimux_stream_text_as_openai_with_abort(uint64_t handle, uint64_t 
  * [AiMuxError] Build the repair argument for one invalid tool call.
  *
  * @param tool_call_json One GenerateTextResult.tool_calls entry, "invalid": true.
- * @param tools_json     The Tool[] the call was made with.
- * @param messages_json  ModelMessage[] ("[]" when none).
- * @param instructions   System instructions, or NULL.
+ * @param prompt_json    The prompt the call was generated with (same wire
+ *                       format as aimux_generate_text, {"prompt": …} wrapper
+ *                       included).
+ * @param opts_json      The options the call was generated with (may be NULL).
  * @param out_json       {tool_call, error, input_schema, tools, messages,
  *                       instructions} — the AI SDK repairToolCall argument.
  *                       tool_call.input is the provider's raw argument text.
+ *                       The JSON literal null when opts_json carried no tools:
+ *                       such a call is never repaired (AI SDK rule), so skip
+ *                       it. That is a SUCCESS, not an error.
  */
 aimux_error_t *aimux_tool_call_repair_context(const char *tool_call_json,
-                                                  const char *tools_json,
-                                                  const char *messages_json,
-                                                  const char *instructions, char **out_json);
+                                                  const char *prompt_json,
+                                                  const char *opts_json, char **out_json);
 
 /**
  * [AiMuxError] Resolve one invalid tool call against a repair reply. Writes
  * the resulting ToolCall — valid, or invalid carrying a nested
- * ToolCallRepairError.
+ * ToolCallRepairError. Options carrying no tools are
+ * AIMUX_E_INVALID_ARGUMENT: aimux_tool_call_repair_context already wrote null
+ * for such a call.
  */
 aimux_error_t *aimux_apply_tool_call_repair(const char *tool_call_json,
-                                                const char *tools_json,
+                                                const char *opts_json,
                                                 const char *reply_json, char **out_json);
 
 /**
  * [AiMuxError] Apply a repair reply to a serialized GenerateTextResult or
  * GenerateObjectResult. Both tool_calls and the matching response_messages
- * tool-call part are rewritten; everything else is left as-is.
+ * tool-call part are rewritten (tool_call_id included — a repair may rename
+ * the call); everything else is left as-is.
  */
 aimux_error_t *aimux_apply_tool_call_repair_to_result(const char *result_json,
-                                                          const char *tools_json,
+                                                          const char *opts_json,
                                                           const char *tool_call_id,
                                                           const char *reply_json,
                                                           char **out_json);

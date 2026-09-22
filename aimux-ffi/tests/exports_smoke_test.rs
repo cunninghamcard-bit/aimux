@@ -30,7 +30,7 @@
 //!
 //! ## Coverage
 //!
-//! All 117 `#[unsafe(no_mangle)]` exports in `src/lib.rs` are exercised (the
+//! All 118 `#[unsafe(no_mangle)]` exports in `src/lib.rs` are exercised (the
 //! constructor and utility classes in full; the session class one
 //! representative call per export). [`header_and_exports_agree`] pins the
 //! count against the two headers.
@@ -1117,21 +1117,22 @@ fn recording_exports_lifecycle_cleanly() {
 
 // ── stateless tool-call repair (RFC-0035, 3 exports) ────────────────────────
 
+const REPAIR_TOOLS: &str = r#"[{"type":"function","name":"weather","input_schema":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}]"#;
+const REPAIR_INVALID: &str = r#"{"tool_call_id":"call-1","tool_name":"weather","input":{"town":"SG"},"dynamic":true,"invalid":true,"error":{"InvalidToolInput":{"tool_name":"weather","tool_input":"{\"town\":\"SG\"}","cause":"missing city"}}}"#;
+const REPAIR_REPLY: &str = r#"{"type":"repaired","tool_call":{"tool_call_id":"call-1","tool_name":"weather","input":"{\"city\":\"SG\"}"}}"#;
+
 /// The three repair exports are pure: they take JSON, return JSON, and never
-/// touch a handle or the runtime. Exercised end to end here, plus the argument
-/// failure paths (NULL / malformed JSON).
+/// touch a handle or the runtime. They also accept the very `prompt_json` /
+/// `opts_json` a caller already passed to `aimux_generate_text`.
 #[test]
 fn tool_call_repair_exports_round_trip() {
-    const TOOLS: &str = r#"[{"type":"function","name":"weather","input_schema":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}]"#;
-    const INVALID: &str = r#"{"tool_call_id":"call-1","tool_name":"weather","input":{"town":"SG"},"dynamic":true,"invalid":true,"error":{"InvalidToolInput":{"tool_name":"weather","tool_input":"{\"town\":\"SG\"}","cause":"missing city"}}}"#;
-    const REPAIRED: &str = r#"{"type":"repaired","tool_call":{"tool_call_id":"call-1","tool_name":"weather","input":"{\"city\":\"SG\"}"}}"#;
+    let opts = format!(r#"{{"tools":{REPAIR_TOOLS},"instructions":"be terse"}}"#);
 
     let mut out: *mut c_char = ptr::null_mut();
     let e = aimux_tool_call_repair_context(
-        c(INVALID).as_ptr(),
-        c(TOOLS).as_ptr(),
-        c("[]").as_ptr(),
-        ptr::null(),
+        c(REPAIR_INVALID).as_ptr(),
+        c(r#"{"prompt":"weather in SG?"}"#).as_ptr(),
+        c(&opts).as_ptr(),
         &mut out,
     );
     ok(e, "tool_call_repair_context");
@@ -1140,11 +1141,17 @@ fn tool_call_repair_exports_round_trip() {
         context.contains("\"input_schema\"") && context.contains("{\\\"town\\\":\\\"SG\\\"}"),
         "context should carry the schema and the raw argument text: {context}"
     );
+    // The `{"prompt": …}` wrapper unwrapped into the one user message.
+    assert!(
+        context.contains(r#""messages":[{"role":"user","content":"weather in SG?"}]"#)
+            && context.contains(r#""instructions":"be terse""#),
+        "messages and instructions come from prompt_json / opts_json: {context}"
+    );
 
     let e = aimux_apply_tool_call_repair(
-        c(INVALID).as_ptr(),
-        c(TOOLS).as_ptr(),
-        c(REPAIRED).as_ptr(),
+        c(REPAIR_INVALID).as_ptr(),
+        c(&opts).as_ptr(),
+        c(REPAIR_REPLY).as_ptr(),
         &mut out,
     );
     ok(e, "apply_tool_call_repair");
@@ -1154,10 +1161,10 @@ fn tool_call_repair_exports_round_trip() {
         "repaired call should be valid: {repaired}"
     );
 
-    let result = format!(r#"{{"tool_calls":[{INVALID}],"response_messages":[]}}"#);
+    let result = format!(r#"{{"tool_calls":[{REPAIR_INVALID}],"response_messages":[]}}"#);
     let e = aimux_apply_tool_call_repair_to_result(
         c(&result).as_ptr(),
-        c(TOOLS).as_ptr(),
+        c(&opts).as_ptr(),
         c("call-1").as_ptr(),
         c(r#"{"type":"unchanged"}"#).as_ptr(),
         &mut out,
@@ -1169,7 +1176,7 @@ fn tool_call_repair_exports_round_trip() {
     // A reply naming a tool call the document does not have is an AiMuxError.
     let e = aimux_apply_tool_call_repair_to_result(
         c(&result).as_ptr(),
-        c(TOOLS).as_ptr(),
+        c(&opts).as_ptr(),
         c("call-9").as_ptr(),
         c(r#"{"type":"unchanged"}"#).as_ptr(),
         &mut out,
@@ -1179,13 +1186,42 @@ fn tool_call_repair_exports_round_trip() {
     assert!(out.is_null());
 }
 
+/// Options with no tool set: the context call writes the JSON literal `null`
+/// (a success — the host skips the call), while applying a reply is an error.
+#[test]
+fn tool_call_repair_without_a_tool_set_yields_null_then_rejects() {
+    let mut out: *mut c_char = ptr::null_mut();
+    for opts in [
+        ptr::null(),
+        c("").as_ptr(),
+        c(r#"{"temperature":0.0}"#).as_ptr(),
+    ] {
+        let e = aimux_tool_call_repair_context(
+            c(REPAIR_INVALID).as_ptr(),
+            c("\"weather in SG?\"").as_ptr(),
+            opts,
+            &mut out,
+        );
+        ok(e, "tool_call_repair_context (no tools)");
+        assert_eq!(read_and_free_json(out, "tool_call_repair_context"), "null");
+    }
+
+    let e = aimux_apply_tool_call_repair(
+        c(REPAIR_INVALID).as_ptr(),
+        ptr::null(),
+        c(r#"{"type":"unchanged"}"#).as_ptr(),
+        &mut out,
+    );
+    let (code, _) = expect_aimux_error(e, "apply_tool_call_repair (no tools)");
+    assert_eq!(code, AIMUX_E_INVALID_ARGUMENT);
+    assert!(out.is_null());
+}
+
 #[test]
 fn tool_call_repair_exports_reject_bad_arguments() {
-    const TOOLS: &str = "[]";
     let mut out: *mut c_char = ptr::null_mut();
 
-    let e =
-        aimux_apply_tool_call_repair(ptr::null(), c(TOOLS).as_ptr(), c("{}").as_ptr(), &mut out);
+    let e = aimux_apply_tool_call_repair(ptr::null(), ptr::null(), c("{}").as_ptr(), &mut out);
     assert_eq!(
         expect_ffi_error(e, "apply_tool_call_repair (null tool_call_json)"),
         "tool_call_json: must not be NULL"
@@ -1194,8 +1230,7 @@ fn tool_call_repair_exports_reject_bad_arguments() {
 
     let e = aimux_tool_call_repair_context(
         c("{ not json").as_ptr(),
-        c(TOOLS).as_ptr(),
-        c("[]").as_ptr(),
+        c("\"hi\"").as_ptr(),
         ptr::null(),
         &mut out,
     );
@@ -1207,9 +1242,8 @@ fn tool_call_repair_exports_reject_bad_arguments() {
 
     // An unknown reply tag is a wire-JSON failure, not a silent no-op.
     let e = aimux_apply_tool_call_repair(
-        c(r#"{"tool_call_id":"c","tool_name":"t","input":{},"invalid":true,"error":{"Other":"x"}}"#)
-            .as_ptr(),
-        c(TOOLS).as_ptr(),
+        c(REPAIR_INVALID).as_ptr(),
+        c(&format!(r#"{{"tools":{REPAIR_TOOLS}}}"#)).as_ptr(),
         c(r#"{"type":"nonsense"}"#).as_ptr(),
         &mut out,
     );

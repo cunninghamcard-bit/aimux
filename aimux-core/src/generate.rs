@@ -1203,7 +1203,7 @@ async fn do_generate_with_logging(
 /// If the prompt is messages, they are used as-is.
 /// Instructions are passed through separately (they get prepended by
 /// `convert_to_language_model_prompt`).
-fn split_prompt(
+pub(crate) fn split_prompt(
     prompt: ModelPrompt,
     instructions: Option<&str>,
 ) -> (Vec<ModelMessage>, Option<&str>) {

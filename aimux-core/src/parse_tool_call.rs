@@ -413,7 +413,39 @@ fn raw_from_invalid(tool_call: &ToolCall) -> Result<(RawToolCall, AiMuxError), A
     ))
 }
 
-/// Build the repair argument a host needs, as JSON.
+/// The AI SDK's "no tool set, no repair" rule, shared by every entry point
+/// that resolves a reply: a call made without tools was never a candidate for
+/// repair, so reaching this point with `None` is a caller mistake.
+fn required_tools(tools: Option<&[Tool]>) -> Result<&[Tool], AiMuxError> {
+    tools.ok_or_else(|| {
+        AiMuxError::InvalidArgument(
+            "tool calls made without a tool set are not repairable".to_string(),
+        )
+    })
+}
+
+/// Recover the three repair inputs from the same `prompt` and `options` a
+/// caller already passed to `generate_text` / `stream_text`.
+///
+/// Exists so no binding has to re-derive the transcript the model saw: the
+/// prompt-to-messages rule and the "instructions travel beside the messages"
+/// rule are `generate_text`'s, and stay in one place.
+#[must_use]
+pub fn tool_call_repair_inputs(
+    prompt: impl Into<crate::message::ModelPrompt>,
+    options: &crate::generate::GenerateTextOptions,
+) -> (
+    Vec<crate::message::ModelMessage>,
+    Option<&str>,
+    Option<&[Tool]>,
+) {
+    let (messages, instructions) =
+        crate::generate::split_prompt(prompt.into(), options.instructions.as_deref());
+    (messages, instructions, options.tools.as_deref())
+}
+
+/// Build the repair argument a host needs, as JSON, or `None` when the call
+/// was made without a tool set.
 ///
 /// Mirrors the AI SDK `repairToolCall` argument: `{tool_call, error,
 /// input_schema, tools, messages, instructions}`. `tool_call` is the
@@ -421,16 +453,23 @@ fn raw_from_invalid(tool_call: &ToolCall) -> Result<(RawToolCall, AiMuxError), A
 /// the named tool (an empty-object schema when the name does not resolve),
 /// and `error` the serialized failure the call already carries.
 ///
+/// `tools` is `Option` for the same reason [`parse_tool_call`]'s is: the AI
+/// SDK never repairs a call made without a tool set. That is not a failure —
+/// it is the answer "this call is not repairable", and the caller skips it.
+///
 /// # Errors
 ///
 /// [`AiMuxError::InvalidArgument`] when `tool_call` is not an invalid call, or
 /// carries no error.
 pub fn tool_call_repair_context(
     tool_call: &ToolCall,
-    tools: &[Tool],
+    tools: Option<&[Tool]>,
     messages: &[crate::message::ModelMessage],
     instructions: Option<&str>,
-) -> Result<Value, AiMuxError> {
+) -> Result<Option<Value>, AiMuxError> {
+    let Some(tools) = tools else {
+        return Ok(None);
+    };
     let (raw, error) = raw_from_invalid(tool_call)?;
     let context = ToolCallRepairContext {
         instructions: instructions.map(str::to_owned),
@@ -440,14 +479,14 @@ pub fn tool_call_repair_context(
         tools: tools.to_vec(),
         error,
     };
-    Ok(serde_json::json!({
+    Ok(Some(serde_json::json!({
         "tool_call": context.tool_call,
         "error": context.error,
         "input_schema": context.input_schema(&context.tool_call.tool_name),
         "tools": context.tools,
         "messages": context.messages,
         "instructions": context.instructions,
-    }))
+    })))
 }
 
 /// Resolve one invalid tool call against a host's repair reply.
@@ -458,13 +497,15 @@ pub fn tool_call_repair_context(
 ///
 /// # Errors
 ///
-/// [`AiMuxError::InvalidArgument`] when `tool_call` is not an invalid call, or
-/// carries no error.
+/// [`AiMuxError::InvalidArgument`] when `tools` is `None` (the call was never
+/// repairable — [`tool_call_repair_context`] already answered `None` for it),
+/// or when `tool_call` is not an invalid call, or carries no error.
 pub fn apply_tool_call_repair(
     tool_call: &ToolCall,
-    tools: &[Tool],
+    tools: Option<&[Tool]>,
     reply: ToolCallRepairReply,
 ) -> Result<ToolCall, AiMuxError> {
+    let tools = required_tools(tools)?;
     let (raw, error) = raw_from_invalid(tool_call)?;
     Ok(apply_repair_outcome(raw, error, tools, reply.into()))
 }
@@ -485,12 +526,12 @@ pub fn apply_tool_call_repair(
 ///
 /// # Errors
 ///
-/// [`AiMuxError::InvalidArgument`] when the document has no `tool_calls`
-/// array, when no entry matches `tool_call_id`, or when the matched call is
-/// not an invalid call.
+/// [`AiMuxError::InvalidArgument`] when `tools` is `None`, when the document
+/// has no `tool_calls` array, when no entry matches `tool_call_id`, or when
+/// the matched call is not an invalid call.
 pub fn apply_tool_call_repair_to_result(
     result: &Value,
-    tools: &[Tool],
+    tools: Option<&[Tool]>,
     tool_call_id: &str,
     reply: ToolCallRepairReply,
 ) -> Result<Value, AiMuxError> {
@@ -541,6 +582,12 @@ pub fn apply_tool_call_repair_to_result(
         let Some(part) = part.as_object_mut() else {
             continue;
         };
+        // A repair may rename the call; the transcript must keep pointing at
+        // the same entry as `tool_calls`.
+        part.insert(
+            "tool_call_id".to_string(),
+            repaired.tool_call_id.clone().into(),
+        );
         part.insert("tool_name".to_string(), repaired.tool_name.clone().into());
         part.insert("input".to_string(), replay_input.clone());
     }

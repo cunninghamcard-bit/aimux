@@ -90,6 +90,7 @@ pub mod prelude {
     pub use crate::parse_tool_call::{
         RawToolCall, ToolCallRepair, ToolCallRepairContext, ToolCallRepairReply,
         apply_tool_call_repair, apply_tool_call_repair_to_result, tool_call_repair_context,
+        tool_call_repair_inputs,
     };
     pub use crate::provider::Provider;
     pub use crate::reranking_model::{

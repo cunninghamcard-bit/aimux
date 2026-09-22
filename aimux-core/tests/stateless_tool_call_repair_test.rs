@@ -5,10 +5,12 @@
 //! the second producing exactly what Rust callers get from the first.
 
 use aimux_core::error::AiMuxError;
-use aimux_core::message::ModelMessage;
+use aimux_core::generate::GenerateTextOptions;
+use aimux_core::message::{ModelMessage, ModelPrompt};
 use aimux_core::parse_tool_call::{
     RawToolCall, ToolCallRepair, ToolCallRepairReply, apply_tool_call_repair,
     apply_tool_call_repair_to_result, parse_tool_call, tool_call_repair_context,
+    tool_call_repair_inputs,
 };
 use aimux_core::tool::{FunctionTool, Tool, ToolCall};
 use serde_json::{Value, json};
@@ -78,7 +80,7 @@ const BAD: &str = r#"{"town":"Singapore"}"#;
 async fn repaired_reply_revalidates_and_yields_a_valid_call() {
     let call = apply_tool_call_repair(
         &invalid_call(BAD).await,
-        &[weather_tool()],
+        Some(&[weather_tool()]),
         ToolCallRepairReply::Repaired {
             tool_call: raw("weather", r#"{"city":"Singapore"}"#),
         },
@@ -93,7 +95,7 @@ async fn repaired_reply_revalidates_and_yields_a_valid_call() {
 async fn repaired_reply_that_still_fails_nests_both_errors() {
     let call = apply_tool_call_repair(
         &invalid_call(BAD).await,
-        &[weather_tool()],
+        Some(&[weather_tool()]),
         ToolCallRepairReply::Repaired {
             tool_call: raw("weather", r#"{"city":42}"#),
         },
@@ -116,8 +118,12 @@ async fn repaired_reply_that_still_fails_nests_both_errors() {
 #[tokio::test]
 async fn unchanged_reply_keeps_the_original_error() {
     let original = invalid_call(BAD).await;
-    let call = apply_tool_call_repair(&original, &[weather_tool()], ToolCallRepairReply::Unchanged)
-        .unwrap();
+    let call = apply_tool_call_repair(
+        &original,
+        Some(&[weather_tool()]),
+        ToolCallRepairReply::Unchanged,
+    )
+    .unwrap();
     assert_eq!(
         serde_json::to_value(&call).unwrap(),
         serde_json::to_value(&original).unwrap()
@@ -128,7 +134,7 @@ async fn unchanged_reply_keeps_the_original_error() {
 async fn failed_reply_reports_the_host_message_as_the_cause() {
     let call = apply_tool_call_repair(
         &invalid_call(BAD).await,
-        &[weather_tool()],
+        Some(&[weather_tool()]),
         ToolCallRepairReply::Failed {
             message: "LLM call failed".into(),
         },
@@ -150,8 +156,12 @@ async fn a_valid_tool_call_is_rejected() {
         None,
     )
     .await;
-    let error = apply_tool_call_repair(&valid, &[weather_tool()], ToolCallRepairReply::Unchanged)
-        .unwrap_err();
+    let error = apply_tool_call_repair(
+        &valid,
+        Some(&[weather_tool()]),
+        ToolCallRepairReply::Unchanged,
+    )
+    .unwrap_err();
     assert!(matches!(error, AiMuxError::InvalidArgument(_)));
 }
 
@@ -186,7 +196,8 @@ async fn both_paths_agree_on_every_branch() {
     for (outcome, reply) in cases {
         let from_closure = via_closure(BAD, outcome).await;
         let from_data =
-            apply_tool_call_repair(&invalid_call(BAD).await, &[weather_tool()], reply).unwrap();
+            apply_tool_call_repair(&invalid_call(BAD).await, Some(&[weather_tool()]), reply)
+                .unwrap();
         assert_eq!(
             serde_json::to_value(&from_closure).unwrap(),
             serde_json::to_value(&from_data).unwrap(),
@@ -201,11 +212,12 @@ async fn context_carries_the_raw_text_error_and_schema() {
     let messages = vec![ModelMessage::user("weather in Singapore?")];
     let context = tool_call_repair_context(
         &invalid_call(BAD).await,
-        &[weather_tool()],
+        Some(&[weather_tool()]),
         &messages,
         Some("be helpful"),
     )
-    .unwrap();
+    .unwrap()
+    .expect("a tool set was supplied");
 
     assert_eq!(context["tool_call"]["input"], json!(BAD));
     assert_eq!(context["tool_call"]["tool_name"], json!("weather"));
@@ -226,7 +238,9 @@ async fn context_of_an_unknown_tool_falls_back_to_an_empty_schema() {
         None,
     )
     .await;
-    let context = tool_call_repair_context(&unknown, &[weather_tool()], &[], None).unwrap();
+    let context = tool_call_repair_context(&unknown, Some(&[weather_tool()]), &[], None)
+        .unwrap()
+        .expect("a tool set was supplied");
     assert_eq!(context["input_schema"]["properties"], json!({}));
     assert!(context["error"]["NoSuchTool"].is_object());
 }
@@ -256,7 +270,7 @@ async fn patching_updates_tool_calls_and_response_messages() {
     let result = result_with(&invalid_call(BAD).await);
     let patched = apply_tool_call_repair_to_result(
         &result,
-        &[weather_tool()],
+        Some(&[weather_tool()]),
         "call-1",
         ToolCallRepairReply::Repaired {
             tool_call: raw("weather", r#"{"city":"Singapore"}"#),
@@ -284,7 +298,7 @@ async fn patching_a_generate_object_result_reaches_into_raw() {
     let result = json!({ "object": {"ok": true}, "raw": result_with(&invalid_call(BAD).await) });
     let patched = apply_tool_call_repair_to_result(
         &result,
-        &[weather_tool()],
+        Some(&[weather_tool()]),
         "call-1",
         ToolCallRepairReply::Repaired {
             tool_call: raw("weather", r#"{"city":"Singapore"}"#),
@@ -305,7 +319,7 @@ async fn patching_a_primitive_input_is_not_replayed_into_the_transcript() {
     let result = result_with(&invalid_call("not json at all").await);
     let patched = apply_tool_call_repair_to_result(
         &result,
-        &[weather_tool()],
+        Some(&[weather_tool()]),
         "call-1",
         ToolCallRepairReply::Unchanged,
     )
@@ -318,11 +332,35 @@ async fn patching_a_primitive_input_is_not_replayed_into_the_transcript() {
 }
 
 #[tokio::test]
+async fn patching_follows_a_repair_that_changes_the_call_id() {
+    let result = result_with(&invalid_call(BAD).await);
+    let patched = apply_tool_call_repair_to_result(
+        &result,
+        Some(&[weather_tool()]),
+        "call-1",
+        ToolCallRepairReply::Repaired {
+            tool_call: RawToolCall {
+                tool_call_id: "call-2".into(),
+                ..raw("weather", r#"{"city":"Singapore"}"#)
+            },
+        },
+    )
+    .unwrap();
+
+    assert_eq!(patched["tool_calls"][0]["tool_call_id"], json!("call-2"));
+    // The transcript part must follow, or the replayed message points at a
+    // call id that is no longer in `tool_calls`.
+    let part = &patched["response_messages"][0]["content"][1];
+    assert_eq!(part["tool_call_id"], json!("call-2"));
+    assert_eq!(part["input"], json!({"city":"Singapore"}));
+}
+
+#[tokio::test]
 async fn patching_an_unknown_id_is_an_error() {
     let result = result_with(&invalid_call(BAD).await);
     let error = apply_tool_call_repair_to_result(
         &result,
-        &[weather_tool()],
+        Some(&[weather_tool()]),
         "call-9",
         ToolCallRepairReply::Unchanged,
     )
@@ -349,6 +387,50 @@ fn reply_wire_shapes_round_trip_and_reject_unknown_fields() {
     );
 }
 
+// ── no tool set: not repairable, not an error ───────────────────────────────
+
+#[tokio::test]
+async fn a_call_made_without_tools_has_no_repair_context() {
+    assert!(
+        tool_call_repair_context(&invalid_call(BAD).await, None, &[], None)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn applying_a_reply_without_tools_is_an_error() {
+    let error = apply_tool_call_repair(
+        &invalid_call(BAD).await,
+        None,
+        ToolCallRepairReply::Unchanged,
+    )
+    .unwrap_err();
+    assert!(matches!(error, AiMuxError::InvalidArgument(_)));
+}
+
+#[test]
+fn repair_inputs_come_from_the_prompt_and_options_the_call_used() {
+    let options = GenerateTextOptions {
+        tools: Some(vec![weather_tool()]),
+        instructions: Some("be terse".into()),
+        ..Default::default()
+    };
+    let (messages, instructions, tools) = tool_call_repair_inputs("weather?", &options);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(instructions, Some("be terse"));
+    assert_eq!(tools.map(<[_]>::len), Some(1));
+
+    // A messages prompt passes through; options with no tools answer `None`.
+    let defaults = GenerateTextOptions::default();
+    let (messages, _, tools) = tool_call_repair_inputs(
+        ModelPrompt::Messages(vec![ModelMessage::user("a"), ModelMessage::user("b")]),
+        &defaults,
+    );
+    assert_eq!(messages.len(), 2);
+    assert!(tools.is_none());
+}
+
 // ── shared contract fixture ─────────────────────────────────────────────────
 
 /// Run `contract-tests/fixtures/tool-call-repair.json` against the Rust
@@ -358,30 +440,37 @@ fn contract_fixture_matches_the_implementation() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../contract-tests/fixtures/tool-call-repair.json");
     let fixture: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-    let tools: Vec<Tool> = serde_json::from_value(fixture["tools"].clone()).unwrap();
 
     for case in fixture["cases"].as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
         let input = &case["input"];
+        // Every case carries the prompt and options the call was generated
+        // with, exactly as a host would hand them back.
+        let options: GenerateTextOptions = match &input["opts"] {
+            Value::Null => GenerateTextOptions::default(),
+            opts => serde_json::from_value(opts.clone()).unwrap(),
+        };
+        let prompt: ModelPrompt = match &input["prompt"] {
+            Value::Object(object) if object.len() == 1 && object.contains_key("prompt") => {
+                serde_json::from_value(object["prompt"].clone()).unwrap()
+            }
+            Value::Null => ModelPrompt::Text(String::new()),
+            prompt => serde_json::from_value(prompt.clone()).unwrap(),
+        };
+        let (messages, instructions, tools) = tool_call_repair_inputs(prompt, &options);
         let reply = || serde_json::from_value(input["reply"].clone()).unwrap();
         let tool_call = || serde_json::from_value::<ToolCall>(input["tool_call"].clone()).unwrap();
 
         let actual = match case["function"].as_str().unwrap() {
             "tool_call_repair_context" => {
-                let messages: Vec<ModelMessage> =
-                    serde_json::from_value(input["messages"].clone()).unwrap();
-                tool_call_repair_context(
-                    &tool_call(),
-                    &tools,
-                    &messages,
-                    input["instructions"].as_str(),
-                )
+                tool_call_repair_context(&tool_call(), tools, &messages, instructions)
+                    .map(|context| serde_json::to_value(context).unwrap())
             }
-            "apply_tool_call_repair" => apply_tool_call_repair(&tool_call(), &tools, reply())
+            "apply_tool_call_repair" => apply_tool_call_repair(&tool_call(), tools, reply())
                 .map(|call| serde_json::to_value(call).unwrap()),
             "apply_tool_call_repair_to_result" => apply_tool_call_repair_to_result(
                 &input["result"],
-                &tools,
+                tools,
                 input["tool_call_id"].as_str().unwrap(),
                 reply(),
             ),

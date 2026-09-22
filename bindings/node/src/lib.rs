@@ -29,8 +29,8 @@ use aimux_core::generate::{
 use aimux_core::language_model::LanguageModel;
 use aimux_core::message::ModelPrompt;
 use aimux_core::openai_output::OpenAiStreamOptions;
-use aimux_core::parse_tool_call::ToolCallRepairReply;
-use aimux_core::tool::{Tool, ToolCall};
+use aimux_core::parse_tool_call::{ToolCallRepairReply, tool_call_repair_inputs};
+use aimux_core::tool::ToolCall;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
@@ -1580,32 +1580,36 @@ fn parse_opts(json: Option<&str>) -> MResult<GenerateTextOptions> {
 
 /// Build the repair argument for one invalid tool call.
 ///
-/// `toolCallJson` is a `GenerateTextResult.toolCalls` entry with
-/// `invalid: true`; `toolsJson` the `Tool[]` the call was made with;
-/// `messagesJson` a `ModelMessage[]` (`"[]"` when none). Returns
-/// `{tool_call, error, input_schema, tools, messages, instructions}` — the AI
-/// SDK `repairToolCall` argument, with `tool_call.input` the provider's raw
-/// argument text.
+/// `toolCallJson` is a `GenerateTextResult.tool_calls` entry with
+/// `invalid: true`. `prompt` and `optsJson` are **the same two strings the
+/// call was generated with** (`generateText` / `streamText`); messages,
+/// instructions, and the tool set are derived from them here, so no caller
+/// repeats that derivation.
+///
+/// Returns `{tool_call, error, input_schema, tools, messages, instructions}`
+/// — the AI SDK `repairToolCall` argument, with `tool_call.input` the
+/// provider's raw argument text — or the JSON literal `"null"` when the
+/// options carried no tools: as in the AI SDK, a call made without a tool set
+/// is never repaired, and the caller skips it. `"null"` is a success.
 ///
 /// Pure and synchronous: no model, no network. Throws `InvalidArgumentError`
 /// when the call is not an invalid one.
 #[napi]
 pub fn tool_call_repair_context(
     tool_call_json: String,
-    tools_json: String,
-    messages_json: String,
-    instructions: Option<String>,
+    prompt: String,
+    opts_json: Option<String>,
 ) -> AimuxResult<String> {
     AimuxResult((|| -> crate::error::MResult<String> {
         let tool_call: ToolCall = parse_wire_json("tool_call_json", &tool_call_json)?;
-        let tools: Vec<Tool> = parse_wire_json("tools_json", &tools_json)?;
-        let messages: Vec<aimux_core::message::ModelMessage> =
-            parse_wire_json("messages_json", &messages_json)?;
+        let prompt = parse_prompt(&prompt)?;
+        let opts = parse_opts(opts_json.as_deref())?;
+        let (messages, instructions, tools) = tool_call_repair_inputs(prompt, &opts);
         let context = aimux_core::parse_tool_call::tool_call_repair_context(
             &tool_call,
-            &tools,
+            tools,
             &messages,
-            instructions.as_deref(),
+            instructions,
         )
         .map_err(|e| AiMuxBindingError::from(&e))?;
         serialize_result(&context)
@@ -1614,46 +1618,56 @@ pub fn tool_call_repair_context(
 
 /// Resolve one invalid tool call against a host's repair reply.
 ///
-/// `replyJson` is `{"type":"repaired","tool_call":{…}}`,
+/// `optsJson` is the same string the call was generated with; the tool set
+/// comes from it. `replyJson` is `{"type":"repaired","tool_call":{…}}`,
 /// `{"type":"unchanged"}`, or `{"type":"failed","message":"…"}`. Returns the
 /// resulting `ToolCall` JSON — valid, or invalid carrying a nested
 /// `ToolCallRepairError`.
+///
+/// Options carrying no tools throw `InvalidArgumentError`: such a call is not
+/// repairable, and `toolCallRepairContext` already said so by returning
+/// `"null"`.
 #[napi]
 pub fn apply_tool_call_repair(
     tool_call_json: String,
-    tools_json: String,
+    opts_json: Option<String>,
     reply_json: String,
 ) -> AimuxResult<String> {
     AimuxResult((|| -> crate::error::MResult<String> {
         let tool_call: ToolCall = parse_wire_json("tool_call_json", &tool_call_json)?;
-        let tools: Vec<Tool> = parse_wire_json("tools_json", &tools_json)?;
+        let opts = parse_opts(opts_json.as_deref())?;
         let reply: ToolCallRepairReply = parse_wire_json("reply_json", &reply_json)?;
-        let repaired = aimux_core::parse_tool_call::apply_tool_call_repair(&tool_call, &tools, reply)
-            .map_err(|e| AiMuxBindingError::from(&e))?;
+        let repaired = aimux_core::parse_tool_call::apply_tool_call_repair(
+            &tool_call,
+            opts.tools.as_deref(),
+            reply,
+        )
+        .map_err(|e| AiMuxBindingError::from(&e))?;
         serialize_result(&repaired)
     })())
 }
 
 /// Apply a repair reply to a serialized `GenerateTextResult` or
 /// `GenerateObjectResult`, rewriting both `tool_calls` and the matching
-/// `response_messages` tool-call part.
+/// `response_messages` tool-call part. `optsJson` is the same string the call
+/// was generated with.
 ///
 /// The OpenAI-shaped result has no equivalent: it carries no `invalid` /
 /// `error`, so repair is driven from the native result.
 #[napi]
 pub fn apply_tool_call_repair_to_result(
     result_json: String,
-    tools_json: String,
+    opts_json: Option<String>,
     tool_call_id: String,
     reply_json: String,
 ) -> AimuxResult<String> {
     AimuxResult((|| -> crate::error::MResult<String> {
         let result: serde_json::Value = parse_wire_json("result_json", &result_json)?;
-        let tools: Vec<Tool> = parse_wire_json("tools_json", &tools_json)?;
+        let opts = parse_opts(opts_json.as_deref())?;
         let reply: ToolCallRepairReply = parse_wire_json("reply_json", &reply_json)?;
         let patched = aimux_core::parse_tool_call::apply_tool_call_repair_to_result(
             &result,
-            &tools,
+            opts.tools.as_deref(),
             &tool_call_id,
             reply,
         )

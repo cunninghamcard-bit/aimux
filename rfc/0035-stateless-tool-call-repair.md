@@ -30,6 +30,27 @@
 
 ## 3. 线上形状
 
+### 3.0 入参:宿主已经有的那两个字符串
+
+三个导出都**不**让宿主自己凑 `tools` / `messages` / `instructions`——它们直接吃
+宿主发给 `generate_text` / `stream_text` 的同一份 `prompt_json` + `opts_json`:
+
+```
+aimux_tool_call_repair_context(tool_call_json, prompt_json, opts_json, &out)
+aimux_apply_tool_call_repair(tool_call_json, opts_json, reply_json, &out)
+aimux_apply_tool_call_repair_to_result(result_json, opts_json, tool_call_id, reply_json, &out)
+```
+
+prompt → messages 的规则(含 `{"prompt": …}` 包装)、instructions 与 messages 的
+并列关系、以及 `opts.tools` 的取法,全部由 core 的 `tool_call_repair_inputs`
+(复用 `generate_text` 自己的 `split_prompt`)完成。否则这段逻辑要在 7 家绑定里各写一遍。
+
+**没有 tool set 时不是错误**:`tool_call_repair_context` 返回 JSON `null`。
+AI SDK 的规则是"没给工具集的调用从不修复",宿主看到 `null` 就跳过这个调用。
+这个判断落在 core(`tools: Option<&[Tool]>` → `Option<Value>`,与 `parse_tool_call`
+自身的参数形状一致),不在每个导出里重写一遍。两个 `apply_*` 反过来把
+`tools == None` 视为 `InvalidArgument`——遵守了 `null` 的宿主根本走不到那里。
+
 ### 3.1 修复上下文(`tool_call_repair_context`)
 
 对齐 AI SDK `repairToolCall` 的入参:
@@ -68,7 +89,7 @@
 
 ### 3.3 结果补丁(`apply_tool_call_repair_to_result`)
 
-输入整份 `GenerateTextResult`(或 `GenerateObjectResult`,自动识别其 `raw` 嵌套),同时改写 `tool_calls[]` 与 `response_messages` 中对应的 tool-call part——后者沿用 builder 的 `response_tool_call_input` 规则(仍然非法且输入是原始标量时不回放)。**两处必须一起改**,否则下一轮对话会把未修复的参数发回模型。
+输入整份 `GenerateTextResult`(或 `GenerateObjectResult`,自动识别其 `raw` 嵌套),同时改写 `tool_calls[]` 与 `response_messages` 中对应的 tool-call part——后者沿用 builder 的 `response_tool_call_input` 规则(仍然非法且输入是原始标量时不回放),并且连 `tool_call_id` 一起改:修复可以换掉调用 id,transcript 必须继续指向 `tool_calls` 里的同一条。**两处必须一起改**,否则下一轮对话会把未修复的参数发回模型。
 
 `tool_call_id` 对不上、或目标调用本来就是合法的,都返回 `InvalidArgument` 而不是静默 no-op:这类情况是宿主的 bug,静默掩盖只会更难查。
 
@@ -85,7 +106,7 @@
 
 | 层 | 名字 |
 |---|---|
-| core | `tool_call_repair_context` / `apply_tool_call_repair` / `apply_tool_call_repair_to_result` / `ToolCallRepairReply` |
+| core | `tool_call_repair_inputs` / `tool_call_repair_context` / `apply_tool_call_repair` / `apply_tool_call_repair_to_result` / `ToolCallRepairReply` |
 | C ABI | `aimux_tool_call_repair_context` / `aimux_apply_tool_call_repair` / `aimux_apply_tool_call_repair_to_result` |
 | Node | `toolCallRepairContext` / `applyToolCallRepair` / `applyToolCallRepairToResult` |
 | Python | 同 core 名 |
