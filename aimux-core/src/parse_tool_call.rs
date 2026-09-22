@@ -576,15 +576,14 @@ pub fn apply_tool_call_repair_to_result(
     // rewrite the first entry twice.
     let target_index = calls
         .iter()
-        .position(|call| {
-            call.get("tool_call_id").and_then(Value::as_str) == Some(tool_call_id)
-        })
+        .position(|call| call.get("tool_call_id").and_then(Value::as_str) == Some(tool_call_id))
         .ok_or_else(|| {
             AiMuxError::InvalidArgument(format!("result: no tool call '{tool_call_id}'"))
         })?;
-    if calls[target_index + 1..].iter().any(|call| {
-        call.get("tool_call_id").and_then(Value::as_str) == Some(tool_call_id)
-    }) {
+    if calls[target_index + 1..]
+        .iter()
+        .any(|call| call.get("tool_call_id").and_then(Value::as_str) == Some(tool_call_id))
+    {
         return Err(AiMuxError::InvalidArgument(format!(
             "result: tool call id '{tool_call_id}' is not unique"
         )));
