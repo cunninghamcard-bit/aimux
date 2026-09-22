@@ -146,6 +146,63 @@ class ToolCallRepairTest {
         }
     }
 
+    /**
+     * The host loop's non-happy branches: what a hook's two failure modes do
+     * to the call, and the two cases where the hook must not run at all.
+     */
+    @Test
+    fun `a throwing hook wraps, a null hook preserves, and valid or untooled calls skip repair`() {
+        val invalidCall = openAiToolCall("""{"town":"Singapore"}""")
+        var hookCalls = 0
+
+        model().use { model ->
+            // Throwing means "repair failed": the call stays invalid and the
+            // original failure is kept under the ToolCallRepair wrapper.
+            server.responseBody = invalidCall
+            var call = model.generateText(
+                "weather in Singapore?",
+                options { hookCalls++; throw RuntimeException("repair model unavailable") },
+            ).toolCalls.single()
+            assertThat(hookCalls).isEqualTo(1)
+            assertThat(call.invalid).isEqualTo(true)
+            val repairError = call.error!!.jsonObject["ToolCallRepair"]!!.jsonObject
+            assertThat(repairError["cause"]!!.jsonObject["Other"]!!.jsonPrimitive.content)
+                .isEqualTo("repair model unavailable")
+            assertThat(repairError["original_error"]!!.jsonObject.keys)
+                .containsExactly("InvalidToolInput")
+
+            // Returning null declines the repair: the ORIGINAL error survives
+            // unwrapped, so the caller cannot tell a decline from no hook.
+            server.responseBody = invalidCall
+            call = model.generateText(
+                "weather in Singapore?",
+                options { hookCalls++; null },
+            ).toolCalls.single()
+            assertThat(hookCalls).isEqualTo(2)
+            assertThat(call.invalid).isEqualTo(true)
+            assertThat(call.error!!.jsonObject.keys).containsExactly("InvalidToolInput")
+
+            // A valid call never reaches the hook.
+            server.responseBody = openAiToolCall("""{"city":"Singapore"}""")
+            call = model.generateText(
+                "weather in Singapore?",
+                options { hookCalls++; null },
+            ).toolCalls.single()
+            assertThat(hookCalls).isEqualTo(2)
+            assertThat(call.invalid).isNotEqualTo(true)
+
+            // Without a tool set the native context is null (AI SDK never
+            // repairs those), so the invalid call is returned as-is.
+            server.responseBody = invalidCall
+            call = model.generateText(
+                "weather in Singapore?",
+                GenerateTextOptions(repairToolCall = { hookCalls++; null }),
+            ).toolCalls.single()
+            assertThat(hookCalls).isEqualTo(2)
+            assertThat(call.invalid).isEqualTo(true)
+        }
+    }
+
     /** The nested generation a repair hook performs: valid arguments as text. */
     private val repairCompletion: String =
         """{"id":"chatcmpl-2","model":"gpt-4o","choices":[{"message":{"role":"assistant",

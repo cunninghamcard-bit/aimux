@@ -86,6 +86,71 @@ void main() {
       throwsStateError,
     );
   });
+
+  // The four host-loop branches the shared fixture cannot reach: whether the
+  // hook runs at all, and what a throw or a null return leaves behind.
+  test('host loop reports a failed repair and skips calls it must not offer',
+      () {
+    int hookCalls = 0;
+    RawToolCall? counting(ToolCallRepairContext context) {
+      hookCalls++;
+      return null;
+    }
+
+    // 1. the hook throws → invalid, wrapped in ToolCallRepair{cause: Other}.
+    final Map<String, dynamic> patch =
+        _named('patch_result')['input'] as Map<String, dynamic>;
+    final Map<String, dynamic> invalidCall =
+        _firstCall(patch['result'] as Map<String, dynamic>);
+    final Map<String, dynamic> failed = repairResultToolCalls(
+      _result(_copy(invalidCall)),
+      'weather in Singapore?',
+      // A bare String, not an Exception: the core records the thrown object's
+      // toString(), and an Exception would prefix it with "Exception: ".
+      _options(patch['opts'] as Map<String, dynamic>, (_) {
+        hookCalls++;
+        throw 'repair model unavailable';
+      }),
+    );
+    final Map<String, dynamic> failedCall = _firstCall(failed);
+    final Map<String, dynamic> wrapped =
+        (failedCall['error'] as Map<String, dynamic>)['ToolCallRepair']
+            as Map<String, dynamic>;
+    expect(failedCall['invalid'], isTrue);
+    expect(wrapped['cause'], {'Other': 'repair model unavailable'});
+    expect(wrapped['original_error'], invalidCall['error']);
+
+    // 2. the hook returns null → the ORIGINAL error survives, unwrapped.
+    final Map<String, dynamic> kept = repairResultToolCalls(
+      _result(_copy(invalidCall)),
+      'weather in Singapore?',
+      _options(patch['opts'] as Map<String, dynamic>, counting),
+    );
+    expect(_firstCall(kept)['invalid'], isTrue);
+    expect(_firstCall(kept)['error'], invalidCall['error']);
+    expect(hookCalls, 2);
+
+    // 3. a valid call is never offered to the hook.
+    final Map<String, dynamic> valid =
+        _named('reject_valid_tool_call')['input'] as Map<String, dynamic>;
+    final Map<String, dynamic> untouched = repairResultToolCalls(
+      _result(_copy(valid['tool_call'] as Map<String, dynamic>)),
+      'weather in Singapore?',
+      _options(valid['opts'] as Map<String, dynamic>, counting),
+    );
+    expect(_firstCall(untouched)['invalid'], isNull);
+
+    // 4. no tool set → the native context answers null and the host skips.
+    final Map<String, dynamic> noTools =
+        _named('context_without_tools')['input'] as Map<String, dynamic>;
+    final Map<String, dynamic> skipped = repairResultToolCalls(
+      _result(_copy(noTools['tool_call'] as Map<String, dynamic>)),
+      'weather in Singapore?',
+      _options(noTools['opts'] as Map<String, dynamic>, counting),
+    );
+    expect(_firstCall(skipped)['invalid'], isTrue);
+    expect(hookCalls, 2);
+  });
 }
 
 String _invoke(String function, Map<String, dynamic> input) {
@@ -140,6 +205,12 @@ Map<String, dynamic> _result(Map<String, dynamic> call) => {
       'tool_name': call['tool_name'], 'input': call['input']}
   ]}]
 };
+
+Map<String, dynamic> _firstCall(Map<String, dynamic> result) =>
+    (result['tool_calls'] as List).first as Map<String, dynamic>;
+
+Map<String, dynamic> _copy(Map<String, dynamic> json) =>
+    jsonDecode(jsonEncode(json)) as Map<String, dynamic>;
 
 Map<String, dynamic> _named(String name) =>
     _cases.singleWhere((fixture) => fixture['name'] == name);

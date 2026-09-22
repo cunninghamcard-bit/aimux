@@ -12,6 +12,7 @@ from aimux import (
     stream_text,
     tool_call_repair_context,
 )
+from aimux import wrapper as typed
 from test_e2e import MockServer, OPENAI_TOOL_CALL
 
 WEATHER_SCHEMA = {
@@ -21,6 +22,8 @@ WEATHER_SCHEMA = {
     "additionalProperties": False,
 }
 TOOLS = [{"type": "function", "name": "get_weather", "input_schema": WEATHER_SCHEMA}]
+# The same canned response, with arguments the schema accepts.
+VALID_TOOL_CALL = OPENAI_TOOL_CALL.replace("location", "city")
 TOOL_CALL_STREAM = (
     'data: {"id":"1","model":"gpt-4o","choices":[{"delta":{"role":"assistant",'
     '"tool_calls":[{"index":0,"id":"call_s1","type":"function",'
@@ -103,3 +106,51 @@ def test_stream_repairs_tool_call_and_preserves_deltas():
     assert calls[0]["input"] == {"city": "Tokyo"}
     deltas = "".join(part["ToolInputDelta"]["delta"] for part in parts if "ToolInputDelta" in part)
     assert deltas == '{"location":"Tokyo"}'
+
+
+def _raise(_context):
+    raise RuntimeError("repair model unavailable")
+
+
+def _typed_repair(context):
+    return context.tool_call.model_copy(update={"input": '{"city":"Tokyo"}'})
+
+
+def test_repair_loop_branches():
+    """Host-loop branches the shared fixture cannot reach, on the typed layer."""
+    cases = [
+        # name, response, with_tools, hook, expected hook invocations, error check
+        ("raises", OPENAI_TOOL_CALL, True, _raise, 1, lambda e: (
+            e["ToolCallRepair"]["cause"] == {"Other": "repair model unavailable"}
+            and "InvalidToolInput" in e["ToolCallRepair"]["original_error"]
+        )),
+        ("returns None", OPENAI_TOOL_CALL, True, lambda ctx: None, 1,
+         lambda e: set(e) == {"InvalidToolInput"}),
+        ("valid call", VALID_TOOL_CALL, True, _typed_repair, 0, None),
+        ("no tools", OPENAI_TOOL_CALL, False, _typed_repair, 0,
+         lambda e: set(e) == {"NoSuchTool"}),
+    ]
+
+    for name, response, with_tools, hook, invocations, check_error in cases:
+        seen = []
+
+        def spy(context, hook=hook, seen=seen):
+            seen.append(context)
+            return hook(context)
+
+        tools = [typed.FunctionTool(name="get_weather", input_schema=WEATHER_SCHEMA)]
+        options = typed.GenerateTextOptions(
+            tools=tools if with_tools else None,
+            repair_tool_call=spy,
+        )
+        with MockServer(response) as mock:
+            model = openai("test-key", "gpt-4o", mock.url)
+            result = typed.generate_text(model, "What's the weather in Tokyo?", options)
+
+        assert len(seen) == invocations, name
+        call = result.tool_calls[0]
+        if check_error is None:
+            assert not call.invalid and call.input == {"city": "Tokyo"}, name
+        else:
+            assert call.invalid is True, name
+            assert check_error(call.error), (name, call.error)

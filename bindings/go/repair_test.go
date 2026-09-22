@@ -170,3 +170,93 @@ func TestRepairStreamReplacesToolCallPart(t *testing.T) {
 		t.Errorf("provider deltas were changed: %s", got)
 	}
 }
+
+// TestRepairHostLoopBranches covers the non-happy branches of the Go repair
+// loop: a repair function that fails, one that declines, and the two cases
+// where the loop must never reach it at all.
+func TestRepairHostLoopBranches(t *testing.T) {
+	cityToolCallResponse := strings.Replace(townToolCallResponse, `\"town\"`, `\"city\"`, 1)
+
+	cases := []struct {
+		name        string
+		response    string
+		noTools     bool
+		hook        RepairToolCallFunc
+		wantHits    int
+		wantInvalid bool
+		wantErrKey  string // top-level key of tool_calls[0].error; "" skips the check
+		wantCause   string // ToolCallRepair.cause.Other
+	}{
+		{name: "failed repair wraps the original error", response: townToolCallResponse,
+			hook:     func(*ToolCallRepairContext) (*RawToolCall, error) { return nil, errors.New("repair model unavailable") },
+			wantHits: 1, wantInvalid: true, wantErrKey: "ToolCallRepair", wantCause: "repair model unavailable"},
+		{name: "nil repair keeps the original error", response: townToolCallResponse,
+			hook:     func(*ToolCallRepairContext) (*RawToolCall, error) { return nil, nil },
+			wantHits: 1, wantInvalid: true, wantErrKey: "InvalidToolInput"},
+		{name: "valid call never reaches repair", response: cityToolCallResponse,
+			hook: toCity, wantHits: 0, wantInvalid: false},
+		{name: "call without a tool set never reaches repair", response: townToolCallResponse,
+			noTools: true, hook: toCity, wantHits: 0, wantInvalid: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newMockServer()
+			defer srv.Close()
+			srv.SetResponse(tc.response)
+			m := OpenAIWithBase("sk-test-fake-key", "gpt-4o", srv.URL)
+			defer m.Close()
+
+			hits := 0
+			opts := strictWeatherOpts(func(ctx *ToolCallRepairContext) (*RawToolCall, error) {
+				hits++
+				return tc.hook(ctx)
+			})
+			if tc.noTools {
+				opts.Tools = nil
+			}
+			result, err := m.Generate("weather in Singapore?", opts)
+			if err != nil {
+				t.Fatalf("Generate: %v", err)
+			}
+			if hits != tc.wantHits {
+				t.Fatalf("repair invoked %d times, want %d", hits, tc.wantHits)
+			}
+			if len(result.ToolCalls) != 1 {
+				t.Fatalf("expected 1 tool call, got %+v", result.ToolCalls)
+			}
+			call := result.ToolCalls[0]
+			if invalid := call.Invalid != nil && *call.Invalid; invalid != tc.wantInvalid {
+				t.Fatalf("invalid = %v, want %v (error %s)", invalid, tc.wantInvalid, call.Error)
+			}
+			if tc.wantErrKey == "" {
+				return
+			}
+			var errObj map[string]json.RawMessage
+			if err := json.Unmarshal(call.Error, &errObj); err != nil {
+				t.Fatalf("decode call error %s: %v", call.Error, err)
+			}
+			if _, ok := errObj[tc.wantErrKey]; !ok || len(errObj) != 1 {
+				t.Fatalf("expected a lone %s error, got %s", tc.wantErrKey, call.Error)
+			}
+			if tc.wantCause == "" {
+				return
+			}
+			var wrap struct {
+				OriginalError map[string]json.RawMessage `json:"original_error"`
+				Cause         struct {
+					Other string `json:"Other"`
+				} `json:"cause"`
+			}
+			if err := json.Unmarshal(errObj["ToolCallRepair"], &wrap); err != nil {
+				t.Fatalf("decode ToolCallRepair: %v", err)
+			}
+			if wrap.Cause.Other != tc.wantCause {
+				t.Fatalf("cause = %q, want Other = %q", wrap.Cause.Other, tc.wantCause)
+			}
+			if _, ok := wrap.OriginalError["InvalidToolInput"]; !ok {
+				t.Fatalf("original_error is not InvalidToolInput: %s", errObj["ToolCallRepair"])
+			}
+		})
+	}
+}

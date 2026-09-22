@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { createServer, type Server } from 'node:http'
 
 import { generateText, openai, streamText } from '../src/index.ts'
-import type { RawToolCall, StreamPart, Tool, ToolCallRepairContext } from '../src/index.ts'
+import type { RawToolCall, RepairToolCall, StreamPart, Tool, ToolCallRepairContext } from '../src/index.ts'
 import {
   applyToolCallRepair,
   applyToolCallRepairToResult,
@@ -140,4 +140,51 @@ test('repair: shared contract fixture', (t) => {
       t.deepEqual(JSON.parse(run(c)), c.expected, c.name)
     }
   }
+})
+
+test('repair: throwing, null, valid, and no-tool-set branches', async (t) => {
+  let calls = 0
+  const generate = async (body: string, repair: RepairToolCall, tools?: Tool[]) => {
+    const { server, url } = await startServer(body)
+    try {
+      const model = await openai('test-key', 'gpt-4o', url)
+      return await generateText(model, 'weather in Singapore?', {
+        tools,
+        repairToolCall: (ctx) => {
+          calls += 1
+          return repair(ctx)
+        },
+      })
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  }
+
+  // Throwing hook: invalid, wrapped in ToolCallRepair over the original error.
+  const thrown = await generate(INVALID_TOOL_CALL, () => {
+    throw new Error('repair model unavailable')
+  }, [weatherTool])
+  t.is(calls, 1)
+  t.is(thrown.tool_calls[0].invalid, true)
+  const failure = (thrown.tool_calls[0].error as any).ToolCallRepair
+  t.deepEqual(failure.cause, { Other: 'repair model unavailable' })
+  t.true('InvalidToolInput' in failure.original_error)
+
+  // Hook returns null: invalid with the ORIGINAL error, no repair wrapper.
+  const unchanged = await generate(INVALID_TOOL_CALL, () => null, [weatherTool])
+  t.is(calls, 2)
+  t.is(unchanged.tool_calls[0].invalid, true)
+  t.deepEqual(Object.keys(unchanged.tool_calls[0].error as any), ['InvalidToolInput'])
+
+  // A valid call never reaches the hook.
+  const valid = await generate(INVALID_TOOL_CALL.replace('town', 'city'), fixCity, [weatherTool])
+  t.is(calls, 2)
+  t.falsy(valid.tool_calls[0].invalid)
+  t.deepEqual(valid.tool_calls[0].input, { city: 'Singapore' })
+
+  // No tool set: not repairable, the hook is skipped, the call stays invalid.
+  const untooled = await generate(INVALID_TOOL_CALL, fixCity)
+  t.is(calls, 2)
+  t.is(untooled.tool_calls[0].invalid, true)
+  t.deepEqual(Object.keys(untooled.tool_calls[0].error as any), ['NoSuchTool'])
 })

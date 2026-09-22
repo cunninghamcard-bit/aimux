@@ -14,6 +14,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
@@ -149,6 +150,65 @@ class ToolCallRepairTest {
                     .map(p -> ((Types.StreamPart.ToolInputDelta) p).getDelta())
                     .collect(Collectors.joining())).contains("city");
             }
+        }
+    }
+
+    @Test
+    void theRepairLoopHandlesThrowNullValidCallAndNoToolSet() {
+        try (MockProviderServer server = new MockProviderServer();
+             TypedModel model =
+                 TypedModel.openaiWithBase("sk-test-fake-key", "gpt-4o", server.baseUrl())) {
+            final AtomicInteger hookCalls = new AtomicInteger();
+            ToolCallRepair countingNull = context -> {
+                hookCalls.incrementAndGet();
+                return null;
+            };
+
+            // The hook throws: ToolCallRepair { original_error, cause: Other }.
+            server.setResponseBody(toolCallResponse("{\"city\":\"Tokyo\"}"));
+            Types.ToolCall call = model.generateText("What is the weather in Tokyo?",
+                Types.GenerateTextOptions.builder()
+                    .tools(Collections.singletonList(strictWeatherTool()))
+                    .repairToolCall(context -> {
+                        hookCalls.incrementAndGet();
+                        throw new IllegalStateException("repair model unavailable");
+                    })
+                    .build()).getToolCalls().get(0);
+            assertThat(call.getInvalid()).isTrue();
+            JsonNode failure = call.getError().path("ToolCallRepair");
+            assertThat(failure.path("cause").path("Other").asText()).isEqualTo("repair model unavailable");
+            assertThat(failure.path("original_error").has("InvalidToolInput")).isTrue();
+            assertThat(hookCalls.get()).isEqualTo(1);
+
+            // The hook returns null: the ORIGINAL error, not wrapped in ToolCallRepair.
+            server.setResponseBody(toolCallResponse("{\"city\":\"Tokyo\"}"));
+            call = model.generateText("What is the weather in Tokyo?",
+                Types.GenerateTextOptions.builder()
+                    .tools(Collections.singletonList(strictWeatherTool()))
+                    .repairToolCall(countingNull)
+                    .build()).getToolCalls().get(0);
+            assertThat(call.getInvalid()).isTrue();
+            assertThat(call.getError().has("ToolCallRepair")).isFalse();
+            assertThat(call.getError().has("InvalidToolInput")).isTrue();
+            assertThat(hookCalls.get()).isEqualTo(2);
+
+            // A valid call never reaches the hook.
+            server.setResponseBody(toolCallResponse("{\"location\":\"Tokyo\"}"));
+            call = model.generateText("What is the weather in Tokyo?",
+                Types.GenerateTextOptions.builder()
+                    .tools(Collections.singletonList(strictWeatherTool()))
+                    .repairToolCall(countingNull)
+                    .build()).getToolCalls().get(0);
+            assertThat(call.getInvalid()).isNull();
+            assertThat(hookCalls.get()).isEqualTo(2);
+
+            // No tool set: the native context answers null, so the host skips the hook.
+            server.setResponseBody(toolCallResponse("{\"city\":\"Tokyo\"}"));
+            call = model.generateText("What is the weather in Tokyo?",
+                Types.GenerateTextOptions.builder().repairToolCall(countingNull).build())
+                .getToolCalls().get(0);
+            assertThat(call.getInvalid()).isTrue();
+            assertThat(hookCalls.get()).isEqualTo(2);
         }
     }
 

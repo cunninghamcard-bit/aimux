@@ -93,6 +93,51 @@ final class ToolCallRepairTests: XCTestCase {
             return invalid != true && input["city"]?.stringValue == "Singapore"
         } else { return false } })
     }
+
+    /// The four host-loop branches around the repair closure, which the shared
+    /// fixture (pure native functions only) never reaches.
+    func testHostLoopBranchesAroundRepairClosure() throws {
+        struct RepairUnavailable: LocalizedError {
+            let errorDescription: String? = "repair model unavailable"
+        }
+        var calls = 0
+        /// One `generateText` against a fresh server; the counter is re-armed
+        /// per sub-case, as is the mock (it has no setter for its response).
+        func run(_ response: [String: Any], tools: Bool = true,
+                 _ repair: @escaping RepairToolCall) throws -> ToolCall {
+            calls = 0
+            let hooked: RepairToolCall = { calls += 1; return try repair($0) }
+            let server = MockHTTPServer(response: .json(response))
+            try server.start(); defer { server.stop() }
+            return try Model.openai(apiKey: "test", modelId: "gpt-4o", baseUrl: server.baseURL)
+                .generateText(prompt: .text("weather?"),
+                              options: tools ? options(hooked)
+                                             : GenerateTextOptions(repairToolCall: hooked))
+                .toolCalls[0]
+        }
+
+        let thrown = try run(invalidResponse) { _ in throw RepairUnavailable() }
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(thrown.invalid, true)
+        XCTAssertEqual(thrown.error?["ToolCallRepair"]?["cause"]?["Other"]?.stringValue,
+                       "repair model unavailable")
+        XCTAssertNotNil(thrown.error?["ToolCallRepair"]?["original_error"]?["InvalidToolInput"])
+
+        let unchanged = try run(invalidResponse) { _ in nil }
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(unchanged.invalid, true)
+        XCTAssertNil(unchanged.error?["ToolCallRepair"])
+        XCTAssertNotNil(unchanged.error?["InvalidToolInput"])
+
+        let valid = try run(validResponse) { _ in nil }
+        XCTAssertEqual(calls, 0)
+        XCTAssertNotEqual(valid.invalid, true)
+        XCTAssertEqual(valid.input["city"]?.stringValue, "Singapore")
+
+        let untooled = try run(invalidResponse, tools: false) { _ in nil }
+        XCTAssertEqual(calls, 0)
+        XCTAssertEqual(untooled.invalid, true)
+    }
 }
 
 private func streamParts(responses: [MockResponse],
@@ -126,6 +171,11 @@ private func json(_ value: Any) -> String {
 private let invalidResponse: [String: Any] = ["id": "1", "model": "gpt-4o", "choices": [[
     "message": ["role": "assistant", "content": NSNull(), "tool_calls": [["id": "call-1", "type": "function",
         "function": ["name": "weather", "arguments": #"{"town":"Singapore"}"#]]]], "finish_reason": "tool_calls"]],
+    "usage": ["prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2]]
+
+private let validResponse: [String: Any] = ["id": "1", "model": "gpt-4o", "choices": [[
+    "message": ["role": "assistant", "content": NSNull(), "tool_calls": [["id": "call-1", "type": "function",
+        "function": ["name": "weather", "arguments": #"{"city":"Singapore"}"#]]]], "finish_reason": "tool_calls"]],
     "usage": ["prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2]]
 
 private let repairResponse: [String: Any] = ["id": "2", "model": "gpt-4o", "choices": [[
