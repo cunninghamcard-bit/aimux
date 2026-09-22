@@ -82,7 +82,8 @@ class ToolCallRepairTest {
             }
             if (case["expected_error"] != null) {
                 assertThat(case["expected_error"]!!.jsonPrimitive.content).isEqualTo("InvalidArgument")
-                assertThatThrownBy(invoke).describedAs(name).isInstanceOf(InvalidArgumentError::class.java)
+                assertThatThrownBy { invoke() }.describedAs(name)
+                    .isInstanceOf(InvalidArgumentError::class.java)
             } else {
                 assertThat(AimuxJson.parseToJsonElement(invoke())).describedAs(name)
                     .isEqualTo(case["expected"]!!)

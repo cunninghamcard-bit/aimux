@@ -133,9 +133,9 @@ private let streamBody = [
     ["id": "1", "model": "gpt-4o", "choices": [["delta": ["role": "assistant", "tool_calls": [["index": 0,
         "id": "call-1", "type": "function", "function": ["name": "weather", "arguments": ""]]]]]]],
     ["id": "1", "model": "gpt-4o", "choices": [["delta": ["tool_calls": [["index": 0,
-        "function": ["arguments": #"{"town":"#]]]]]]]],
+        "function": ["arguments": "{\"town\":" ]]]]]]]],
     ["id": "1", "model": "gpt-4o", "choices": [["delta": ["tool_calls": [["index": 0,
-        "function": ["arguments": #""Singapore"}"#]]]]]]]],
+        "function": ["arguments": "\"Singapore\"}"]]]]]]]],
     ["id": "1", "model": "gpt-4o", "choices": [["delta": [String: Any](), "finish_reason": "tool_calls"]],
         "usage": ["prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2]],
 ].map { "data: " + json($0) }.joined(separator: "\n\n") + "\n\ndata: [DONE]\n\n"
