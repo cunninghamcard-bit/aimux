@@ -85,7 +85,7 @@ AI SDK 的规则是"没给工具集的调用从不修复",宿主看到 `null` �
 | `unchanged` | `Ok(None)` | 保留原始 error 的非法调用 |
 | `failed` | `Err(e)` | `ToolCallRepair { original_error, cause: Other(message) }` |
 
-`failed` 的 `cause` 只能是 `Other`:宿主语言的异常在这一侧没有类型对应物。
+`failed` 的 `cause` 只能是 `Other`:宿主语言的异常在这一侧没有类型对应物。 `message` 是宿主语言对该异常的常规文本表示:Node 复刻 AI SDK 的 `getErrorMessage`(字符串原样,`Error` 取 `toString()`,其余 JSON 序列化),其他语言用各自惯用的 message 访问器,Dart 没有通用访问器则用 `toString()`。控制流与 AI SDK `parseToolCall` 逐条一致:无工具集不进修复;抛错包成 `ToolCallRepair`;返回空保留原错误;修复结果重新校验,再失败也包成 `ToolCallRepair`。
 
 ### 3.3 结果补丁(`apply_tool_call_repair_to_result`)
 

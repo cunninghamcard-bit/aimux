@@ -167,7 +167,7 @@ test('repair: throwing, null, valid, and no-tool-set branches', async (t) => {
   t.is(calls, 1)
   t.is(thrown.tool_calls[0].invalid, true)
   const failure = (thrown.tool_calls[0].error as any).ToolCallRepair
-  t.deepEqual(failure.cause, { Other: 'repair model unavailable' })
+  t.deepEqual(failure.cause, { Other: 'Error: repair model unavailable' })
   t.true('InvalidToolInput' in failure.original_error)
 
   // Hook returns null: invalid with the ORIGINAL error, no repair wrapper.

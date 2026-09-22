@@ -219,6 +219,18 @@ export type GenerateTextOptionsWithRepair = GenerateTextOptions & {
 }
 
 /**
+ * The AI SDK's `getErrorMessage`, so a thrown value renders exactly as it
+ * would in the SDK's own `ToolCallRepairError` message: strings verbatim,
+ * `Error` instances via `toString()` (name included), anything else as JSON.
+ */
+function errorMessage(e: unknown): string {
+  if (e == null) return 'unknown error'
+  if (typeof e === 'string') return e
+  if (e instanceof Error) return e.toString()
+  return JSON.stringify(e)
+}
+
+/**
  * Run the user's repair function for one invalid call and turn its outcome
  * into the wire reply. Returns `null` when the call is not repairable at all
  * (no tool set — the AI SDK rule, decided in core).
@@ -239,7 +251,7 @@ async function repairReplyFor(
     const replacement = await repair(context)
     reply = replacement ? { type: 'repaired', tool_call: replacement } : { type: 'unchanged' }
   } catch (e) {
-    reply = { type: 'failed', message: e instanceof Error ? e.message : String(e) }
+    reply = { type: 'failed', message: errorMessage(e) }
   }
   return JSON.stringify(reply)
 }
