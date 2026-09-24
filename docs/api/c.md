@@ -385,7 +385,19 @@ The OpenAI-compatible output has no equivalent. `ChatCompletion` carries no
 `invalid` / `error` field, so a host cannot tell from it that a call needs
 repairing, and `aimux_stream_text_as_openai` forwards the provider's argument
 deltas verbatim as they arrive (aligned with the AI SDK, which likewise never
-withholds input deltas). Drive repair from `aimux_generate_text`.
+withholds input deltas). Drive repair from `aimux_generate_text`, then convert
+the patched result:
+
+```c
+// [AiMuxError] GenerateTextResult JSON → ChatCompletion JSON. The handle only
+// supplies the fallback model id; no runtime work.
+aimux_error_t *aimux_generate_text_result_as_openai(uint64_t handle, const char *result_json,
+                                                        char **out_json);
+```
+
+The completion's `tool_calls` then carry the repaired arguments — the same
+output `aimux_generate_text_as_openai` gives a Rust caller with a repair
+closure.
 
 ### Embedding / speech / image / video / rerank / search / files / transcription
 

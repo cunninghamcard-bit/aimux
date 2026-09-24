@@ -233,8 +233,12 @@ while another thread calls `close()`; the lend is valid only while the stream
 thread blocks holding the read lock, and only on the thread the hook is invoked
 on — extra threads the hook starts itself take the lock normally and would
 deadlock against a concurrent `close()`, so call the model from the thread the
-hook is invoked on. **Not** honoured by `generateTextAsOpenAI` / `streamTextAsOpenAI`:
-`ChatCompletion` carries no `invalid` marker. The raw JSON-string `Model` never
+hook is invoked on. Do not call `close()` on the streaming model from inside
+the hook (it deadlocks, as from a stream callback); the stream waits for the
+hook without a timeout. `generateTextAsOpenAI` honours it by repairing the
+native result and converting it (`Model.generateTextResultAsOpenAI`), since a
+`ChatCompletion` carries no `invalid` marker; `streamTextAsOpenAI` does not
+reflect repair. The raw JSON-string `Model` never
 sees typed options; to drive repair from it, call `toolCallRepairContext`,
 `applyToolCallRepair` and `applyToolCallRepairToResult` directly — they are
 pure JSON-in / JSON-out functions.

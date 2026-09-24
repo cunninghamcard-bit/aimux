@@ -278,11 +278,7 @@ final options = GenerateTextOptions(
     // the full tool set, the messages, the instructions.
     if (context.toolCall.toolName != 'weather') return null;
     final wrong = jsonDecode(context.toolCall.input) as Map<String, dynamic>;
-    return RawToolCall(
-      toolCallId: context.toolCall.toolCallId,
-      toolName: context.toolCall.toolName,
-      input: jsonEncode({'city': wrong['town']}),
-    );
+    return context.toolCall.copyWith(input: jsonEncode({'city': wrong['town']}));
   },
 );
 final result = TypedModel(model).generateText('weather in Singapore?', options);
@@ -297,10 +293,15 @@ replacement that still fails schema validation does the same.
 `streamText` repairs the `ToolCall` part in flight — tool-input deltas are
 forwarded verbatim and in order — and is the only entry point that awaits an
 `async` hook; the synchronous ones reject a `Future` with a `StateError`.
-Repair does **not** apply to the OpenAI-format outputs
-(`generateTextAsOpenAI` / `streamTextAsOpenAI`): `ChatCompletion` carries no
-invalid marker and the chunk stream forwards the provider's argument deltas
-verbatim.
+`generateTextAsOpenAI` repairs too: `ChatCompletion` carries no invalid
+marker, so it repairs the native result and converts it
+(`Model.generateTextResultAsOpenAI`). `streamTextAsOpenAI` does not reflect
+repair — the chunk stream forwards the provider's argument deltas verbatim.
+
+`RawToolCall` carries every provider field (`providerExecuted`,
+`thoughtSignature`, `providerMetadata`), and the core adopts a replacement as
+returned — build it with `context.toolCall.copyWith(input: …)` so those
+fields survive the repair.
 
 ## Types
 

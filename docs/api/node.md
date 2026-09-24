@@ -292,9 +292,11 @@ is never repaired.
 
 Both `generateText` and `streamText` support it — in the stream, the settled
 `ToolCall` part is replaced, while `ToolInputDelta` parts are the provider's raw
-text and pass through untouched. It does **not** apply to `generateTextAsOpenai`
-/ `streamTextAsOpenai`: the OpenAI shape carries no `invalid` marker, so there
-is nothing to drive repair from.
+text and pass through untouched. `generateTextAsOpenai` supports it too: the
+OpenAI shape carries no `invalid` marker, so it repairs the native result and
+converts it (`Model.generateTextResultAsOpenai`). `streamTextAsOpenai` does not
+reflect repair — its argument deltas are the provider's text, as in the AI SDK.
+`RawToolCall` and `ToolCallRepairReply` are exported from the package root.
 
 ### Tool Selection Strategy
 

@@ -142,9 +142,15 @@ The same option exists on the typed wrapper's `GenerateTextOptions`, where it
 takes a `ToolCallRepairContext` and returns a `RawToolCall`. It applies to
 `generate_text`, `generate_object`, `consume_stream_text` and `stream_text`
 (which yields the repaired `ToolCall` part; tool-input deltas are the
-provider's own text and pass through untouched). It does **not** apply to the
-OpenAI-format outputs — a `chat.completion` carries no `invalid` marker, so
-there is nothing to drive repair from.
+provider's own text and pass through untouched), and to
+`generate_text_as_openai`: a `chat.completion` carries no `invalid` marker, so
+it repairs the native result and converts it
+(`Model.generate_text_result_as_openai`). `stream_text_as_openai` does not
+reflect repair — its argument deltas are the provider's text, as in the AI SDK.
+
+Only an exception raised by the repair function itself means "failed". An
+error in the binding's own decoding or encoding — including a typed hook that
+returns something other than a `RawToolCall` or `None` — propagates as itself.
 
 ### Tool Selection Strategy
 

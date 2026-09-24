@@ -262,11 +262,12 @@ repaired at most once.
 
 It applies to the typed entry points `Generate`, `GenerateObj`,
 `ConsumeStream` and `Stream` (which delivers the repaired `ToolCall` part;
-input deltas are always forwarded verbatim). It does **not** apply to the
-OpenAI-format outputs `GenerateAsOpenAI` / `StreamAsOpenAI`: a
-`ChatCompletion` carries no invalid marker, so there is nothing to drive
-repair from. The raw JSON-string methods (`GenerateText`, `StreamText`) take
-no options struct and are likewise unaffected.
+input deltas are always forwarded verbatim), and to `GenerateAsOpenAI`: a
+`ChatCompletion` carries no invalid marker, so it repairs the native result
+and converts it (`Model.GenerateTextResultAsOpenAI`). `StreamAsOpenAI` does
+not reflect repair — its argument deltas are the provider's text, as in the
+AI SDK. The raw JSON-string methods (`GenerateText`, `StreamText`) take no
+options struct and are likewise unaffected.
 
 ## Vector Embedding
 

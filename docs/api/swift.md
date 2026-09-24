@@ -138,7 +138,7 @@ JSON literal `"null"` for a call made without tools),
 | `generateText` | `func generateText(prompt: String, options: String? = nil) throws -> String` | Non-streaming; returns `GenerateResult` JSON |
 | `streamText` | `func streamText(prompt: String, options: String? = nil, onPart: @escaping (String) -> Void, onDone: @escaping () -> Void, onError: @escaping (any Error) -> Void)` | Streaming via push callbacks |
 | `streamTextAsync` | `func streamTextAsync(prompt: String, options: String? = nil) -> AsyncThrowingStream<String, Error>` | Streaming as an `AsyncSequence` |
-| `repairToolCall` | `var repairToolCall: RepairToolCall?` on `GenerateTextOptions`, i.e. `(ToolCallRepairContext) throws -> RawToolCall?` | One-shot host-side repair of invalid tool calls (see above); not available for OpenAI-format output |
+| `repairToolCall` | `var repairToolCall: RepairToolCall?` on `GenerateTextOptions`, i.e. `(ToolCallRepairContext) throws -> RawToolCall?` | One-shot host-side repair of invalid tool calls (see above); `generateTextAsOpenAI` repairs the native result then converts it, `streamTextAsOpenAI` does not reflect repair |
 | `generate` | `func generate(prompt: String, options: [String: Any]? = nil) throws -> [String: Any]` | Convenience: parses `generateText` into a dictionary |
 | `Model.initRecording` | `static func initRecording(dir: String) throws` | Start JSONL recording; throws `RecordingError` (`.initFailed` / `.openFile` / `.spawn`) when the recorder cannot be constructed; the previous recorder stays in place |
 | `Model.recordingTryFlush` | `static func recordingTryFlush() throws` | Checked recorder flush; throws `RecordingError` (own type, see below). Legacy `recordingFlush()` stays and never reports |

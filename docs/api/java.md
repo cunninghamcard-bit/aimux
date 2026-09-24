@@ -297,12 +297,17 @@ Types.ToolCall call = model.generateText("Weather in Tokyo?", options)
 - Called at most once per tool call, never for a valid one, and never when the
   options carry no tool set.
 - Applies to `TypedModel` `generateText` / `generateObject` /
-  `consumeStreamText` / `streamText` / `streamTextStream`. It is never
-  serialized into the options JSON, and it does **not** apply to the
-  OpenAI-format outputs (`generateTextAsOpenAI` / `streamTextAsOpenAI`), whose
-  wire shape carries no invalid marker. On the stream the repaired
+  `consumeStreamText` / `streamText` / `streamTextStream`, and to
+  `generateTextAsOpenAI`, which repairs the native result and converts it
+  (`Model.generateTextResultAsOpenAI`) because a `ChatCompletion` carries no
+  invalid marker. It is never serialized into the options JSON.
+  `streamTextAsOpenAI` does not reflect repair. On the stream the repaired
   `StreamPart.ToolCall` replaces the original; tool input deltas are forwarded
   verbatim, repair or not.
+- If a stream repair fails at the boundary (not in the hook), `onError` is
+  told and the unrepaired part is still delivered. The stream waits for the
+  hook without a timeout, and calling `close()` on the streaming model from
+  inside the hook deadlocks, as it does from a stream callback.
 
 ## TypedModel
 

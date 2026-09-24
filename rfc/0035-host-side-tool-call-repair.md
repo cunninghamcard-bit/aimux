@@ -100,16 +100,16 @@ AI SDK 的规则是"没给工具集的调用从不修复",宿主看到 `null` �
 理由是与 AI SDK 对齐:上游**永远**立即转发工具输入增量,不会因为配置了修复就扣住。扣住还带来两个真实代价——首字节延迟变差,以及一个只在"配了 repair"时才走的独立代码路径。
 `stream_text_as_openai` 的 rustdoc 现在写明:增量是 provider 原文,需要修复后的调用请用非流式 OpenAI 输出或原生 `stream_text`。
 
-非流式 `ChatCompletion` 同样**不提供**补丁函数:它不携带 `invalid` / `error`,宿主根本无从判断哪个调用需要修——修复只能由原生结果驱动。
+非流式 `ChatCompletion` 同样**不提供**补丁函数:它不携带 `invalid` / `error`,宿主根本无从判断哪个调用需要修——修复只能由原生结果驱动。为此 core 把 `generate_text_as_openai` 拆出纯转换函数 `generate_text_result_to_chat_completion`,C ABI 导出为 `aimux_generate_text_result_as_openai(handle, result_json, &out)`(handle 只提供 `ChatCompletion.model` 的回退值,不做任何运行时工作)。绑定的 `generateTextAsOpenAI` 在配了钩子时改走:原生 `generate_text` → 宿主修复循环 → 转换,得到的 `tool_calls` 是修复后的参数,与 Rust 调用方拿到的一致;不配钩子时仍走原来的一步调用。
 
 ## 5. 暴露面
 
 | 层 | 名字 |
 |---|---|
 | core | `tool_call_repair_inputs` / `tool_call_repair_context` / `apply_tool_call_repair` / `apply_tool_call_repair_to_result` / `ToolCallRepairReply` |
-| C ABI | `aimux_tool_call_repair_context` / `aimux_apply_tool_call_repair` / `aimux_apply_tool_call_repair_to_result` |
-| Node | `toolCallRepairContext` / `applyToolCallRepair` / `applyToolCallRepairToResult` |
-| Python | 同 core 名 |
+| C ABI | `aimux_tool_call_repair_context` / `aimux_apply_tool_call_repair` / `aimux_apply_tool_call_repair_to_result`;OpenAI 转换 `aimux_generate_text_result_as_openai` |
+| Node | `toolCallRepairContext` / `applyToolCallRepair` / `applyToolCallRepairToResult`;`Model.generateTextResultAsOpenai` |
+| Python | 同 core 名;`Model.generate_text_result_as_openai` |
 
 全部同步、纯函数:无 tokio、无 I/O、无全局状态。因此它们**不经过 `ffi_block_on`**,也就不会触发重入保护——从 `aimux_stream_text` 回调里调用是安全的。
 
@@ -118,3 +118,11 @@ AI SDK 的规则是"没给工具集的调用从不修复",宿主看到 `null` �
 ## 6. 契约
 
 `contract-tests/fixtures/tool-call-repair.json` 固定每个分支的输入/期望输出,P2 的七家绑定对同一份文件断言。Rust 侧 `contract_fixture_matches_the_implementation` 回放同一份文件,防止其漂移。
+
+## 7. 宿主循环的边界行为
+
+- **钩子抛错不是流错误**:它是 `failed` 答复,core 把调用标成 `ToolCallRepair` 错误,照常作为数据投递。
+- **边界失败**(解不开 context、FFI 拒绝答复这类绑定或 core 自身的 bug)在流中各绑定行为不同,均为既定行为:Java / Kotlin 先调 `onError` 再投递未修复的原 part;Swift 调 `onError` 后流继续;Python / Go / Node / Dart 终止流。所有绑定都不会静默丢弃这个调用。
+- **流等待钩子,不设超时**(与 AI SDK 一致):钩子挂起,流就挂起。Swift 在钩子运行期间 abort 不生效,钩子返回后才生效。
+- **JVM**:钩子运行在借用了流读锁的工作线程上(daemon),可以回调同一个 Model;但在钩子里对正在流式输出的同一个 Model 调 `close()` 会死锁,与在流回调里调 `close()` 相同。
+- **Swift / JVM 的线程跳转**必须是真正的新线程:GCD 的 `sync` 在可能时就地执行 block,会把钩子留在受重入保护的回调线程上(`AIMUX_E_FFI_REENTRANT_CALL`)。
