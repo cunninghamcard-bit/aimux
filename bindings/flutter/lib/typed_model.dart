@@ -139,8 +139,7 @@ class TypedModel {
     String prompt, [
     GenerateTextOptions? options,
   ]) {
-    final result = _raw.generateTextAsOpenAI(prompt, options?.toJson());
-    return ChatCompletion.fromJson(result);
+    return _generateTextAsOpenAI(prompt, options);
   }
 
   /// Generate text from a list of typed [ModelMessage]s with OpenAI Chat
@@ -150,8 +149,21 @@ class TypedModel {
     GenerateTextOptions? options,
   ]) {
     final prompt = messages.map((m) => m.toJson()).toList();
-    final result = _raw.generateTextAsOpenAI(prompt, options?.toJson());
-    return ChatCompletion.fromJson(result);
+    return _generateTextAsOpenAI(prompt, options);
+  }
+
+  /// A [ChatCompletion] has no invalid marker to repair from, so with a
+  /// [GenerateTextOptions.repairToolCall] the native result is generated,
+  /// repaired, then converted — its tool calls carry the repaired arguments.
+  ChatCompletion _generateTextAsOpenAI(
+      Object prompt, GenerateTextOptions? options) {
+    if (options?.repairToolCall == null) {
+      return ChatCompletion.fromJson(
+          _raw.generateTextAsOpenAI(prompt, options?.toJson()));
+    }
+    final result = repairResultToolCalls(
+        _raw.generateText(prompt, options!.toJson()), prompt, options);
+    return ChatCompletion.fromJson(_raw.generateTextResultAsOpenAI(result));
   }
 
   /// Stream text with OpenAI Chat Completions output, yielding typed

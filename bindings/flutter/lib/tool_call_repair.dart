@@ -102,8 +102,30 @@ Map<String, dynamic> _replyFor(RawToolCall? replacement) => replacement == null
 
 /// A thrown object has no typed counterpart in the core, so it becomes
 /// `failed` — the core turns that into `ToolCallRepair{cause: Other(message)}`.
+///
+/// The message is the thrown object's `toString()`, which the caller does not
+/// control the way it controls a replacement call — so an unpaired surrogate
+/// in it is replaced rather than rejected by [encodeJson].
 Map<String, dynamic> _failedReply(Object error) =>
-    {'type': 'failed', 'message': '$error'};
+    {'type': 'failed', 'message': _withoutLoneSurrogates('$error')};
+
+String _withoutLoneSurrogates(String s) {
+  bool isHigh(int unit) => unit >= 0xD800 && unit <= 0xDBFF;
+  bool isLow(int unit) => unit >= 0xDC00 && unit <= 0xDFFF;
+  final units = s.codeUnits;
+  final out = <int>[];
+  for (var i = 0; i < units.length; i++) {
+    final unit = units[i];
+    if (isHigh(unit) && i + 1 < units.length && isLow(units[i + 1])) {
+      out
+        ..add(unit)
+        ..add(units[++i]);
+    } else {
+      out.add(isHigh(unit) || isLow(unit) ? 0xFFFD : unit);
+    }
+  }
+  return String.fromCharCodes(out);
+}
 
 /// The synchronous entry points cannot await, so a [Future] return is a
 /// programming error rather than a repair failure and must not be swallowed
@@ -164,7 +186,7 @@ Map<String, dynamic> repairResultToolCalls(
         jsonEncode(current),
         optsJson,
         call['tool_call_id'] as String,
-        jsonEncode(reply),
+        encodeJson(reply, 'repairToolCall reply'),
         'apply_tool_call_repair_to_result')) as Map<String, dynamic>;
   }
   return current;
@@ -219,7 +241,7 @@ Stream<Map<String, dynamic>> repairStreamToolCalls(
     }
 
     final patched = _call3(_applyRepair, jsonEncode(call), optsJson,
-        jsonEncode(reply), 'apply_tool_call_repair');
+        encodeJson(reply, 'repairToolCall reply'), 'apply_tool_call_repair');
     return {'ToolCall': jsonDecode(patched)};
   });
 }

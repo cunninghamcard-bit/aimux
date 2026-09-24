@@ -208,29 +208,63 @@ class RawToolCall {
   /// The provider's raw argument text (e.g. `'{"city":"Singapore"}'`).
   final String input;
 
+  /// Whether the provider executes the call itself. The core adopts the
+  /// replacement as returned, so a hook must carry this over (as
+  /// `copyWith` does) or the call turns into a client-executed one.
+  final bool? providerExecuted;
+
   /// Whether the call targets a dynamic tool. `dynamic` is a Dart built-in
   /// identifier, so the field is `isDynamic` and maps to the `dynamic` key.
   final bool? isDynamic;
+
+  /// Provider-assigned thought signature (e.g. Gemini `thoughtSignature`),
+  /// echoed back verbatim on the next turn.
+  final String? thoughtSignature;
+
+  /// Additional provider-specific metadata associated with this call.
+  final dynamic providerMetadata;
 
   const RawToolCall({
     required this.toolCallId,
     required this.toolName,
     required this.input,
+    this.providerExecuted,
     this.isDynamic,
+    this.thoughtSignature,
+    this.providerMetadata,
   });
 
   factory RawToolCall.fromJson(Map<String, dynamic> json) => RawToolCall(
         toolCallId: json['tool_call_id'] as String,
         toolName: json['tool_name'] as String,
         input: json['input'] as String,
+        providerExecuted: json['provider_executed'] as bool?,
         isDynamic: json['dynamic'] as bool?,
+        thoughtSignature: json['thought_signature'] as String?,
+        providerMetadata: json['provider_metadata'],
+      );
+
+  /// A copy with [input] (and optionally the id or name) replaced and every
+  /// provider field kept — the usual shape of a repair.
+  RawToolCall copyWith({String? toolCallId, String? toolName, String? input}) =>
+      RawToolCall(
+        toolCallId: toolCallId ?? this.toolCallId,
+        toolName: toolName ?? this.toolName,
+        input: input ?? this.input,
+        providerExecuted: providerExecuted,
+        isDynamic: isDynamic,
+        thoughtSignature: thoughtSignature,
+        providerMetadata: providerMetadata,
       );
 
   Map<String, dynamic> toJson() => {
         'tool_call_id': toolCallId,
         'tool_name': toolName,
         'input': input,
+        if (providerExecuted != null) 'provider_executed': providerExecuted,
         if (isDynamic != null) 'dynamic': isDynamic,
+        if (thoughtSignature != null) 'thought_signature': thoughtSignature,
+        if (providerMetadata != null) 'provider_metadata': providerMetadata,
       };
 }
 
@@ -932,10 +966,10 @@ class GenerateTextOptions {
   /// the hook is not invoked for it.
   ///
   /// Honoured by [TypedModel]'s `generateText` / `generateObject` /
-  /// `consumeStreamText` / `streamText`. It does **not** apply to the
-  /// OpenAI-format outputs (`generateTextAsOpenAI` / `streamTextAsOpenAI`):
-  /// `ChatCompletion` carries no invalid marker and the chunk stream forwards
-  /// the provider's argument deltas verbatim.
+  /// `consumeStreamText` / `streamText`, and by `generateTextAsOpenAI`, which
+  /// repairs the native result before converting it. `streamTextAsOpenAI`
+  /// does not reflect repair: the chunk stream forwards the provider's
+  /// argument deltas verbatim, as in the AI SDK.
   ///
   /// Never serialized — it is a host closure, not part of the wire options.
   @JsonKey(includeFromJson: false, includeToJson: false)
