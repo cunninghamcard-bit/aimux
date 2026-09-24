@@ -86,6 +86,24 @@ def repair_result(
     return result_json
 
 
+def generate_openai_with_repair(
+    model: Any,
+    prompt_json: str,
+    opts_json: Optional[str],
+    repair: Optional[RepairAdapter],
+) -> str:
+    """``generate_text_as_openai`` with repair, for both API layers.
+
+    A ChatCompletion has no ``invalid`` marker, so with a repair function the
+    native result is generated, repaired, then converted.
+    """
+    if repair is None:
+        return model.generate_text_as_openai(prompt_json, opts_json)
+    result_json = model.generate_text(prompt_json, opts_json)
+    result_json = repair_result(result_json, prompt_json, opts_json, repair)
+    return model.generate_text_result_as_openai(result_json)
+
+
 def repair_stream_part(
     part_json: str,
     prompt_json: str,

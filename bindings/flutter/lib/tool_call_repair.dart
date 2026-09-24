@@ -105,27 +105,10 @@ Map<String, dynamic> _replyFor(RawToolCall? replacement) => replacement == null
 ///
 /// The message is the thrown object's `toString()`, which the caller does not
 /// control the way it controls a replacement call — so an unpaired surrogate
-/// in it is replaced rather than rejected by [encodeJson].
+/// in it is replaced rather than rejected by [encodeJson]: the UTF-8 round
+/// trip writes U+FFFD for one.
 Map<String, dynamic> _failedReply(Object error) =>
-    {'type': 'failed', 'message': _withoutLoneSurrogates('$error')};
-
-String _withoutLoneSurrogates(String s) {
-  bool isHigh(int unit) => unit >= 0xD800 && unit <= 0xDBFF;
-  bool isLow(int unit) => unit >= 0xDC00 && unit <= 0xDFFF;
-  final units = s.codeUnits;
-  final out = <int>[];
-  for (var i = 0; i < units.length; i++) {
-    final unit = units[i];
-    if (isHigh(unit) && i + 1 < units.length && isLow(units[i + 1])) {
-      out
-        ..add(unit)
-        ..add(units[++i]);
-    } else {
-      out.add(isHigh(unit) || isLow(unit) ? 0xFFFD : unit);
-    }
-  }
-  return String.fromCharCodes(out);
-}
+    {'type': 'failed', 'message': utf8.decode(utf8.encode('$error'))};
 
 /// The synchronous entry points cannot await, so a [Future] return is a
 /// programming error rather than a repair failure and must not be swallowed

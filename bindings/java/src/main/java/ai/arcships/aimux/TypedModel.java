@@ -440,7 +440,7 @@ public class TypedModel implements Closeable {
      * @return Decoded {@link Types.ChatCompletion}.
      */
     public Types.ChatCompletion generateTextAsOpenAI(String prompt, Types.GenerateTextOptions options) {
-        return generateTextAsOpenAIParts(encode(prompt), encodeOptions(options), hook(options));
+        return generateTextAsOpenAIParts(encode(prompt), encodeOptions(options), options);
     }
 
     /**
@@ -461,7 +461,7 @@ public class TypedModel implements Closeable {
      * @return Decoded {@link Types.ChatCompletion}.
      */
     public Types.ChatCompletion generateTextAsOpenAI(List<Types.ModelMessage> messages, Types.GenerateTextOptions options) {
-        return generateTextAsOpenAIParts(encode(messages), encodeOptions(options), hook(options));
+        return generateTextAsOpenAIParts(encode(messages), encodeOptions(options), options);
     }
 
     /**
@@ -470,12 +470,11 @@ public class TypedModel implements Closeable {
      * its tool calls carry the repaired arguments.
      */
     private Types.ChatCompletion generateTextAsOpenAIParts(String promptJson, String optsJson,
-                                                           ToolCallRepair hook) {
-        if (hook == null) {
+                                                           Types.GenerateTextOptions options) {
+        if (hook(options) == null) {
             return decodeChatCompletion(raw.generateTextAsOpenAI(promptJson, optsJson));
         }
-        String resultJson = raw.generateText(promptJson, optsJson);
-        resultJson = ToolCallRepairs.repairResult(resultJson, promptJson, optsJson, hook);
+        String resultJson = repaired(raw.generateText(promptJson, optsJson), promptJson, optsJson, options);
         return decodeChatCompletion(raw.generateTextResultAsOpenAI(resultJson));
     }
 

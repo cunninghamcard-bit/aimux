@@ -952,6 +952,9 @@ func (m *Model) GenerateTextAsOpenAI(promptJson, optsJson string) (string, error
 // it, so the completion's tool calls are the repaired ones. The model only
 // supplies the fallback model id; no generation happens.
 func (m *Model) GenerateTextResultAsOpenAI(resultJson string) (string, error) {
+	if err := requireJSON("result_json", resultJson); err != nil {
+		return "", err
+	}
 	handle, err := m.handle()
 	if err != nil {
 		return "", err

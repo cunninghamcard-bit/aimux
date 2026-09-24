@@ -404,16 +404,9 @@ def generate_text_as_openai(
     """
     prompt_json = _prompt_to_json(prompt)
     opts_json = _opts_to_json(options)
-    repair = _repair_fn(options)
-    if repair is not None:
-        # A ChatCompletion has no `invalid` marker: repair the native result,
-        # then convert it.
-        result_json = model.generate_text(prompt_json, opts_json)
-        result_json = _repair.repair_result(result_json, prompt_json, opts_json, repair)
-        result_json = model.generate_text_result_as_openai(result_json)
-    else:
-        result_json = model.generate_text_as_openai(prompt_json, opts_json)
-    return json.loads(result_json)
+    return json.loads(
+        _repair.generate_openai_with_repair(model, prompt_json, opts_json, _repair_fn(options))
+    )
 
 
 def stream_text_as_openai(

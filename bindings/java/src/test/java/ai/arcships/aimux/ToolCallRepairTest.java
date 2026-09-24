@@ -82,6 +82,15 @@ class ToolCallRepairTest {
 
     // ── end to end through TypedModel (mock provider) ────────────────────────
 
+    /** The strict tool wants {@code location}; the canned calls send {@code city}. */
+    private static Types.RawToolCall cityToLocation(Types.ToolCallRepairContext context) {
+        return Types.RawToolCall.builder()
+            .toolCallId(context.getToolCall().getToolCallId())
+            .toolName(context.getToolCall().getToolName())
+            .input(context.getToolCall().getInput().replace("city", "location"))
+            .build();
+    }
+
     @Test
     void generateTextRepairsTheInvalidCallItGotBack() {
         try (MockProviderServer server = new MockProviderServer()) {
@@ -90,11 +99,7 @@ class ToolCallRepairTest {
                 .tools(Collections.singletonList(strictWeatherTool()))
                 .repairToolCall(context -> {
                     assertThat(context.getToolCall().getInput()).isEqualTo("{\"city\":\"Tokyo\"}");
-                    return Types.RawToolCall.builder()
-                        .toolCallId(context.getToolCall().getToolCallId())
-                        .toolName(context.getToolCall().getToolName())
-                        .input(context.getToolCall().getInput().replace("city", "location"))
-                        .build();
+                    return cityToLocation(context);
                 })
                 .build();
 
@@ -122,11 +127,7 @@ class ToolCallRepairTest {
             server.setResponseBody(toolCallResponse("{\"city\":\"Tokyo\"}"));
             Types.GenerateTextOptions options = Types.GenerateTextOptions.builder()
                 .tools(Collections.singletonList(strictWeatherTool()))
-                .repairToolCall(context -> Types.RawToolCall.builder()
-                    .toolCallId(context.getToolCall().getToolCallId())
-                    .toolName(context.getToolCall().getToolName())
-                    .input(context.getToolCall().getInput().replace("city", "location"))
-                    .build())
+                .repairToolCall(ToolCallRepairTest::cityToLocation)
                 .build();
 
             try (TypedModel model =
@@ -185,11 +186,7 @@ class ToolCallRepairTest {
             server.setResponseBody(toolCallSse("{\"city\":\"Tokyo\"}"));
             Types.GenerateTextOptions options = Types.GenerateTextOptions.builder()
                 .tools(Collections.singletonList(strictWeatherTool()))
-                .repairToolCall(context -> Types.RawToolCall.builder()
-                    .toolCallId(context.getToolCall().getToolCallId())
-                    .toolName(context.getToolCall().getToolName())
-                    .input(context.getToolCall().getInput().replace("city", "location"))
-                    .build())
+                .repairToolCall(ToolCallRepairTest::cityToLocation)
                 .build();
 
             try (TypedModel model =

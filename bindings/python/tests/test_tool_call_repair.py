@@ -23,6 +23,7 @@ WEATHER_SCHEMA = {
     "additionalProperties": False,
 }
 TOOLS = [{"type": "function", "name": "get_weather", "input_schema": WEATHER_SCHEMA}]
+TYPED_TOOLS = [typed.FunctionTool(name="get_weather", input_schema=WEATHER_SCHEMA)]
 # The same canned response, with arguments the schema accepts.
 VALID_TOOL_CALL = OPENAI_TOOL_CALL.replace("location", "city")
 TOOL_CALL_STREAM = (
@@ -122,7 +123,7 @@ def test_generate_as_openai_carries_the_repaired_arguments():
             model,
             "What's the weather in Tokyo?",
             typed.GenerateTextOptions(
-                tools=[typed.FunctionTool(name="get_weather", input_schema=WEATHER_SCHEMA)],
+                tools=TYPED_TOOLS,
                 repair_tool_call=_typed_repair,
             ),
         )
@@ -137,7 +138,7 @@ def test_a_wrong_return_type_is_an_error_not_a_failed_repair():
     # Only the hook's own exception means "failed"; the typed layer's encoding
     # of what it returned is not the hook's failure and must surface as itself.
     options = typed.GenerateTextOptions(
-        tools=[typed.FunctionTool(name="get_weather", input_schema=WEATHER_SCHEMA)],
+        tools=TYPED_TOOLS,
         repair_tool_call=lambda ctx: {"tool_call_id": "x", "tool_name": "y", "input": "{}"},
     )
     with MockServer(OPENAI_TOOL_CALL) as mock:
@@ -176,9 +177,8 @@ def test_repair_loop_branches():
             seen.append(context)
             return hook(context)
 
-        tools = [typed.FunctionTool(name="get_weather", input_schema=WEATHER_SCHEMA)]
         options = typed.GenerateTextOptions(
-            tools=tools if with_tools else None,
+            tools=TYPED_TOOLS if with_tools else None,
             repair_tool_call=spy,
         )
         with MockServer(response) as mock:
