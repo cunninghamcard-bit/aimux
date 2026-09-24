@@ -134,6 +134,15 @@ export declare class Model {
    */
   generateTextAsOpenai(prompt: string, options?: string | undefined | null, bridge?: AbortBridge | undefined | null): Promise<string>
   /**
+   * Convert a serialized `GenerateTextResult` into a serialized
+   * `ChatCompletion` — the conversion half of `generateTextAsOpenai`.
+   *
+   * For repairing on the host (RFC-0035): patch the native result, then
+   * convert it, so the completion's tool calls are the repaired ones. This
+   * model only supplies the fallback model id.
+   */
+  generateTextResultAsOpenai(resultJson: string): AimuxResult<string>
+  /**
    * Stream text as OpenAI Chat Completion chunks.
    *
    * Returns an `AsyncGenerator<string>` yielding `ChatCompletionChunk` JSON
@@ -300,7 +309,8 @@ export declare function applyToolCallRepair(toolCallJson: string, optsJson: stri
  * was generated with.
  *
  * The OpenAI-shaped result has no equivalent: it carries no `invalid` /
- * `error`, so repair is driven from the native result.
+ * `error`, so repair is driven from the native result, which
+ * `Model.generateTextResultAsOpenai` then converts.
  */
 export declare function applyToolCallRepairToResult(resultJson: string, optsJson: string | undefined | null, toolCallId: string, replyJson: string): AimuxResult<string>
 

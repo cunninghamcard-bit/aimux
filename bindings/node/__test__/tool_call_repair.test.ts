@@ -2,7 +2,7 @@ import test from 'ava'
 import { readFileSync } from 'node:fs'
 import { createServer, type Server } from 'node:http'
 
-import { generateText, openai, streamText } from '../src/index.ts'
+import { generateText, generateTextAsOpenai, openai, streamText } from '../src/index.ts'
 import type { RawToolCall, RepairToolCall, StreamPart, Tool, ToolCallRepairContext } from '../src/index.ts'
 import {
   applyToolCallRepair,
@@ -83,6 +83,23 @@ test('repair: generateText repairs the call and transcript', async (t) => {
     const message = result.response_messages[0] as any
     const part = message.content.find((item: any) => item.type === 'tool_call')
     t.deepEqual(part.input, result.tool_calls[0].input)
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+})
+
+test('repair: generateTextAsOpenai carries the repaired arguments', async (t) => {
+  const { server, url } = await startServer(INVALID_TOOL_CALL)
+  try {
+    const model = await openai('test-key', 'gpt-4o', url)
+    const completion = await generateTextAsOpenai(model, 'weather in Singapore?', {
+      tools: [weatherTool],
+      repairToolCall: fixCity,
+    })
+    const call = completion.choices[0].message.tool_calls?.[0]
+    t.is(call?.id, 'call-1')
+    t.deepEqual(JSON.parse(call?.function.arguments ?? ''), { city: 'Singapore' })
+    t.is(completion.model, 'gpt-4o')
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()))
   }

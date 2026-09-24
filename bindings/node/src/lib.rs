@@ -23,7 +23,8 @@ use crate::error::{
 };
 use aimux_core::AiMuxError;
 use aimux_core::generate::{
-    GenerateTextOptions, generate_object, generate_text, generate_text_as_openai, stream_text,
+    GenerateTextOptions, GenerateTextResult, generate_object, generate_text,
+    generate_text_as_openai, generate_text_result_to_chat_completion, stream_text,
     stream_text_as_openai,
 };
 use aimux_core::language_model::LanguageModel;
@@ -420,6 +421,23 @@ impl Model {
             .await;
             __r
         })
+    }
+
+    /// Convert a serialized `GenerateTextResult` into a serialized
+    /// `ChatCompletion` — the conversion half of `generateTextAsOpenai`.
+    ///
+    /// For repairing on the host (RFC-0035): patch the native result, then
+    /// convert it, so the completion's tool calls are the repaired ones. This
+    /// model only supplies the fallback model id.
+    #[napi]
+    pub fn generate_text_result_as_openai(&self, result_json: String) -> AimuxResult<String> {
+        AimuxResult((|| -> crate::error::MResult<String> {
+            let result: GenerateTextResult = parse_wire_json("result_json", &result_json)?;
+            serialize_result(&generate_text_result_to_chat_completion(
+                &result,
+                self.inner.model_id(),
+            ))
+        })())
     }
 
     /// Stream text as OpenAI Chat Completion chunks.
@@ -1653,7 +1671,8 @@ pub fn apply_tool_call_repair(
 /// was generated with.
 ///
 /// The OpenAI-shaped result has no equivalent: it carries no `invalid` /
-/// `error`, so repair is driven from the native result.
+/// `error`, so repair is driven from the native result, which
+/// `Model.generateTextResultAsOpenai` then converts.
 #[napi]
 pub fn apply_tool_call_repair_to_result(
     result_json: String,

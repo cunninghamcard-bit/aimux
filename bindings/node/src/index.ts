@@ -162,6 +162,8 @@ export type {
   RuntimeModel,
   VideoCallOptions,
   VideoPollOptions,
+  RawToolCall,
+  ToolCallRepairReply,
 }
 
 /**
@@ -398,6 +400,11 @@ export function getSessions(): SessionView[] {
  * Works with **any** provider — the result is always a standard OpenAI
  * `ChatCompletion` object.
  *
+ * With {@link RepairToolCall | `repairToolCall`}, invalid calls are repaired
+ * on the native result first and the completion is converted from it, so its
+ * `tool_calls` carry the repaired arguments (a `ChatCompletion` has no
+ * `invalid` marker to repair from).
+ *
  * @example
  * ```ts
  * import { openai, generateTextAsOpenai } from 'aimux'
@@ -409,12 +416,18 @@ export function getSessions(): SessionView[] {
 export async function generateTextAsOpenai(
   model: RawModel,
   prompt: string | ModelMessage[],
-  options?: GenerateTextOptions,
+  options?: GenerateTextOptionsWithRepair,
   signal?: AbortSignal,
 ): Promise<ChatCompletion> {
+  const promptJson = JSON.stringify(prompt)
   const optsJson = options ? JSON.stringify(options) : undefined
   const bridge = signal ? new AbortBridge(signal) : undefined
-  const resultJson = await model.generateTextAsOpenai(JSON.stringify(prompt), optsJson, bridge)
+  if (options?.repairToolCall) {
+    let resultJson = await model.generateText(promptJson, optsJson, bridge)
+    resultJson = await repairResultJson(resultJson, promptJson, optsJson, options.repairToolCall)
+    return JSON.parse(model.generateTextResultAsOpenai(resultJson)) as ChatCompletion
+  }
+  const resultJson = await model.generateTextAsOpenai(promptJson, optsJson, bridge)
   return JSON.parse(resultJson) as ChatCompletion
 }
 
