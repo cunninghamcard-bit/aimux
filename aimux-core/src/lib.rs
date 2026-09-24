@@ -69,8 +69,8 @@ pub mod prelude {
     pub use crate::files_model::{Files, UploadFileCallOptions, UploadFileResult};
     pub use crate::generate::{
         GenerateObjectResult, GenerateTextOptions, GenerateTextResult, StreamTextResult,
-        generate_object, generate_text, generate_text_as_openai, stream_text,
-        stream_text_as_openai,
+        generate_object, generate_text, generate_text_as_openai,
+        generate_text_result_to_chat_completion, stream_text, stream_text_as_openai,
     };
     pub use crate::image_model::{ImageCallOptions, ImageModel, ImageResult, generate_image};
     pub use crate::language_model::LanguageModel;

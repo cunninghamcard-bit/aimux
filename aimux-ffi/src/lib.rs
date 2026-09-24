@@ -56,7 +56,8 @@ use serde::de::DeserializeOwned;
 use aimux_core::AbortSignal;
 use aimux_core::AiMuxError;
 use aimux_core::generate::{
-    GenerateTextOptions, generate_object, generate_text, generate_text_as_openai, stream_text,
+    GenerateTextOptions, GenerateTextResult, generate_object, generate_text,
+    generate_text_as_openai, generate_text_result_to_chat_completion, stream_text,
     stream_text_as_openai,
 };
 use aimux_core::language_model::LanguageModel;
@@ -1803,7 +1804,8 @@ pub extern "C" fn aimux_apply_tool_call_repair(
 /// generated with. Both `tool_calls` and the matching `response_messages`
 /// tool-call part are rewritten. The OpenAI-shaped
 /// `ChatCompletion` is not supported — it carries no `invalid`/`error`, so
-/// repair is driven from the native result. Same purity as
+/// repair is driven from the native result, which
+/// [`aimux_generate_text_result_as_openai`] then converts. Same purity as
 /// [`aimux_tool_call_repair_context`].
 #[unsafe(no_mangle)]
 pub extern "C" fn aimux_apply_tool_call_repair_to_result(
@@ -1830,6 +1832,30 @@ pub extern "C" fn aimux_apply_tool_call_repair_to_result(
 // ─────────────────────────────────────────────────────────────────────────────
 // C ABI: OpenAI-compatible output (RFC-0026)
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// Convert a serialized `GenerateTextResult` into a serialized `ChatCompletion`.
+///
+/// The conversion half of [`aimux_generate_text_as_openai`], for hosts that
+/// repair a native result themselves (RFC-0035) and then want the OpenAI
+/// shape: tool calls come from `result_json`'s `tool_calls`, so a patched
+/// result converts to a completion that reflects the repair. `handle` only
+/// supplies the model id fallback for `ChatCompletion.model`; no runtime work,
+/// so this is safe from inside a stream callback.
+#[unsafe(no_mangle)]
+pub extern "C" fn aimux_generate_text_result_as_openai(
+    handle: u64,
+    result_json: *const c_char,
+    out_json: *mut *mut c_char,
+) -> *mut aimux_error_t {
+    with_out_string(out_json, "out_json", || {
+        let model = model_of(handle)?;
+        let result: GenerateTextResult = parse_json_arg(result_json, "result_json")?;
+        to_json(&generate_text_result_to_chat_completion(
+            &result,
+            model.model_id(),
+        ))
+    })
+}
 
 /// Non-streaming text generation with OpenAI Chat Completions output.
 ///

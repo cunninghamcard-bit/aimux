@@ -5,7 +5,9 @@
 //! the second producing exactly what Rust callers get from the first.
 
 use aimux_core::error::AiMuxError;
-use aimux_core::generate::GenerateTextOptions;
+use aimux_core::generate::{
+    GenerateTextOptions, GenerateTextResult, generate_text_result_to_chat_completion,
+};
 use aimux_core::message::ModelPrompt;
 use aimux_core::parse_tool_call::{
     RawToolCall, ToolCallRepair, ToolCallRepairReply, apply_tool_call_repair,
@@ -285,6 +287,57 @@ async fn patching_a_primitive_input_is_not_replayed_into_the_transcript() {
     assert_eq!(
         patched["response_messages"][0]["content"][1]["input"],
         json!({})
+    );
+}
+
+#[tokio::test]
+async fn a_patched_result_converts_to_a_chat_completion_that_reflects_the_repair() {
+    // The OpenAI non-streaming path on a host: repair the native result, then
+    // convert it. The provider's raw text in `raw.content` stays malformed;
+    // the completion must take its arguments from the patched `tool_calls`.
+    let finish = json!({ "unified": "tool-calls", "raw": null });
+    let usage = json!({ "input_tokens": { "total": 1 }, "output_tokens": { "total": 1 } });
+    let mut result = result_with(&invalid_call(BAD).await);
+    let object = result.as_object_mut().unwrap();
+    object.insert("text".into(), json!(""));
+    object.insert("finish_reason".into(), finish.clone());
+    object.insert("usage".into(), usage.clone());
+    object.insert("warnings".into(), json!([]));
+    object.insert(
+        "raw".into(),
+        json!({
+            "content": [{ "ToolCall": {
+                "tool_call_id": "call-1", "tool_name": "weather", "input": BAD,
+            } }],
+            "finish_reason": finish,
+            "usage": usage,
+            "warnings": [],
+            "provider_metadata": null,
+            "response": { "id": null, "timestamp": null, "model_id": null },
+            "request_body": null,
+            "response_headers": null,
+        }),
+    );
+
+    let patched = apply_tool_call_repair_to_result(
+        &result,
+        Some(&[weather_tool()]),
+        "call-1",
+        ToolCallRepairReply::Repaired {
+            tool_call: raw("weather", r#"{"city":"Singapore"}"#),
+        },
+    )
+    .unwrap();
+    let decoded: GenerateTextResult = serde_json::from_value(patched).unwrap();
+    let completion = generate_text_result_to_chat_completion(&decoded, "fallback-model");
+
+    assert_eq!(completion.model, "fallback-model");
+    let calls = completion.choices[0].message.tool_calls.as_ref().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].id, "call-1");
+    assert_eq!(
+        serde_json::from_str::<Value>(&calls[0].function.arguments).unwrap(),
+        json!({"city":"Singapore"})
     );
 }
 

@@ -562,9 +562,9 @@ pub fn apply_tool_call_repair_to_result(
     let target = if patched.get("tool_calls").is_some() {
         &mut patched
     } else {
-        patched
-            .get_mut("raw")
-            .ok_or_else(|| AiMuxError::InvalidArgument("result: no tool_calls array".to_string()))?
+        patched.get_mut("raw").ok_or_else(|| {
+            AiMuxError::InvalidArgument("result: neither tool_calls nor raw".to_string())
+        })?
     };
 
     let calls = target

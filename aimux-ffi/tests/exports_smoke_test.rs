@@ -30,7 +30,7 @@
 //!
 //! ## Coverage
 //!
-//! All 118 `#[unsafe(no_mangle)]` exports in `src/lib.rs` are exercised (the
+//! All 123 `#[unsafe(no_mangle)]` exports in `src/lib.rs` are exercised (the
 //! constructor and utility classes in full; the session class one
 //! representative call per export). [`header_and_exports_agree`] pins the
 //! count against the two headers.
@@ -57,26 +57,26 @@ use aimux_ffi::{
     aimux_error_retry_ms, aimux_error_retryable, aimux_error_status, aimux_error_t,
     aimux_error_tool_input, aimux_error_tool_name, aimux_file_upload, aimux_free_string,
     aimux_generate_object, aimux_generate_text, aimux_generate_text_as_openai,
-    aimux_get_model_specs, aimux_google_embedding_new, aimux_google_embedding_new_with_base,
-    aimux_google_image_new, aimux_google_image_new_with_base, aimux_google_video_new,
-    aimux_google_video_new_with_base, aimux_image_generate, aimux_init_logging, aimux_init_proxy,
-    aimux_init_recording, aimux_init_recording_ring, aimux_init_recording_ring_default,
-    aimux_list_sessions, aimux_mistral_new, aimux_mistral_new_with_base, aimux_moa_new,
-    aimux_mock_replay_new, aimux_openai_embedding_new, aimux_openai_embedding_new_with_base,
-    aimux_openai_files_new, aimux_openai_files_new_with_base, aimux_openai_image_new,
-    aimux_openai_image_new_with_base, aimux_openai_new, aimux_openai_new_with_base,
-    aimux_openai_speech_new, aimux_openai_speech_new_with_base, aimux_openai_transcription_new,
-    aimux_openai_transcription_new_with_base, aimux_provider_from_env, aimux_provider_handle_new,
-    aimux_provider_list_models, aimux_provider_model, aimux_provider_new, aimux_recording_flush,
-    aimux_recording_stop, aimux_recording_try_flush, aimux_register_providers, aimux_rerank,
-    aimux_router_new, aimux_search, aimux_session_calls, aimux_session_infer_init,
-    aimux_session_store_init, aimux_speech_generate, aimux_stream_text,
-    aimux_stream_text_as_openai, aimux_stream_text_as_openai_with_abort,
-    aimux_stream_text_with_abort, aimux_tavily_search_new, aimux_tavily_search_new_with_base,
-    aimux_tool_call_repair_context, aimux_trace_aggregate, aimux_trace_clear,
-    aimux_trace_export_jsonl, aimux_trace_new, aimux_trace_new_audited, aimux_trace_session_chain,
-    aimux_trace_session_trajectory, aimux_transcription_generate, aimux_transcription_input_done,
-    aimux_transcription_next_part, aimux_transcription_push_audio,
+    aimux_generate_text_result_as_openai, aimux_get_model_specs, aimux_google_embedding_new,
+    aimux_google_embedding_new_with_base, aimux_google_image_new, aimux_google_image_new_with_base,
+    aimux_google_video_new, aimux_google_video_new_with_base, aimux_image_generate,
+    aimux_init_logging, aimux_init_proxy, aimux_init_recording, aimux_init_recording_ring,
+    aimux_init_recording_ring_default, aimux_list_sessions, aimux_mistral_new,
+    aimux_mistral_new_with_base, aimux_moa_new, aimux_mock_replay_new, aimux_openai_embedding_new,
+    aimux_openai_embedding_new_with_base, aimux_openai_files_new, aimux_openai_files_new_with_base,
+    aimux_openai_image_new, aimux_openai_image_new_with_base, aimux_openai_new,
+    aimux_openai_new_with_base, aimux_openai_speech_new, aimux_openai_speech_new_with_base,
+    aimux_openai_transcription_new, aimux_openai_transcription_new_with_base,
+    aimux_provider_from_env, aimux_provider_handle_new, aimux_provider_list_models,
+    aimux_provider_model, aimux_provider_new, aimux_recording_flush, aimux_recording_stop,
+    aimux_recording_try_flush, aimux_register_providers, aimux_rerank, aimux_router_new,
+    aimux_search, aimux_session_calls, aimux_session_infer_init, aimux_session_store_init,
+    aimux_speech_generate, aimux_stream_text, aimux_stream_text_as_openai,
+    aimux_stream_text_as_openai_with_abort, aimux_stream_text_with_abort, aimux_tavily_search_new,
+    aimux_tavily_search_new_with_base, aimux_tool_call_repair_context, aimux_trace_aggregate,
+    aimux_trace_clear, aimux_trace_export_jsonl, aimux_trace_new, aimux_trace_new_audited,
+    aimux_trace_session_chain, aimux_trace_session_trajectory, aimux_transcription_generate,
+    aimux_transcription_input_done, aimux_transcription_next_part, aimux_transcription_push_audio,
     aimux_transcription_session_drop, aimux_transcription_session_new, aimux_vertex_new,
     aimux_vertex_new_with_base, aimux_video_generate, aimux_xai_new, aimux_xai_new_with_base,
 };
@@ -157,7 +157,7 @@ fn header_and_exports_agree() {
     exports.sort();
     assert_eq!(
         exports.len(),
-        122,
+        123,
         "export count changed; update the headers"
     );
 
@@ -1183,6 +1183,41 @@ fn tool_call_repair_exports_round_trip() {
     );
     let (code, _) = expect_aimux_error(e, "apply_tool_call_repair_to_result (unknown id)");
     assert_eq!(code, AIMUX_E_INVALID_ARGUMENT);
+    assert!(out.is_null());
+}
+
+/// A repaired native result converts to a ChatCompletion whose arguments are
+/// the repaired ones, not the provider's raw text (the OpenAI non-streaming
+/// path on a host). The handle only supplies the fallback model id.
+#[test]
+fn a_repaired_result_converts_to_a_chat_completion() {
+    let finish = r#"{"unified":"tool-calls","raw":null}"#;
+    let usage = r#"{"input_tokens":{"total":1},"output_tokens":{"total":1}}"#;
+    let repaired = r#"{"tool_call_id":"call-1","tool_name":"weather","input":{"city":"SG"}}"#;
+    let result = format!(
+        r#"{{"text":"","tool_calls":[{repaired}],"finish_reason":{finish},"usage":{usage},"warnings":[],"raw":{{"content":[{{"ToolCall":{{"tool_call_id":"call-1","tool_name":"weather","input":"{{\"town\":\"SG\"}}"}}}}],"finish_reason":{finish},"usage":{usage},"warnings":[],"provider_metadata":null,"response":{{"id":null,"timestamp":null,"model_id":null}},"request_body":null,"response_headers":null}}}}"#
+    );
+    let h = unreachable_model();
+
+    let mut out: *mut c_char = ptr::null_mut();
+    let e = aimux_generate_text_result_as_openai(h, c(&result).as_ptr(), &mut out);
+    ok(e, "generate_text_result_as_openai");
+    let completion = read_and_free_json(out, "generate_text_result_as_openai");
+    assert!(
+        completion.contains(r#""model":"gpt-4o-mini""#)
+            && completion.contains(r#""arguments":"{\"city\":\"SG\"}""#),
+        "completion should carry the repaired arguments: {completion}"
+    );
+
+    // Not a GenerateTextResult: a wire-JSON failure.
+    let e = aimux_generate_text_result_as_openai(h, c(r#"{"text":""}"#).as_ptr(), &mut out);
+    expect_failure(e, "generate_text_result_as_openai (bad result)");
+    assert!(out.is_null());
+    aimux_drop_handle(h);
+
+    // A dropped handle is rejected like every other model export.
+    let e = aimux_generate_text_result_as_openai(h, c(&result).as_ptr(), &mut out);
+    expect_failure(e, "generate_text_result_as_openai (dropped handle)");
     assert!(out.is_null());
 }
 

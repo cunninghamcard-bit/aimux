@@ -361,6 +361,17 @@ aimux_error_t *aimux_stream_text_as_openai_with_abort(uint64_t handle, uint64_t 
                                                           void (*on_done)(void *stream_ctx),
                                                           void *stream_ctx);
 
+/**
+ * [AiMuxError] Convert a serialized GenerateTextResult into a serialized
+ * ChatCompletion — the conversion half of aimux_generate_text_as_openai. For
+ * hosts that repair a native result themselves (RFC-0035): tool calls come
+ * from the result's tool_calls, so a patched result converts to a completion
+ * that reflects the repair. handle only supplies the fallback model id; no
+ * runtime work, so this is safe from inside a stream callback.
+ */
+aimux_error_t *aimux_generate_text_result_as_openai(uint64_t handle, const char *result_json,
+                                                        char **out_json);
+
 /* ── Host-side tool-call repair (RFC-0035) ─────────────────────────────── */
 
 /*

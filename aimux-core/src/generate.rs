@@ -1260,7 +1260,28 @@ pub async fn generate_text_as_openai(
     options: GenerateTextOptions,
 ) -> Result<ChatCompletion, AiMuxError> {
     let result = generate_text(model, prompt, options).await?;
-    let mut completion = to_chat_completion(&result.raw, model.model_id());
+    Ok(generate_text_result_to_chat_completion(
+        &result,
+        model.model_id(),
+    ))
+}
+
+/// Convert a [`GenerateTextResult`] into an OpenAI [`ChatCompletion`].
+///
+/// The pure half of [`generate_text_as_openai`]: tool calls come from
+/// `result.tool_calls` (so they reflect Core parsing and any repair already
+/// applied to the result), everything else from `result.raw` via
+/// [`to_chat_completion`]. Hosts that repair a result themselves (RFC-0035)
+/// convert it with this afterwards.
+///
+/// `model_id` is the fallback for `ChatCompletion.model` when the provider
+/// response carries no model id.
+#[must_use]
+pub fn generate_text_result_to_chat_completion(
+    result: &GenerateTextResult,
+    model_id: &str,
+) -> ChatCompletion {
+    let mut completion = to_chat_completion(&result.raw, model_id);
     if let Some(choice) = completion.choices.first_mut() {
         choice.message.tool_calls = if result.tool_calls.is_empty() {
             None
@@ -1285,7 +1306,7 @@ pub async fn generate_text_as_openai(
             )
         };
     }
-    Ok(completion)
+    completion
 }
 
 /// Stream text and return the result as a stream of OpenAI Chat Completion chunks.
