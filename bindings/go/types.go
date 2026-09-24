@@ -302,10 +302,10 @@ type GenerateTextOptions struct {
 	// runs in Go, after generation, on every call the engine marked invalid —
 	// never serialized into the options sent to the engine.
 	//
-	// It applies to the typed entry points (Generate, GenerateObj,
-	// ConsumeStream, Stream) only. The OpenAI-format outputs
-	// (GenerateAsOpenAI, StreamAsOpenAI) carry no invalid marker, so repair
-	// does not apply there; drive it from the native result instead.
+	// It applies to Generate, GenerateObj, ConsumeStream and Stream, and to
+	// GenerateAsOpenAI, which repairs the native result before converting it.
+	// StreamAsOpenAI does not reflect repair: its tool-argument deltas are the
+	// provider's text, forwarded as they arrive (as in the AI SDK).
 	RepairToolCall RepairToolCallFunc `json:"-"`
 }
 

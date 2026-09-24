@@ -130,6 +130,23 @@ func TestRepairGenerateRepairs(t *testing.T) {
 	}
 }
 
+func TestRepairGenerateAsOpenAICarriesRepairedArguments(t *testing.T) {
+	srv := newMockServer()
+	defer srv.Close()
+	srv.SetResponse(townToolCallResponse)
+	m := OpenAIWithBase("sk-test-fake-key", "gpt-4o", srv.URL)
+	defer m.Close()
+
+	completion, err := m.GenerateAsOpenAI("weather in Singapore?", strictWeatherOpts(toCity))
+	if err != nil {
+		t.Fatalf("GenerateAsOpenAI: %v", err)
+	}
+	calls := completion.Choices[0].Message.ToolCalls
+	if len(calls) != 1 || calls[0].ID != "call-1" || calls[0].Function.Arguments != `{"city":"Singapore"}` {
+		t.Fatalf("completion does not carry the repaired call: %+v", calls)
+	}
+}
+
 const townToolCallSSE = "data: " + `{"id":"1","model":"gpt-4o","choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"weather","arguments":""}}]}}]}` + "\n\n" +
 	"data: " + `{"id":"1","model":"gpt-4o","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"town\":\"Singapore\"}"}}]}}]}` + "\n\n" +
 	"data: " + `{"id":"1","model":"gpt-4o","choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}` + "\n\n" +
