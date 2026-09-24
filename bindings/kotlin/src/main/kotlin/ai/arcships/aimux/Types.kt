@@ -622,11 +622,16 @@ data class GenerateTextOptions(
      *
      * [Transient]: a function cannot be serialized, and core never sees it —
      * [TypedModel] runs it host-side. Honoured by `generateText`,
-     * `generateObject`, `consumeStreamText` and `streamText`; the
-     * OpenAI-format outputs (`generateTextAsOpenAI` / `streamTextAsOpenAI`)
-     * ignore it, because `ChatCompletion` carries no `invalid` marker and the
-     * OpenAI stream forwards provider argument deltas verbatim. The raw
-     * JSON-string [Model] ignores it too — it never sees typed options.
+     * `generateObject`, `consumeStreamText`, `streamText` and
+     * `generateTextAsOpenAI` (which repairs the native result before
+     * converting it); `streamTextAsOpenAI` ignores it, because the OpenAI
+     * stream forwards provider argument deltas verbatim. The raw JSON-string
+     * [Model] ignores it too — it never sees typed options.
+     *
+     * If a repair fails at the boundary while streaming (not in the hook — a
+     * throwing hook is a `ToolCallRepair` error on the call), `onError` is told
+     * and the unrepaired part is still delivered. The stream waits for the
+     * hook, without a timeout.
      *
      * While streaming, the hook runs on a worker thread that is lent the
      * stream's read hold on this model, so it may call this same model even

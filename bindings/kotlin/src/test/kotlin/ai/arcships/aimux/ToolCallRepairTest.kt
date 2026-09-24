@@ -146,6 +146,24 @@ class ToolCallRepairTest {
         }
     }
 
+    @Test
+    fun `generateTextAsOpenAI carries the repaired arguments`() {
+        server.responseBody = openAiToolCall("""{"town":"Singapore"}""")
+
+        model().use { model ->
+            // A ChatCompletion has no invalid marker: the native result is
+            // repaired, then converted.
+            val completion = model.generateTextAsOpenAI(
+                "weather in Singapore?",
+                options { context -> context.toolCall.copy(input = """{"city":"Singapore"}""") },
+            )
+
+            val call = completion.choices.single().message.toolCalls!!.single()
+            assertThat(call.id).isEqualTo("call-1")
+            assertThat(call.function.arguments).isEqualTo("""{"city":"Singapore"}""")
+        }
+    }
+
     /**
      * The host loop's non-happy branches: what a hook's two failure modes do
      * to the call, and the two cases where the hook must not run at all.

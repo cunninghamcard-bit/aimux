@@ -92,6 +92,7 @@ internal interface AimuxFFI : Library {
 
     // ── OpenAI-compatible output (RFC-0026) ─────────────────────────────────
     fun aimux_generate_text_as_openai(handle: Long, promptJson: String, optsJson: String?, outJson: PointerByReference): Pointer?
+    fun aimux_generate_text_result_as_openai(handle: Long, resultJson: String, outJson: PointerByReference): Pointer?
     fun aimux_stream_text_as_openai(
         handle: Long,
         promptJson: String,
@@ -246,7 +247,15 @@ internal interface AimuxFFI : Library {
 }
 
 internal object FFI {
-    val lib: AimuxFFI = Native.load("aimux_ffi", AimuxFFI::class.java)
+    // Strings go out as UTF-8, matching every read (`getString(0, "UTF-8")`).
+    // JNA otherwise encodes with the platform's native encoding, so on a
+    // Windows code page or under LANG=C a non-ASCII prompt would arrive
+    // corrupted.
+    val lib: AimuxFFI = Native.load(
+        "aimux_ffi",
+        AimuxFFI::class.java,
+        mapOf(Library.OPTION_STRING_ENCODING to "UTF-8"),
+    )
 }
 
 /** `aimux_transcription_next_part_state_t` values written to `outState` (`int32_t*` in the header). */
@@ -392,7 +401,9 @@ private val lentReadHold = ThreadLocal<Model?>()
  * caller could observe a non-zero handle and then race with [close]'s drop.
  * Because a streaming call holds the read lock until the stream completes,
  * [close] will not interrupt or drop a handle out from under an active stream.
- * Do not call [close] from within a stream callback (would self-deadlock).
+ * Do not call [close] from within a stream callback, or from a
+ * `repairToolCall` hook running for a stream on this model (either would
+ * self-deadlock).
  *
  * ```kotlin
  * Model.openai("sk-...", "gpt-4o-mini").use { model ->
@@ -663,6 +674,26 @@ class Model internal constructor(handle: Long) : Closeable {
         return withRead { h ->
             stringResult { out ->
                 FFI.lib.aimux_generate_text_as_openai(h, promptJson, optsJson, out)
+            }
+        }
+    }
+
+    /**
+     * Convert a serialized GenerateTextResult into a serialized ChatCompletion —
+     * the conversion half of [generateTextAsOpenAI].
+     *
+     * For repairing on the host (RFC-0035): patch the native result, then
+     * convert it, so the completion's tool calls are the repaired ones. This
+     * model only supplies the fallback model id; nothing is generated.
+     *
+     * @throws AimuxException when [resultJson] is not a GenerateTextResult.
+     * @throws IllegalArgumentException when [resultJson] is malformed; IllegalStateException after [close].
+     */
+    fun generateTextResultAsOpenAI(resultJson: String): String {
+        requireJsonRequired("resultJson", resultJson)
+        return withRead { h ->
+            stringResult { out ->
+                FFI.lib.aimux_generate_text_result_as_openai(h, resultJson, out)
             }
         }
     }

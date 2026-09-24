@@ -235,13 +235,18 @@ internal fun repairToolCallsInResult(
  */
 internal fun offCallbackThread(model: Model, repair: RepairToolCall): RepairToolCall = { context ->
     val task = FutureTask { model.withLentReadHold { repair(context) } }
-    Thread(task, "aimux-tool-call-repair").start()
+    // Daemon, like Java's: a hook that never returns must not keep the JVM up.
+    Thread(task, "aimux-tool-call-repair").apply { isDaemon = true }.start()
     try {
         task.get()
     } catch (e: ExecutionException) {
         // Rethrow what the hook threw, so "throw means failed" still maps to
         // the hook's own message rather than to the wrapper's.
         throw e.cause ?: e
+    } catch (e: InterruptedException) {
+        // The repair becomes a failed reply; the caller's interrupt survives.
+        Thread.currentThread().interrupt()
+        throw e
     }
 }
 
