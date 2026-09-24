@@ -122,7 +122,7 @@ AI SDK 的规则是"没给工具集的调用从不修复",宿主看到 `null` �
 ## 7. 宿主循环的边界行为
 
 - **钩子抛错不是流错误**:它是 `failed` 答复,core 把调用标成 `ToolCallRepair` 错误,照常作为数据投递。
-- **边界失败**(解不开 context、FFI 拒绝答复这类绑定或 core 自身的 bug)在流中各绑定行为不同,均为既定行为:Java / Kotlin 先调 `onError` 再投递未修复的原 part;Swift 调 `onError` 后流继续;Python / Go / Node / Dart 终止流。所有绑定都不会静默丢弃这个调用。
+- **边界失败**(解不开 context、FFI 拒绝答复这类绑定或 core 自身的 bug)在流中各绑定行为不同,均为既定行为:Java / Kotlin 先调 `onError` 再投递未修复的原 part;Swift 调 `onError` 后流继续,但不投递这个 part;Python / Go / Node / Dart 终止流。没有任何绑定会静默丢弃这个调用。
 - **流等待钩子,不设超时**(与 AI SDK 一致):钩子挂起,流就挂起。Swift 在钩子运行期间 abort 不生效,钩子返回后才生效。
 - **JVM**:钩子运行在借用了流读锁的工作线程上(daemon),可以回调同一个 Model;但在钩子里对正在流式输出的同一个 Model 调 `close()` 会死锁,与在流回调里调 `close()` 相同。
 - **Swift / JVM 的线程跳转**必须是真正的新线程:GCD 的 `sync` 在可能时就地执行 block,会把钩子留在受重入保护的回调线程上(`AIMUX_E_FFI_REENTRANT_CALL`)。

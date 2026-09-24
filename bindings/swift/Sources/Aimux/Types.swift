@@ -1170,7 +1170,7 @@ public struct GenerateTextOptions: Codable, Equatable {
     /// While streaming, the stream waits for the function, and an abort does
     /// not take effect until it returns. If a repair fails at the boundary
     /// (not in the function — a throw is a `ToolCallRepair` error on the
-    /// call), `onError` is told and the stream continues.
+    /// call), `onError` is told and the stream continues without that part.
     public var repairToolCall: RepairToolCall? {
         get { repairToolCallBox?.run }
         set { repairToolCallBox = newValue.map(RepairToolCallBox.init(run:)) }
