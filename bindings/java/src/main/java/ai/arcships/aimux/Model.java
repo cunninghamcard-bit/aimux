@@ -44,7 +44,9 @@ import java.util.stream.StreamSupport;
  * handle and then race with {@code close()}'s drop. Because a streaming call
  * holds the read lock until the stream completes, {@code close()} will not
  * interrupt or drop a handle out from under an active stream. Do not call
- * {@code close()} from within a stream callback (would self-deadlock).
+ * {@code close()} from within a stream callback, or from a
+ * {@code repairToolCall} hook running for a stream on this model (either would
+ * self-deadlock).
  */
 public class Model implements Closeable {
 
@@ -618,8 +620,9 @@ public class Model implements Closeable {
      *
      * <p>The JNA {@code Callback} proxies are held in local variables for the
      * duration of the native call so the JVM cannot GC them mid-stream.
-     * Callbacks run on the calling thread; do NOT re-enter the FFI layer from
-     * inside a callback (would deadlock the tokio runtime).
+     * Callbacks run on the calling thread; re-entering a generate / stream
+     * call from inside a callback fails fast with
+     * {@code AIMUX_E_FFI_REENTRANT_CALL} (204).
      *
      * <p>C ABI has no {@code on_error} callback — terminal failures throw
      * {@link AimuxException} after the blocking call returns.
@@ -760,6 +763,33 @@ public class Model implements Closeable {
                 AimuxFFI.INSTANCE.aimux_generate_text_as_openai(h, promptJson, optsJson, out),
                 out,
                 "generate_text_as_openai");
+        } finally {
+            releaseRead();
+        }
+    }
+
+    /**
+     * Convert a serialized GenerateTextResult into a serialized ChatCompletion
+     * — the conversion half of {@link #generateTextAsOpenAI(String, String)}.
+     *
+     * <p>For repairing on the host (RFC-0035): patch the native result, then
+     * convert it, so the completion's tool calls are the repaired ones. This
+     * model only supplies the fallback model id; nothing is generated.
+     *
+     * @param resultJson JSON-serialized GenerateTextResult.
+     * @return JSON-serialized ChatCompletion.
+     * @throws AimuxException if {@code resultJson} is not a GenerateTextResult.
+     */
+    public String generateTextResultAsOpenAI(String resultJson) {
+        AimuxResult.requireJsonNonNull(resultJson, "resultJson");
+        acquireRead();
+        try {
+            long h = requireHandleLocked();
+            PointerByReference out = new PointerByReference();
+            return AimuxResult.extractString(
+                AimuxFFI.INSTANCE.aimux_generate_text_result_as_openai(h, resultJson, out),
+                out,
+                "generate_text_result_as_openai");
         } finally {
             releaseRead();
         }

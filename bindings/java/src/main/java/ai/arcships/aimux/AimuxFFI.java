@@ -8,6 +8,8 @@ import com.sun.jna.ptr.IntByReference;
 import com.sun.jna.ptr.LongByReference;
 import com.sun.jna.ptr.PointerByReference;
 
+import java.util.Collections;
+
 /**
  * JNA interface — 1:1 mapping of the aimux-ffi C ABI ({@code aimux-ffi/aimux-ffi.h}).
  *
@@ -32,15 +34,24 @@ import com.sun.jna.ptr.PointerByReference;
  * </ul>
  *
  * <p>Concurrency: all functions are synchronous (block until completion).
- * Callbacks execute on the calling thread; do NOT re-enter the FFI layer from
- * inside a callback (would deadlock the tokio runtime).
+ * Callbacks execute on the calling thread. Re-entering a runtime-bound
+ * function (generate / stream / …) from inside a callback fails fast with
+ * {@code AIMUX_E_FFI_REENTRANT_CALL} (204); the pure repair functions below
+ * are the exception.
+ *
+ * <p>Strings cross the boundary as UTF-8 in both directions: the library is
+ * loaded with {@link Library#OPTION_STRING_ENCODING} pinned. JNA otherwise
+ * encodes with the platform's native encoding, so on a Windows code page or
+ * under {@code LANG=C} every non-ASCII prompt would reach the library
+ * corrupted.
  *
  * <p>The library is resolved by JNA from {@code java.library.path} /
  * {@code LD_LIBRARY_PATH} (tests) or the JAR's {@code native/} directory.
  */
 public interface AimuxFFI extends Library {
 
-    AimuxFFI INSTANCE = Native.load("aimux_ffi", AimuxFFI.class);
+    AimuxFFI INSTANCE = Native.load("aimux_ffi", AimuxFFI.class,
+        Collections.singletonMap(Library.OPTION_STRING_ENCODING, "UTF-8"));
 
     // ── Stream callbacks (match C on_part / on_done; no on_error) ───────────
 
@@ -139,6 +150,13 @@ public interface AimuxFFI extends Library {
 
     /** Writes JSON ChatCompletion to {@code outJson} (caller MUST free with {@link #aimux_free_string}); returns the error or null. */
     Pointer aimux_generate_text_as_openai(long handle, String promptJson, String optsJson, PointerByReference outJson);
+
+    /**
+     * Convert a serialized GenerateTextResult into a serialized ChatCompletion
+     * (the conversion half of {@link #aimux_generate_text_as_openai}); the
+     * handle only supplies the fallback model id. Caller MUST free.
+     */
+    Pointer aimux_generate_text_result_as_openai(long handle, String resultJson, PointerByReference outJson);
 
     /**
      * Push streaming with OpenAI Chat Completions output; blocks until the stream

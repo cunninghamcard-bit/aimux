@@ -117,6 +117,68 @@ class ToolCallRepairTest {
     }
 
     @Test
+    void generateTextAsOpenAICarriesTheRepairedArguments() {
+        try (MockProviderServer server = new MockProviderServer()) {
+            server.setResponseBody(toolCallResponse("{\"city\":\"Tokyo\"}"));
+            Types.GenerateTextOptions options = Types.GenerateTextOptions.builder()
+                .tools(Collections.singletonList(strictWeatherTool()))
+                .repairToolCall(context -> Types.RawToolCall.builder()
+                    .toolCallId(context.getToolCall().getToolCallId())
+                    .toolName(context.getToolCall().getToolName())
+                    .input(context.getToolCall().getInput().replace("city", "location"))
+                    .build())
+                .build();
+
+            try (TypedModel model =
+                     TypedModel.openaiWithBase("sk-test-fake-key", "gpt-4o", server.baseUrl())) {
+                // A ChatCompletion has no invalid marker: the native result is
+                // repaired, then converted.
+                Types.ChatCompletion completion =
+                    model.generateTextAsOpenAI("What is the weather in Tokyo?", options);
+
+                Types.ChatCompletionToolCall call =
+                    completion.getChoices().get(0).getMessage().getToolCalls().get(0);
+                assertThat(call.getFunction().getArguments()).isEqualTo("{\"location\":\"Tokyo\"}");
+            }
+        }
+    }
+
+    @Test
+    void aStreamRepairFailingAtTheBoundaryStillDeliversTheCall() {
+        try (MockProviderServer server = new MockProviderServer()) {
+            server.setContentType("text/event-stream");
+            server.setResponseBody(toolCallSse("{\"city\":\"Tokyo\"}"));
+            // A replacement without a tool_call_id is not a RawToolCall on the
+            // wire: the library rejects the reply itself (not the hook failing).
+            Types.GenerateTextOptions options = Types.GenerateTextOptions.builder()
+                .tools(Collections.singletonList(strictWeatherTool()))
+                .repairToolCall(context -> Types.RawToolCall.builder()
+                    .toolCallId(null)
+                    .toolName(context.getToolCall().getToolName())
+                    .input("{\"location\":\"Tokyo\"}")
+                    .build())
+                .build();
+
+            try (TypedModel model =
+                     TypedModel.openaiWithBase("sk-test-fake-key", "gpt-4o", server.baseUrl())) {
+                List<Types.StreamPart> parts = new ArrayList<>();
+                List<String> errors = new ArrayList<>();
+                model.streamText("What is the weather in Tokyo?", options,
+                    parts::add, () -> { }, errors::add);
+
+                assertThat(errors).hasSize(1);
+                assertThat(errors.get(0)).startsWith("failed to repair tool call:");
+                List<Types.StreamPart.ToolCall> calls = parts.stream()
+                    .filter(p -> p instanceof Types.StreamPart.ToolCall)
+                    .map(p -> (Types.StreamPart.ToolCall) p)
+                    .collect(Collectors.toList());
+                assertThat(calls).hasSize(1);
+                assertThat(calls.get(0).getInvalid()).isTrue();
+            }
+        }
+    }
+
+    @Test
     void streamTextStreamDeliversTheRepairedToolCallPart() {
         try (MockProviderServer server = new MockProviderServer()) {
             server.setContentType("text/event-stream");

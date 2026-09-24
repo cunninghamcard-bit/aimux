@@ -1890,10 +1890,16 @@ public final class Types {
          * Host-side one-shot repair for invalid tool calls (RFC-0035), the
          * aimux equivalent of the AI SDK {@code repairToolCall}.
          *
-         * <p>Applies to {@link TypedModel} generate / stream calls only: it is
-         * never serialized into the options JSON, and it does NOT apply to the
-         * OpenAI-format outputs ({@code generateTextAsOpenAI} /
-         * {@code streamTextAsOpenAI}), whose shape carries no invalid marker.
+         * <p>Applies to {@link TypedModel} calls only and is never serialized
+         * into the options JSON. {@code generateTextAsOpenAI} repairs the
+         * native result before converting it; {@code streamTextAsOpenAI} does
+         * not reflect repair (its tool-argument deltas are the provider's
+         * text, as in the AI SDK).
+         *
+         * <p>If a repair fails at the boundary while streaming (not in the
+         * hook — a throwing hook is a {@code ToolCallRepair} error on the
+         * call), {@code onError} is told and the unrepaired part is still
+         * delivered. The stream waits for the hook, without a timeout.
          *
          * <p>A stream hook may call back into the model being streamed, but
          * only from the thread it is invoked on: that thread borrows the

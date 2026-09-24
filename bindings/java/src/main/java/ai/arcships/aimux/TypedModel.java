@@ -293,14 +293,22 @@ public class TypedModel implements Closeable {
                                  Runnable onDone, Consumer<String> onError) {
         raw.streamText(
             promptJson, optsJson,
-            partJson -> {
+            rawPartJson -> {
+                // Repair runs on the stream thread, between the native part
+                // and the consumer, so the consumer only ever sees the
+                // repaired call. The three repair functions are pure data
+                // calls, safe to make from inside the native callback. A
+                // repair that fails at the boundary (rather than in the hook,
+                // which core turns into a ToolCallRepair error) must not drop
+                // the call: report it and deliver the unrepaired part.
+                String partJson = rawPartJson;
                 try {
-                    // Repair runs on the stream thread, between the native part
-                    // and the consumer, so the consumer only ever sees the
-                    // repaired call. The three repair functions are pure data
-                    // calls, safe to make from inside the native callback.
-                    onPart.accept(decodePart(
-                        ToolCallRepairs.repairStreamPart(partJson, promptJson, optsJson, hook, raw)));
+                    partJson = ToolCallRepairs.repairStreamPart(rawPartJson, promptJson, optsJson, hook, raw);
+                } catch (RuntimeException e) {
+                    onError.accept("failed to repair tool call: " + e.getMessage());
+                }
+                try {
+                    onPart.accept(decodePart(partJson));
                 } catch (RuntimeException e) {
                     onError.accept("failed to decode StreamPart: " + e.getMessage());
                 }
@@ -432,7 +440,7 @@ public class TypedModel implements Closeable {
      * @return Decoded {@link Types.ChatCompletion}.
      */
     public Types.ChatCompletion generateTextAsOpenAI(String prompt, Types.GenerateTextOptions options) {
-        return decodeChatCompletion(raw.generateTextAsOpenAI(encode(prompt), encodeOptions(options)));
+        return generateTextAsOpenAIParts(encode(prompt), encodeOptions(options), hook(options));
     }
 
     /**
@@ -453,7 +461,22 @@ public class TypedModel implements Closeable {
      * @return Decoded {@link Types.ChatCompletion}.
      */
     public Types.ChatCompletion generateTextAsOpenAI(List<Types.ModelMessage> messages, Types.GenerateTextOptions options) {
-        return decodeChatCompletion(raw.generateTextAsOpenAI(encode(messages), encodeOptions(options)));
+        return generateTextAsOpenAIParts(encode(messages), encodeOptions(options), hook(options));
+    }
+
+    /**
+     * A {@code ChatCompletion} has no {@code invalid} marker to repair from, so
+     * with a hook the native result is generated, repaired, then converted —
+     * its tool calls carry the repaired arguments.
+     */
+    private Types.ChatCompletion generateTextAsOpenAIParts(String promptJson, String optsJson,
+                                                           ToolCallRepair hook) {
+        if (hook == null) {
+            return decodeChatCompletion(raw.generateTextAsOpenAI(promptJson, optsJson));
+        }
+        String resultJson = raw.generateText(promptJson, optsJson);
+        resultJson = ToolCallRepairs.repairResult(resultJson, promptJson, optsJson, hook);
+        return decodeChatCompletion(raw.generateTextResultAsOpenAI(resultJson));
     }
 
     private Types.ChatCompletion decodeChatCompletion(String resultJson) {
