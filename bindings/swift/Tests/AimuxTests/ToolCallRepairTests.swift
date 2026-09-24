@@ -66,6 +66,18 @@ final class ToolCallRepairTests: XCTestCase {
         XCTAssertEqual(transcript?["city"]?.stringValue, "Singapore")
     }
 
+    func testGenerateAsOpenAICarriesRepairedArguments() throws {
+        // A ChatCompletion has no invalid marker: the native result is
+        // repaired, then converted.
+        let server = MockHTTPServer(response: .json(invalidResponse))
+        try server.start(); defer { server.stop() }
+        let completion = try Model.openai(apiKey: "test", modelId: "gpt-4o", baseUrl: server.baseURL)
+            .generateTextAsOpenAI(prompt: .text("weather?"), options: options(repaired))
+        let call = completion.choices[0].message.toolCalls?.first
+        XCTAssertEqual(call?.id, "call-1")
+        XCTAssertEqual(call?.function.arguments, #"{"city":"Singapore"}"#)
+    }
+
     func testStreamRepairsToolCallAndPreservesDeltas() throws {
         let parts = try streamParts(responses: [.sse(streamBody)]) { _ in repaired }
         XCTAssertEqual(parts.compactMap { if case .toolInputDelta(_, let value, _) = $0 { value } else { nil } }.joined(),

@@ -9,9 +9,10 @@
 // registered with the C ABI and no native call is in flight while the closure
 // runs, so the closure may itself call back into aimux.
 //
-// OpenAI-shaped output (`generateTextAsOpenAI` / `streamTextAsOpenAI`) has no
-// equivalent: `ChatCompletion` carries neither `invalid` nor `error`, so a host
-// cannot tell which call needs repairing (RFC-0035 §4).
+// OpenAI-shaped output has no `invalid` / `error` to repair from, so
+// `generateTextAsOpenAI` repairs the native result and converts it
+// (`aimux_generate_text_result_as_openai`); `streamTextAsOpenAI` does not
+// reflect repair (RFC-0035 §4).
 
 import CAimuxFFI
 import Foundation
@@ -223,6 +224,10 @@ func repairedStreamPartJson(
 }
 
 /// Run `body` on another thread and block until it answers.
+///
+/// A dedicated `Thread`, not `DispatchQueue.sync`: GCD runs a `sync` block on
+/// the calling thread when it can, which would put the hook right back on the
+/// guarded callback thread.
 ///
 /// Invariant: the FFI re-entrancy guard is **thread-local**. A stream
 /// `on_part` callback runs on the very thread that entered

@@ -1162,10 +1162,15 @@ public struct GenerateTextOptions: Codable, Equatable {
     /// into aimux — asking a model to fix the arguments is the usual reason to
     /// set it. It is host-side only and never appears in the options JSON.
     ///
-    /// Applies to `generateText`, `generateObject`, `consumeStreamText` and
-    /// `streamText`; it does **not** apply to the OpenAI-format outputs
-    /// (`generateTextAsOpenAI` / `streamTextAsOpenAI`), whose shape carries no
-    /// invalid marker.
+    /// Applies to `generateText`, `generateObject`, `consumeStreamText`,
+    /// `streamText` and `generateTextAsOpenAI` (which repairs the native result
+    /// before converting it). `streamTextAsOpenAI` does not reflect repair: its
+    /// argument deltas are the provider's text, as in the AI SDK.
+    ///
+    /// While streaming, the stream waits for the function, and an abort does
+    /// not take effect until it returns. If a repair fails at the boundary
+    /// (not in the function — a throw is a `ToolCallRepair` error on the
+    /// call), `onError` is told and the stream continues.
     public var repairToolCall: RepairToolCall? {
         get { repairToolCallBox?.run }
         set { repairToolCallBox = newValue.map(RepairToolCallBox.init(run:)) }
@@ -1826,8 +1831,19 @@ public extension Model {
     ) throws -> ChatCompletion {
         let promptJson = try AimuxCodable.jsonString(for: prompt)
         let optsJson = try options.map { try AimuxCodable.jsonString(for: $0) }
-        let resultJson = try generateTextAsOpenAI(prompt: promptJson, options: optsJson)
-        return try JSONDecoder().decode(ChatCompletion.self, from: Data(resultJson.utf8))
+        let completionJson: String
+        if options?.repairToolCall == nil {
+            completionJson = try generateTextAsOpenAI(prompt: promptJson, options: optsJson)
+        } else {
+            // A ChatCompletion has no invalid marker: repair the native result,
+            // then convert it.
+            let resultJson = try repairedResultJson(
+                generateText(prompt: promptJson, options: optsJson),
+                promptJson: promptJson, optsJson: optsJson, options: options
+            )
+            completionJson = try generateTextResultAsOpenAI(resultJson)
+        }
+        return try JSONDecoder().decode(ChatCompletion.self, from: Data(completionJson.utf8))
     }
 
     /// Stream text with OpenAI Chat Completions output, yielding typed
