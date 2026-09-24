@@ -18,17 +18,36 @@ from .aimux import (
 )
 
 #: Layer adapter: takes the repair-context dict, returns a replacement raw tool
-#: call dict, or None to leave the call unchanged. Raising means "failed".
+#: call dict, or None to leave the call unchanged. Raising
+#: :class:`RepairFailed` (via :func:`run_hook`) means "failed"; any other
+#: exception is a bug on this side and propagates.
 RepairAdapter = Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]
+
+
+class RepairFailed(Exception):
+    """The caller's repair function raised; only its message crosses over."""
+
+
+def run_hook(fn: Callable[[Any], Any], argument: Any) -> Any:
+    """Call the caller's repair function.
+
+    Only an exception raised by ``fn`` itself becomes a ``failed`` reply; the
+    adapters' own decoding and encoding stay outside, so a bug there surfaces
+    as itself instead of posing as a repair failure.
+    """
+    try:
+        return fn(argument)
+    except Exception as exc:
+        raise RepairFailed(str(exc) or type(exc).__name__) from exc
 
 
 def _reply(repair: RepairAdapter, context: Dict[str, Any]) -> str:
     try:
         replacement = repair(context)
-    except Exception as exc:
+    except RepairFailed as exc:
         # The host language's exception has no counterpart on the Rust side:
         # only its message survives, as the cause of a ToolCallRepairError.
-        return json.dumps({"type": "failed", "message": str(exc) or type(exc).__name__})
+        return json.dumps({"type": "failed", "message": str(exc)})
     if replacement is None:
         return json.dumps({"type": "unchanged"})
     return json.dumps({"type": "repaired", "tool_call": replacement})

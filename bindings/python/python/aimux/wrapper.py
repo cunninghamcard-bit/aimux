@@ -920,10 +920,13 @@ class GenerateTextOptions(BaseModel):
 
     It runs outside the native call and may itself call back into aimux (e.g.
     ask a model to rewrite the arguments). A call generated without ``tools``
-    is never repaired, and the OpenAI-format outputs
-    (``generate_text_as_openai`` / ``stream_text_as_openai``) do not support
-    repair at all — their shape carries no ``invalid`` marker. Host-only: it is
-    never serialized into the options sent across the boundary.
+    is never repaired. ``generate_text_as_openai`` repairs the native result
+    before converting it; ``stream_text_as_openai`` does not reflect repair
+    (its tool-argument deltas are the provider's text, as in the AI SDK).
+    Only an exception raised by this function means "failed"; returning
+    something other than a :class:`RawToolCall` or ``None`` is an error.
+    Host-only: it is never serialized into the options sent across the
+    boundary.
     """
 
 
@@ -1194,7 +1197,8 @@ def _repair_adapter(options: Optional[GenerateTextOptions]):
         return None
 
     def adapter(context: dict) -> Optional[dict]:
-        replacement = fn(ToolCallRepairContext.model_validate(context))
+        typed = ToolCallRepairContext.model_validate(context)
+        replacement = _repair.run_hook(fn, typed)
         if replacement is None:
             return None
         return replacement.model_dump(mode="json", exclude_none=True)
@@ -1282,10 +1286,20 @@ def generate_text_as_openai(
 
     Returns:
         A :class:`ChatCompletion` with ``.id``, ``.choices``, ``.usage``, …
+
+    With ``options.repair_tool_call``, invalid calls are repaired on the
+    native result first and the completion is converted from it, so its
+    ``tool_calls`` carry the repaired arguments.
     """
     prompt_json = _prompt_to_json(prompt)
     opts_json = _opts_to_json(options)
-    result_json = model.generate_text_as_openai(prompt_json, opts_json)
+    repair = _repair_adapter(options)
+    if repair is not None:
+        result_json = model.generate_text(prompt_json, opts_json)
+        result_json = _repair.repair_result(result_json, prompt_json, opts_json, repair)
+        result_json = model.generate_text_result_as_openai(result_json)
+    else:
+        result_json = model.generate_text_as_openai(prompt_json, opts_json)
     return ChatCompletion.model_validate_json(result_json)
 
 

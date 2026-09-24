@@ -18,7 +18,8 @@ use crate::error::{
 };
 use aimux_core::AiMuxError;
 use aimux_core::generate::{
-    GenerateTextOptions, generate_object, generate_text, generate_text_as_openai, stream_text,
+    GenerateTextOptions, GenerateTextResult, generate_object, generate_text,
+    generate_text_as_openai, generate_text_result_to_chat_completion, stream_text,
     stream_text_as_openai,
 };
 use aimux_core::language_model::LanguageModel;
@@ -288,6 +289,20 @@ impl Model {
             Ok(r) => serialize_result(&r),
             Err(e) => Err(to_py_err(&e)),
         }
+    }
+
+    /// Convert a serialized GenerateTextResult into a serialized
+    /// ChatCompletion — the conversion half of `generate_text_as_openai`.
+    ///
+    /// For repairing on the host (RFC-0035): patch the native result, then
+    /// convert it, so the completion's tool calls are the repaired ones. This
+    /// model only supplies the fallback model id.
+    fn generate_text_result_as_openai(&self, result_json: &str) -> PyResult<String> {
+        let result: GenerateTextResult = wire_json("result_json", result_json)?;
+        serialize_result(&generate_text_result_to_chat_completion(
+            &result,
+            self.inner.model_id(),
+        ))
     }
 
     /// Stream text as OpenAI Chat Completion chunks (RFC-0026).
@@ -1112,7 +1127,8 @@ fn apply_tool_call_repair(
 /// call was generated with.
 ///
 /// The OpenAI-shaped result has no equivalent: it carries no ``invalid`` /
-/// ``error``, so repair is driven from the native result.
+/// ``error``, so repair is driven from the native result, which
+/// ``Model.generate_text_result_as_openai`` then converts.
 #[pyfunction]
 #[pyo3(signature = (result_json, opts_json, tool_call_id, reply_json))]
 fn apply_tool_call_repair_to_result(

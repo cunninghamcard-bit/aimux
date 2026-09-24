@@ -254,9 +254,9 @@ def _prompt_to_json(prompt: Union[str, List[Dict[str, Any]]]) -> str:
 #:
 #: It runs outside the native call, so it may itself call back into aimux (for
 #: example ask a model to rewrite the arguments). Calls made without ``tools``
-#: are never repaired, and the OpenAI-format outputs
-#: (``generate_text_as_openai`` / ``stream_text_as_openai``) do not support
-#: repair at all — their shape carries no ``invalid`` marker.
+#: are never repaired. ``generate_text_as_openai`` repairs the native result
+#: before converting it; ``stream_text_as_openai`` does not reflect repair
+#: (its tool-argument deltas are the provider's text, as in the AI SDK).
 RepairToolCall = Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]
 
 
@@ -271,8 +271,11 @@ def _opts_to_json(options: Optional[Dict[str, Any]]) -> Optional[str]:
     return json.dumps({k: v for k, v in options.items() if k != "repair_tool_call"})
 
 
-def _repair_fn(options: Optional[Dict[str, Any]]) -> Optional["RepairToolCall"]:
-    return options.get("repair_tool_call") if options else None
+def _repair_fn(options: Optional[Dict[str, Any]]) -> Optional[_repair.RepairAdapter]:
+    fn = options.get("repair_tool_call") if options else None
+    if fn is None:
+        return None
+    return lambda context: _repair.run_hook(fn, context)
 
 
 def generate_text(
@@ -401,7 +404,15 @@ def generate_text_as_openai(
     """
     prompt_json = _prompt_to_json(prompt)
     opts_json = _opts_to_json(options)
-    result_json = model.generate_text_as_openai(prompt_json, opts_json)
+    repair = _repair_fn(options)
+    if repair is not None:
+        # A ChatCompletion has no `invalid` marker: repair the native result,
+        # then convert it.
+        result_json = model.generate_text(prompt_json, opts_json)
+        result_json = _repair.repair_result(result_json, prompt_json, opts_json, repair)
+        result_json = model.generate_text_result_as_openai(result_json)
+    else:
+        result_json = model.generate_text_as_openai(prompt_json, opts_json)
     return json.loads(result_json)
 
 

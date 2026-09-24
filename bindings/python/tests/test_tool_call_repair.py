@@ -8,6 +8,7 @@ from aimux import (
     apply_tool_call_repair,
     apply_tool_call_repair_to_result,
     generate_text,
+    generate_text_as_openai,
     openai,
     stream_text,
     tool_call_repair_context,
@@ -106,6 +107,43 @@ def test_stream_repairs_tool_call_and_preserves_deltas():
     assert calls[0]["input"] == {"city": "Tokyo"}
     deltas = "".join(part["ToolInputDelta"]["delta"] for part in parts if "ToolInputDelta" in part)
     assert deltas == '{"location":"Tokyo"}'
+
+
+def test_generate_as_openai_carries_the_repaired_arguments():
+    # A ChatCompletion has no `invalid` marker: the binding repairs the native
+    # result and converts it, on both API layers.
+    with MockServer(OPENAI_TOOL_CALL) as mock:
+        model = openai("test-key", "gpt-4o", mock.url)
+        plain = generate_text_as_openai(model, "What's the weather in Tokyo?", {
+            "tools": TOOLS,
+            "repair_tool_call": _repair,
+        })
+        completion = typed.generate_text_as_openai(
+            model,
+            "What's the weather in Tokyo?",
+            typed.GenerateTextOptions(
+                tools=[typed.FunctionTool(name="get_weather", input_schema=WEATHER_SCHEMA)],
+                repair_tool_call=_typed_repair,
+            ),
+        )
+
+    arguments = plain["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+    assert json.loads(arguments) == {"city": "Tokyo"}
+    typed_call = completion.choices[0].message.tool_calls[0]
+    assert json.loads(typed_call.function.arguments) == {"city": "Tokyo"}
+
+
+def test_a_wrong_return_type_is_an_error_not_a_failed_repair():
+    # Only the hook's own exception means "failed"; the typed layer's encoding
+    # of what it returned is not the hook's failure and must surface as itself.
+    options = typed.GenerateTextOptions(
+        tools=[typed.FunctionTool(name="get_weather", input_schema=WEATHER_SCHEMA)],
+        repair_tool_call=lambda ctx: {"tool_call_id": "x", "tool_name": "y", "input": "{}"},
+    )
+    with MockServer(OPENAI_TOOL_CALL) as mock:
+        model = openai("test-key", "gpt-4o", mock.url)
+        with pytest.raises(AttributeError):
+            typed.generate_text(model, "What's the weather in Tokyo?", options)
 
 
 def _raise(_context):
