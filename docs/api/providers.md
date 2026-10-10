@@ -9,7 +9,7 @@
 
 | category | count |
 |----------|-------|
-| Registry-backed OpenAI-compatible (`provider(name, ...)`) | 281 |
+| Registry-backed OpenAI-compatible (`provider(name, ...)`) | 282 |
 | Non-registry: Native protocol providers | 14 |
 | Non-registry: Speech-only providers (TTS) | 4 |
 | Non-registry: Transcription-only providers (STT) | 5 |
@@ -22,11 +22,11 @@
 | Non-registry: Stability image provider (image modality only) | 1 |
 | Non-registry: Video-only provider (runwayml) | 1 |
 | Non-registry: Search-only providers (web search modality) | 11 |
-| **Total providers** | **326** |
+| **Total providers** | **327** |
 
-**281 registry-backed OpenAI-compatible providers** (create presets by name via `provider(name, ...)`) + **45 non-registry providers** (construct via the typed factories listed below).
+**282 registry-backed OpenAI-compatible providers** (create presets by name via `provider(name, ...)`) + **45 non-registry providers** (construct via the typed factories listed below).
 
-## Registry-backed (OpenAI-compatible) — 281
+## Registry-backed (OpenAI-compatible) — 282
 
 | name | display | auth | env var | base_url |
 |------|---------|------|---------|----------|
@@ -153,6 +153,7 @@
 | `krutrim` | Krutrim | api_key | `KRUTRIM_API_KEY` | `https://api.krutrim.ai/v1` |
 | `kuae_cloud_coding_plan` | KUAE Cloud Coding Plan | api_key | `KUAE_API_KEY` | `https://coding-plan-endpoint.kuaecloud.net/v1` |
 | `lambda_ai` | Lambda AI | api_key | `LAMBDA_API_KEY` | `https://api.lambda.ai/v1` |
+| `laya` | Laya | none | — | `http://127.0.0.1:8000/v1` (URL from `LAYA_BASE_URL`) |
 | `lemonade` | Lemonade | api_key | `LEMONADE_API_KEY` | `http://localhost:13305/v1` |
 | `lemonfox_ai` | Lemonfox AI | api_key | `LEMONFOX_API_KEY` | `https://api.lemonfox.ai/v1` |
 | `libertai` | Libertai | api_key | `LIBERTAI_API_KEY` | `https://api.libertai.io/v1` |
