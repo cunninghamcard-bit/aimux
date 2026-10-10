@@ -67,7 +67,7 @@ class DecisionModelTest {
             exchange.close();
         });
         server.start();
-        String config = mapper.createObjectNode().put("base_url", "http://127.0.0.1:" + server.getAddress().getPort() + "/v1").toString();
+        String config = mapper.createObjectNode().put("baseUrl", "http://127.0.0.1:" + server.getAddress().getPort() + "/v1").toString();
         try (ProviderHandle provider = Model.createProvider("openai", "test-key", config);
              DecisionModel model = provider.decisionModel("gpt-6-luna")) {
             JsonNode result = mapper.readTree(model.decide(fixture.get("options").toString()));
