@@ -23,7 +23,7 @@ pub struct JevConfig {
     pub endpoint: String,
     pub headers: HashMap<String, String>,
     pub probability_source: DecisionProbabilitySource,
-    /// Retry settings [`decide`](aimux_core::decision_model::decide) uses.
+    /// Retry settings [`decide`] uses.
     pub retry_config: aimux_core::retry::RetryConfig,
 }
 
