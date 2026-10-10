@@ -592,7 +592,6 @@ async fn retry_and_cancellation_use_shared_transport() {
 
 #[test]
 fn local_factories_and_wrapper_factories_preserve_credentials_for_replay() {
-    use aimux_core::Provider;
     for provider in ["ollama", "llamacpp", "localai", "laya", "sglang", "vllm"] {
         let handle = provider_handle(
             provider,

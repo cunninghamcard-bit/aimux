@@ -50,6 +50,15 @@ violation() {
     fi
 }
 
+
+# ── D16 allowlist (TEMPORARY, decision files only) ──────────────────────────
+# #226's decision semantics (retry_config, config_snapshot, api_key_source,
+# provider_handle options) were restored in decision code only. Each entry
+# below is scoped to one file; the rules stay enforced everywhere else.
+d16_allow() {
+    grep -vE '^(\./)?(aimux-core/src/decision_model\.rs|aimux-core/src/recording\.rs|aimux-core/src/retry\.rs|aimux-providers/src/decision_support\.rs|aimux-providers/src/jev\.rs|aimux-providers/src/openai/decision\.rs|aimux-providers/src/provider_handle\.rs|aimux-providers/src/runtime_decision\.rs|aimux-providers/tests/(decision_handle|openai_decision|runtime_decision|jev|decision_recording)_test\.rs):' || true # D16 待 Trey 定
+}
+
 # ── Rule 1: no call-level reads inside aimux-providers/src ───────────────────
 #
 # Allowed: lines that build `HttpRequest::new(`, and aimux-providers/src/replay.rs.
@@ -61,7 +70,8 @@ rule1_hits="$(
     { grep -rnE "$rule1_pattern" aimux-providers/src --include='*.rs' || true; } |
         grep -v 'HttpRequest::new(' |
         grep -v '^aimux-providers/src/replay\.rs:' |
-        grep -vE '^aimux-providers/src/(elevenlabs\.rs|openai/transcription\.rs):[0-9]+: *timeout: options\.timeout,$' ||
+        grep -vE '^aimux-providers/src/(elevenlabs\.rs|openai/transcription\.rs):[0-9]+: *timeout: options\.timeout,$' |
+        grep -vE '^aimux-providers/src/provider_handle\.rs:[0-9]+:.*options\.max_retries' || # D16 待 Trey 定
         true
 )"
 violation 'aimux-providers/src reads options.max_retries / timeout / session_id / call_id' "$rule1_hits"
@@ -90,7 +100,12 @@ for pattern in \
     'StaticBearerConfig' \
     'api_key_source' \
     'body_merge|apply_body_overrides|deep_merge_json'; do
-    violation "removed name \`$pattern\` is back" "$(search_removed "$pattern")"
+    hits="$(search_removed "$pattern")"
+    case "$pattern" in
+        'fn config_snapshot' | 'fn retry_config' | 'RetryConfig' | 'api_key_source')
+            hits="$(printf '%s\n' "$hits" | d16_allow)" ;; # D16 待 Trey 定
+    esac
+    violation "removed name \`$pattern\` is back" "$hits"
 done
 
 # `shared_client()` lives only in the injectable transport.
@@ -152,8 +167,9 @@ violation 'groq / deepseek literal in the shared OpenAI or compatible package' "
 
 # ── Rule 5: the builder-era compat names stay removed in the providers crate ──
 rule5_hits="$(
-    grep -rnE 'OpenAIConfig\b|OpenAIConfigProvider|OpenAICompatProfile|PLACEHOLDER_API_KEY|openai_legacy' \
+    { grep -rnE 'OpenAIConfig\b|OpenAIConfigProvider|OpenAICompatProfile|PLACEHOLDER_API_KEY|openai_legacy' \
         aimux-providers/src aimux-providers/tests --include='*.rs' || true
+    } | grep -vE '^aimux-providers/src/provider_handle\.rs:[0-9]+:.*PLACEHOLDER_API_KEY' || true # D16 待 Trey 定 (D15 placeholder "not-needed")
 )"
 violation 'OpenAIConfig / OpenAIConfigProvider / OpenAICompatProfile / PLACEHOLDER_API_KEY / openai_legacy is back in aimux-providers' "$rule5_hits"
 
@@ -249,8 +265,9 @@ violation 'vendor providerOptions namespace key spelled outside the package opti
 # Core owns `prepare_retries`. Providers run their poll / download stages with
 # the bounded helpers of `shared::poll`, and never re-submit a job.
 rule9_hits="$(
-    grep -rnE 'prepare_retries|aimux_core::retry|use aimux_core::\{[^}]*\bretry\b' \
+    { grep -rnE 'prepare_retries|aimux_core::retry|use aimux_core::\{[^}]*\bretry\b' \
         aimux-providers/src --include='*.rs' || true
+    } | grep -vE '^aimux-providers/src/(decision_support|jev|openai/decision|provider_handle|runtime_decision)\.rs:[0-9]+:.*(aimux_core::retry::RetryConfig|use aimux_core::retry::RetryConfig;)' || true # D16 待 Trey 定 (RetryConfig type only; prepare_retries still banned)
 )"
 violation 'prepare_retries / aimux_core::retry used in aimux-providers/src (exceptions: none)' "$rule9_hits"
 

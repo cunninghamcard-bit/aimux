@@ -201,5 +201,61 @@ async fn keyless_local_runtime_sends_placeholder_bearer() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].headers["authorization"], "Bearer not-needed");
     let recorded = serde_json::to_string(&recorder.completed()).unwrap();
-    assert!(!recorded.contains("Bearer not-needed"));
+    assert!(
+        !recorded.contains("not-needed"),
+        "placeholder key leaked into the recording: {recorded}"
+    );
+}
+
+/// Explicit `Authorization` and `x-api-key` request headers reach the wire but
+/// are recorded under their names with the value `[REDACTED]`.
+#[tokio::test]
+#[serial]
+async fn recorded_explicit_auth_headers_are_redacted() {
+    let server = MockServer::start().await;
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/openai_decisions.json")).unwrap();
+    Mock::given(method("POST"))
+        .and(path("/v1/decisions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&fixture["response"]))
+        .mount(&server)
+        .await;
+    let model = provider_handle(
+        "openai",
+        Some("sk-arg-raw-secret".into()),
+        Some(ProviderOptions {
+            base_url: Some(format!("{}/v1", server.uri())),
+            headers: Some(HashMap::from([
+                ("Authorization".into(), "Bearer hdr-raw-auth-secret".into()),
+                ("x-api-key".into(), "hdr-raw-xkey-secret".into()),
+            ])),
+            ..Default::default()
+        }),
+    )
+    .unwrap()
+    .decision_model("gpt-6-luna")
+    .unwrap();
+    let recorder = Arc::new(RingRecorder::new());
+    recording::init_recording(Some(recorder.clone()));
+    let _stop = Stop;
+    let options: DecisionCallOptions = serde_json::from_value(fixture["options"].clone()).unwrap();
+    decide(model.as_ref(), options).await.unwrap();
+    recording::init_recording(None);
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests[0].headers["x-api-key"], "hdr-raw-xkey-secret");
+    let mut file = Vec::new();
+    recorder.export_jsonl(&mut file).unwrap();
+    let written = String::from_utf8(file).unwrap();
+    for secret in [
+        "hdr-raw-auth-secret",
+        "hdr-raw-xkey-secret",
+        "sk-arg-raw-secret",
+    ] {
+        assert!(!written.contains(secret), "{secret} leaked: {written}");
+    }
+    let record: Value = serde_json::from_str(written.lines().next().unwrap()).unwrap();
+    let headers = &record["provider"]["providerOptions"]["headers"];
+    assert_eq!(headers["Authorization"], "[REDACTED]");
+    assert_eq!(headers["x-api-key"], "[REDACTED]");
 }
