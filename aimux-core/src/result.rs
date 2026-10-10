@@ -93,6 +93,13 @@ pub struct ToolApprovalRequestOutput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub signature: Option<String>,
+    /// Tool input before input-schema validation and transformation, present
+    /// when it differs from the validated input (AI SDK
+    /// `ToolApprovalRequest.inputSchemaInput`). Pass-through only: core runs
+    /// no host approval (#200 §0.4 Q1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub input_schema_input: Option<serde_json::Value>,
 }
 
 /// A source / citation (e.g. URL citation from search-preview models). The
