@@ -4,13 +4,13 @@ use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
+use std::time::Duration;
 
 use aimux_core::decision_model::*;
-use aimux_core::provider_registry::{ProviderRegistry, create_provider_registry};
 use aimux_core::recording::{self, RingRecorder};
 use aimux_core::replay::{MockDecisionReplayModel, replay_decision_with_model};
 use aimux_core::{AiMuxError, Provider};
-use aimux_providers::{OpenAIProviderSettings, create_openai};
+use aimux_providers::{OpenAIProviderSettings, ProviderOptions, create_openai, provider_handle};
 use serde_json::{Value, json};
 use serial_test::serial;
 use wiremock::matchers::{body_json, header, method, path};
@@ -24,35 +24,52 @@ fn fixture() -> Value {
 fn options() -> DecisionCallOptions {
     serde_json::from_value(fixture()["options"].clone()).unwrap()
 }
-fn settings(server: &MockServer, api_key: &str) -> OpenAIProviderSettings {
-    OpenAIProviderSettings {
+fn config(server: &MockServer) -> ProviderOptions {
+    ProviderOptions {
         base_url: Some(format!("{}/v1", server.uri())),
-        api_key: Some(api_key.into()),
         organization: Some("org-test".into()),
         project: Some("proj-test".into()),
         headers: Some(HashMap::from([(
             "X-Client".into(),
-            Some("decision-tests".into()),
+            "decision-tests".into(),
         )])),
         ..Default::default()
     }
 }
 fn model(server: &MockServer) -> Box<dyn DecisionModel> {
-    create_openai(settings(server, "decision-secret"))
-        .unwrap()
-        .decision_model("gpt-6-luna")
-        .unwrap()
+    provider_handle(
+        "openai",
+        Some("decision-secret".into()),
+        Some(config(server)),
+    )
+    .unwrap()
+    .decision_model("gpt-6-luna")
+    .unwrap()
 }
-/// The caller's registry at replay time: same provider id, its own endpoint
-/// and credential (RFC-0036: recordings carry identity only).
-fn replay_registry(server: &MockServer) -> ProviderRegistry {
-    let openai: Arc<dyn Provider> =
-        Arc::new(create_openai(settings(server, "replacement-key")).unwrap());
-    create_provider_registry(
-        [("openai".to_string(), openai)].into_iter().collect(),
+/// Type adaptation (stack): provider options are keyed objects.
+fn provider_options(
+    provider: &str,
+    options: Value,
+) -> Option<HashMap<String, serde_json::Map<String, Value>>> {
+    let Value::Object(options) = options else {
+        panic!("provider options must be an object");
+    };
+    Some(HashMap::from([(provider.to_string(), options)]))
+}
+/// Replay takes endpoint and credential from the caller's registry (RFC-0036
+/// stack): register the rebuilt connection under the recorded provider id.
+fn registry_with(
+    provider_id: &str,
+    provider: Box<dyn Provider>,
+) -> aimux_core::provider_registry::ProviderRegistry {
+    aimux_core::create_provider_registry(
+        [(provider_id.to_string(), std::sync::Arc::from(provider))]
+            .into_iter()
+            .collect(),
         Default::default(),
     )
 }
+
 async fn mount(server: &MockServer, response: Value) {
     Mock::given(method("POST"))
         .and(path("/v1/decisions"))
@@ -81,19 +98,13 @@ async fn native_wire_maps_all_questions_and_preserves_partial_refusal() {
         .await;
     let mut request = options();
     request.headers = Some(HashMap::from([("X-Per-Call".into(), "yes".into())]));
-    request.provider_options = Some(HashMap::from([
-        (
-            "openai".into(),
-            json!({"safety_identifier":"opaque-user"})
-                .as_object()
-                .cloned()
-                .unwrap(),
-        ),
-        (
-            "other-provider".into(),
-            json!({"ignored":true}).as_object().cloned().unwrap(),
-        ),
-    ]));
+    request.provider_options =
+        provider_options("openai", json!({"safety_identifier":"opaque-user"}));
+    request
+        .provider_options
+        .as_mut()
+        .unwrap()
+        .extend(provider_options("other-provider", json!({"ignored":true})).unwrap());
     let result = decide(model(&server).as_ref(), request).await.unwrap();
     assert!(matches!(
         result.answers["restricted"],
@@ -142,8 +153,8 @@ async fn response_order_and_usage_metadata_do_not_discard_answers() {
         let result = decide(model(&server).as_ref(), options()).await.unwrap();
         assert_eq!(result.answers.len(), 4);
         assert_eq!(
-            result.usage.and_then(|usage| usage.raw),
-            usage.as_object().cloned()
+            result.usage.and_then(|usage| usage.raw).map(Value::Object),
+            if usage.is_null() { None } else { Some(usage) }
         );
     }
 }
@@ -270,7 +281,21 @@ async fn retry_and_standard_provider_errors_use_the_shared_transport() {
         })
         .mount(&server)
         .await;
-    let model = model(&server);
+    let config = config(&server);
+    let model: Box<dyn DecisionModel> = Box::new(
+        create_openai(OpenAIProviderSettings {
+            base_url: config.base_url,
+            api_key: Some("decision-secret".into()),
+            ..Default::default()
+        })
+        .unwrap()
+        .decision("gpt-6-luna")
+        .unwrap()
+        .with_retry_config(aimux_core::retry::RetryConfig {
+            initial_delay: Duration::ZERO,
+            ..Default::default()
+        }),
+    );
     let mut request = options();
     request.max_retries = Some(1);
     decide(model.as_ref(), request).await.unwrap();
@@ -292,21 +317,11 @@ async fn retry_and_standard_provider_errors_use_the_shared_transport() {
 
 #[test]
 fn factory_is_explicit_and_preserves_the_provider_boundary() {
-    let provider = create_openai(OpenAIProviderSettings {
-        api_key: Some("key".into()),
-        ..Default::default()
-    })
-    .unwrap();
+    let provider = aimux_providers::provider_handle("openai", Some("key".into()), None).unwrap();
     let model = provider.decision_model("deployment-alias").unwrap();
     assert_eq!(model.model_id(), "deployment-alias");
     assert!(provider.decision_model(" ").is_err());
-    let other = aimux_providers::deepseek::create_deepseek(
-        aimux_providers::deepseek::DeepSeekProviderSettings {
-            api_key: Some("key".into()),
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    let other = aimux_providers::provider_handle("deepseek", Some("key".into()), None).unwrap();
     assert!(matches!(
         other.decision_model("any"),
         Err(AiMuxError::UnsupportedFunctionality(_))
@@ -347,11 +362,17 @@ async fn unified_recording_replays_refusals_and_rebuilds_the_same_provider_confi
     );
     let replay_server = MockServer::start().await;
     common::replay::mount_recording(&replay_server, &records[0]).await;
-    let rebuilt = aimux_providers::rebuild_decision_provider(
-        &records[0].provider,
-        &replay_registry(&replay_server),
-    )
-    .unwrap();
+    let snapshot = records[0].provider.clone();
+    let registry = registry_with(
+        &snapshot.provider_id,
+        provider_handle(
+            "openai",
+            Some("replacement-key".into()),
+            Some(config(&replay_server)),
+        )
+        .unwrap(),
+    );
+    let rebuilt = aimux_providers::rebuild_decision_provider(&snapshot, &registry).unwrap();
     let again = replay_decision_with_model(&records[0], rebuilt.as_ref())
         .await
         .unwrap();
@@ -403,11 +424,17 @@ async fn images_typed_choices_and_score_descriptions_roundtrip_and_key_replay() 
     assert!(decide(&mock, changed).await.is_err());
     let replay_server = MockServer::start().await;
     common::replay::mount_recording(&replay_server, &records[0]).await;
-    let rebuilt = aimux_providers::rebuild_decision_provider(
-        &records[0].provider,
-        &replay_registry(&replay_server),
-    )
-    .unwrap();
+    let config = records[0].provider.clone();
+    let registry = registry_with(
+        &config.provider_id,
+        provider_handle(
+            "openai",
+            Some("replacement-key".into()),
+            Some(crate::config(&replay_server)),
+        )
+        .unwrap(),
+    );
+    let rebuilt = aimux_providers::rebuild_decision_provider(&config, &registry).unwrap();
     let again = replay_decision_with_model(&records[0], rebuilt.as_ref())
         .await
         .unwrap();
@@ -473,7 +500,7 @@ async fn bad_media_and_duplicate_native_values_are_rejected_before_http() {
     .unwrap();
     let server = MockServer::start().await;
     for (pointer, value) in [
-        ("/images/0/data", json!("bad!")),
+        ("/images/0/data", json!({"Base64":"bad!"})),
         ("/images/0/detail", json!("unknown")),
         ("/images/0/media_type", json!("text/plain")),
         ("/questions/0/options/1/value", json!(true)),

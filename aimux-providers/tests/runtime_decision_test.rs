@@ -7,14 +7,10 @@ use std::sync::{
 use std::time::Duration;
 
 use aimux_core::decision_model::*;
-use aimux_core::provider_registry::{ProviderRegistry, create_provider_registry};
 use aimux_core::recording::{self, RingRecorder};
 use aimux_core::replay::{MockDecisionReplayModel, replay_decision_with_model};
 use aimux_core::{AbortSignal, AiMuxError, Provider};
-use aimux_providers::{
-    JevConfig, JevProvider,
-    openai_compatible::{OpenAICompatibleProviderSettings, create_openai_compatible},
-};
+use aimux_providers::{JevConfig, JevProvider, ProviderOptions, provider_handle};
 use serde_json::{Value, json};
 use serial_test::serial;
 use wiremock::matchers::{body_json, header, method, path};
@@ -28,33 +24,16 @@ fn fixture() -> Value {
 fn options() -> DecisionCallOptions {
     serde_json::from_value(fixture()["options"].clone()).unwrap()
 }
-/// A runtime provider as a caller configures it: name, endpoint and
-/// credential all come from the caller (RFC-0036).
-fn runtime(provider: &str, base_url: String, api_key: Option<&str>) -> Arc<dyn Provider> {
-    Arc::new(
-        create_openai_compatible(OpenAICompatibleProviderSettings {
-            name: provider.into(),
-            base_url,
-            api_key: api_key.map(Into::into),
-            ..Default::default()
-        })
-        .unwrap(),
-    )
-}
-fn registry(provider: &str, base_url: String, api_key: Option<&str>) -> ProviderRegistry {
-    create_provider_registry(
-        [(provider.to_string(), runtime(provider, base_url, api_key))]
-            .into_iter()
-            .collect(),
-        Default::default(),
-    )
-}
 fn model(provider: &str, server: &MockServer) -> Box<dyn DecisionModel> {
-    runtime(
+    provider_handle(
         provider,
-        format!("{}/v1", server.uri()),
-        Some("runtime-secret"),
+        Some("runtime-secret".into()),
+        Some(ProviderOptions {
+            base_url: Some(format!("{}/v1", server.uri())),
+            ..Default::default()
+        }),
     )
+    .unwrap()
     .decision_model(if provider.starts_with("cloudflare") {
         "@cf/cloudflare/clef"
     } else {
@@ -62,6 +41,7 @@ fn model(provider: &str, server: &MockServer) -> Box<dyn DecisionModel> {
     })
     .unwrap()
 }
+/// Type adaptation (stack): provider options are keyed objects.
 fn provider_options(
     provider: &str,
     options: Value,
@@ -70,6 +50,19 @@ fn provider_options(
         panic!("provider options must be an object");
     };
     Some(HashMap::from([(provider.to_string(), options)]))
+}
+/// Replay takes endpoint and credential from the caller's registry (RFC-0036
+/// stack): register the rebuilt connection under the recorded provider id.
+fn registry_with(
+    provider_id: &str,
+    provider: Box<dyn Provider>,
+) -> aimux_core::provider_registry::ProviderRegistry {
+    aimux_core::create_provider_registry(
+        [(provider_id.to_string(), std::sync::Arc::from(provider))]
+            .into_iter()
+            .collect(),
+        Default::default(),
+    )
 }
 struct Stop;
 impl Drop for Stop {
@@ -109,11 +102,20 @@ async fn replay(
     );
     let server = MockServer::start().await;
     common::replay::mount_recording(&server, &recordings[0]).await;
-    let rebuilt = aimux_providers::rebuild_decision_provider(
-        &recordings[0].provider,
-        &registry(provider, format!("{}/v1", server.uri()), Some("new-key")),
-    )
-    .unwrap();
+    let snapshot = recordings[0].provider.clone();
+    let registry = registry_with(
+        &snapshot.provider_id,
+        provider_handle(
+            provider,
+            Some("new-key".into()),
+            Some(ProviderOptions {
+                base_url: Some(format!("{}/v1", server.uri())),
+                ..Default::default()
+            }),
+        )
+        .unwrap(),
+    );
+    let rebuilt = aimux_providers::rebuild_decision_provider(&snapshot, &registry).unwrap();
     let again = replay_decision_with_model(&recordings[0], rebuilt.as_ref())
         .await
         .unwrap();
@@ -185,7 +187,7 @@ async fn media_is_native_per_runtime_and_recorded_for_replay() {
         let mut request = options();
         request.images = vec![serde_json::from_value(image.clone()).unwrap()];
         let mut expected = fixture()["request"].clone();
-        let encoded = image["data"].as_str().unwrap();
+        let encoded = image["data"]["Base64"].as_str().unwrap();
         let data_url = format!("data:image/png;base64,{encoded}");
         expected["images"] = match provider {
             "ollama" => json!([encoded]),
@@ -589,33 +591,36 @@ async fn retry_and_cancellation_use_shared_transport() {
 }
 
 #[test]
-fn local_runtimes_rebuild_from_the_caller_registry_without_recorded_credentials() {
+fn local_factories_and_wrapper_factories_preserve_credentials_for_replay() {
+    use aimux_core::Provider;
     for provider in ["ollama", "llamacpp", "localai", "laya", "sglang", "vllm"] {
-        let base_url = "http://127.0.0.1:1/v1".to_string();
-        let model = runtime(provider, base_url.clone(), None)
-            .decision_model("served-alias")
-            .unwrap();
-        assert_eq!(model.provider(), provider);
-        let record =
-            aimux_core::recording::ProviderRecord::from_model(model.provider(), model.model_id());
-        assert_eq!(record.provider_id, provider);
-        let rebuilt = aimux_providers::rebuild_decision_provider(
-            &record,
-            &registry(provider, base_url, Some("explicit-key")),
+        let handle = provider_handle(
+            provider,
+            None,
+            Some(ProviderOptions {
+                base_url: Some("http://127.0.0.1:1/v1".into()),
+                ..Default::default()
+            }),
         )
         .unwrap();
+        let model = handle.decision_model("served-alias").unwrap();
+        assert_eq!(model.provider(), provider);
+        let record = model.config_snapshot();
+        assert_eq!(record.api_key_source.as_deref(), Some("none"));
+        let registry = registry_with(&record.provider_id, handle);
+        let rebuilt = aimux_providers::rebuild_decision_provider(&record, &registry).unwrap();
         assert_eq!(rebuilt.provider(), provider);
-        assert_eq!(rebuilt.model_id(), "served-alias");
     }
-    // A provider id the caller did not register cannot be rebuilt.
-    let record = aimux_core::recording::ProviderRecord::from_model("vllm", "served-alias");
-    assert!(
-        aimux_providers::rebuild_decision_provider(
-            &record,
-            &registry("ollama", "http://127.0.0.1:1/v1".into(), None),
-        )
-        .is_err()
+    let provider = provider_handle("vllm", Some("explicit-key".into()), None).unwrap();
+    let model = provider.decision_model("served-alias").unwrap();
+    assert_eq!(
+        model.config_snapshot().api_key_source.as_deref(),
+        Some("explicit")
     );
+    // The explicit key is not in the recording: without a caller registration
+    // the model cannot be rebuilt.
+    let empty = aimux_core::create_provider_registry(Default::default(), Default::default());
+    assert!(aimux_providers::rebuild_decision_provider(&model.config_snapshot(), &empty).is_err());
 }
 
 #[tokio::test]

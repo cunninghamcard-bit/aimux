@@ -395,3 +395,6 @@ mod decision_scoring;
 mod decision_support;
 mod runtime_decision;
 mod systemone;
+
+mod provider_handle;
+pub use provider_handle::{ProviderOptions, provider_handle};

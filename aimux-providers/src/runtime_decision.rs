@@ -29,6 +29,7 @@ pub(crate) struct RuntimeDecisionModel {
     /// what [`DecisionModel::provider`] reports.
     pub(crate) vendor: String,
     pub(crate) model_id: String,
+    pub(crate) retry_config: aimux_core::retry::RetryConfig,
 }
 
 impl RuntimeDecisionModel {
@@ -51,6 +52,7 @@ impl RuntimeDecisionModel {
             endpoint,
             vendor: vendor.into(),
             model_id: model_id.into(),
+            retry_config: aimux_core::retry::RetryConfig::default(),
         })
     }
 
@@ -631,6 +633,17 @@ impl DecisionModel for RuntimeDecisionModel {
     }
     fn model_id(&self) -> &str {
         &self.model_id
+    }
+    fn retry_config(&self) -> aimux_core::retry::RetryConfig {
+        self.retry_config
+    }
+    fn config_snapshot(&self) -> aimux_core::recording::ProviderRecord {
+        self.endpoint.snapshot(
+            self.provider(),
+            self.model_id(),
+            self.retry_config,
+            json!({"decision_default_protocol":"systemone", "decision_capabilities":self.capabilities()}),
+        )
     }
     fn capabilities(&self) -> DecisionCapabilities {
         let provider = self.provider();

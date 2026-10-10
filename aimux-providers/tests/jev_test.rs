@@ -1,5 +1,6 @@
 //! Offline contract tests using official examples and recorded live responses.
 //! No live credentials or external requests are needed to replay them.
+use std::time::Duration;
 
 use aimux_core::decision_model::*;
 use aimux_core::{AiMuxError, Provider};
@@ -152,7 +153,9 @@ fn options() -> DecisionCallOptions {
 }
 
 fn model(server: &MockServer) -> Box<dyn DecisionModel> {
-    let config = JevConfig::new("test-key").with_endpoint(format!("{}/v1/systemone", server.uri()));
+    let mut config =
+        JevConfig::new("test-key").with_endpoint(format!("{}/v1/systemone", server.uri()));
+    config.retry_config.initial_delay = Duration::ZERO;
     JevProvider::new(config)
         .decision_model("jev-latest")
         .unwrap()
@@ -387,13 +390,7 @@ async fn official_provider_failures_use_standard_retry_rules_and_preserve_codes(
 
 #[test]
 fn non_decision_provider_returns_unsupported() {
-    let provider = aimux_providers::deepseek::create_deepseek(
-        aimux_providers::deepseek::DeepSeekProviderSettings {
-            api_key: Some("test".into()),
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    let provider = aimux_providers::provider_handle("deepseek", Some("test".into()), None).unwrap();
     assert!(matches!(
         provider.decision_model("gpt-test"),
         Err(AiMuxError::UnsupportedFunctionality(_))

@@ -37,6 +37,51 @@ impl DecisionEndpoint {
         Ok(base.trim_end_matches('/').to_string())
     }
 
+    fn headers(&self) -> &crate::shared::ProviderHeaders {
+        match self {
+            Self::OpenAI(config) => &config.headers,
+            Self::Compatible(config) => &config.headers,
+        }
+    }
+
+    /// #226's decision connection snapshot: identity, base URL, credential
+    /// *source* and the connection headers/retries. The credential value is
+    /// never read; sensitive headers are redacted again when recorded.
+    pub(crate) fn snapshot(
+        &self,
+        provider: &str,
+        model_id: &str,
+        retry_config: aimux_core::retry::RetryConfig,
+        profile: Value,
+    ) -> aimux_core::recording::ProviderRecord {
+        use crate::shared::Credential;
+        let headers = self.headers();
+        let mut record = aimux_core::recording::ProviderRecord::from_model(provider, model_id);
+        record.base_url = self.base_url().ok();
+        record.api_key_source = Some(match &headers.credential {
+            Credential::None => "none".into(),
+            Credential::Explicit(_) => "explicit".into(),
+            Credential::Env { var, .. } => format!("env:{var}"),
+        });
+        let mut wire_headers = serde_json::Map::new();
+        for (name, value) in &headers.fixed {
+            wire_headers.insert(name.clone(), Value::String(value.clone()));
+        }
+        for (name, value) in headers.user.iter().flatten() {
+            if let Some(value) = value {
+                wire_headers.insert(name.clone(), Value::String(value.clone()));
+            }
+        }
+        record.provider_options = Some(aimux_core::recording::redact_provider_options(
+            serde_json::json!({
+                "headers": wire_headers,
+                "max_retries": retry_config.max_retries,
+            }),
+        ));
+        record.profile = Some(profile);
+        record
+    }
+
     async fn request_headers(
         &self,
         call_headers: Option<&HashMap<String, String>>,
