@@ -68,7 +68,7 @@ class DecisionModelTest {
         }
         server.start()
         try {
-            val config = JSONObject().put("base_url", "http://127.0.0.1:${server.address.port}/v1").toString()
+            val config = JSONObject().put("baseUrl", "http://127.0.0.1:${server.address.port}/v1").toString()
             Model.createProvider("openai", "test-key", config).use { provider ->
                 provider.decisionModel("gpt-6-luna").use { model ->
                     val result = JSONObject(model.decide(fixture.getJSONObject("options").toString()))
