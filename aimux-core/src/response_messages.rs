@@ -243,7 +243,13 @@ impl ResponseMessageBuilder {
                         reason: approval.reason.clone(),
                         is_automatic: approval.is_automatic,
                         signature: approval.signature.clone(),
-                        input_schema_input: approval.input_schema_input.clone(),
+                        // As AI SDK `to-response-messages.ts`: only when it
+                        // differs from the validated input.
+                        input_schema_input: approval
+                            .input_schema_input
+                            .as_ref()
+                            .filter(|raw| **raw != approval.tool_call.input)
+                            .cloned(),
                     }
                 }
                 GenerateContent::ToolCall(call) => ContentPart::ToolCall {
@@ -351,12 +357,18 @@ mod tests {
     }
 
     #[test]
-    fn approval_passes_input_schema_input_to_response_messages() {
+    fn approval_writes_input_schema_input_when_it_differs_from_the_input() {
         let part = approval_part(Some(serde_json::json!({"city": "paris"})));
         assert_eq!(
             part["inputSchemaInput"],
             serde_json::json!({"city": "paris"})
         );
+    }
+
+    #[test]
+    fn approval_omits_input_schema_input_when_equal_or_absent() {
+        let equal = approval_part(Some(serde_json::json!({"city": "Paris"})));
+        assert!(equal.get("inputSchemaInput").is_none());
         assert!(approval_part(None).get("inputSchemaInput").is_none());
     }
 }
