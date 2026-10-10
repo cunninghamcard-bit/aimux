@@ -18,10 +18,6 @@ use crate::result::{
 };
 use crate::shared::{FileBytes, GeneratedFileData, SharedProviderMetadata};
 
-/// Match the AI SDK's response-message safety rule for invalid tool calls:
-/// malformed primitive input must not be replayed as a prompt tool-call input.
-/// JavaScript's `typeof value === "object"` includes arrays and null, so those
-/// values are intentionally retained here as well.
 /// AI SDK `isDeepEqualData` (`ai/src/util/is-deep-equal-data.ts:8-48`) over
 /// parsed JSON. Numbers compare as JavaScript numbers (IEEE-754 doubles), so
 /// `1` equals `1.0`, `-0` equals `0`, and integers beyond 2^53 that round to
@@ -41,6 +37,10 @@ pub(crate) fn is_deep_equal_data(a: &Value, b: &Value) -> bool {
     }
 }
 
+/// Match the AI SDK's response-message safety rule for invalid tool calls:
+/// malformed primitive input must not be replayed as a prompt tool-call input.
+/// JavaScript's `typeof value === "object"` includes arrays and null, so those
+/// values are intentionally retained here as well.
 pub(crate) fn response_tool_call_input(input: &Value, invalid: Option<bool>) -> Value {
     if invalid == Some(true) && !matches!(input, Value::Object(_) | Value::Array(_) | Value::Null) {
         Value::Object(serde_json::Map::new())
