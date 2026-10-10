@@ -16,18 +16,23 @@
 //!   tool call's `input` is the provider's argument *text* (`String`). No core
 //!   `invalid` / `error` / tool metadata.
 //!
+//! Errors: [`ProviderError`] mirrors `src/errors` (std `Error`, no wire
+//! format; D21).
+//!
 //! Not modelled: the `LanguageModelV4` interface itself (`doGenerate`,
 //! `doStream`, `supportedUrls`) and `abortSignal`, which are behaviour, not
 //! data.
 
 mod call_options;
 mod content;
+mod errors;
 mod prompt;
 mod shared;
 mod stream;
 
 pub use call_options::*;
 pub use content::*;
+pub use errors::*;
 pub use prompt::*;
 pub use shared::*;
 pub use stream::*;
