@@ -158,3 +158,48 @@ async fn recorded_decision_file_contains_no_raw_credentials() {
         written.len()
     );
 }
+
+/// #226 (D15): a keyless local runtime sends the placeholder credential
+/// `Authorization: Bearer not-needed`; the snapshot records source `none`.
+#[tokio::test]
+#[serial]
+async fn keyless_local_runtime_sends_placeholder_bearer() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({"error": "stop"})))
+        .mount(&server)
+        .await;
+    let model = provider_handle(
+        "ollama",
+        None,
+        Some(ProviderOptions {
+            base_url: Some(format!("{}/v1", server.uri())),
+            ..Default::default()
+        }),
+    )
+    .unwrap()
+    .decision_model("served-alias")
+    .unwrap();
+    assert_eq!(
+        model.config_snapshot().api_key_source.as_deref(),
+        Some("none")
+    );
+    let mut options: DecisionCallOptions =
+        serde_json::from_value(
+            serde_json::from_str::<Value>(include_str!("fixtures/runtime_decisions.json")).unwrap()
+                ["options"]
+                .clone(),
+        )
+        .unwrap();
+    options.max_retries = Some(0);
+    let recorder = Arc::new(RingRecorder::new());
+    recording::init_recording(Some(recorder.clone()));
+    let _stop = Stop;
+    assert!(decide(model.as_ref(), options).await.is_err());
+    recording::init_recording(None);
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].headers["authorization"], "Bearer not-needed");
+    let recorded = serde_json::to_string(&recorder.completed()).unwrap();
+    assert!(!recorded.contains("Bearer not-needed"));
+}
