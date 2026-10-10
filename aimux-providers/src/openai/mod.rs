@@ -14,6 +14,7 @@ pub mod completion;
 pub(crate) mod config;
 pub mod convert;
 mod convert_common;
+pub mod decision;
 pub mod embedding;
 pub mod files;
 pub mod image;
@@ -26,6 +27,7 @@ pub mod transcription;
 mod types;
 
 pub use completion::OpenAICompletionModel;
+pub use decision::OpenAIDecisionModel;
 pub use embedding::OpenAIEmbeddingModel;
 pub use files::OpenAIFiles;
 pub use image::OpenAIImageModel;
@@ -317,6 +319,16 @@ impl OpenAIProvider {
         )
     }
 
+    /// A native Decisions API model (`POST {baseURL}/decisions`, RFC-0038);
+    /// `provider()` is `"openai"`. Uses this provider's connection config.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidArgument` for an empty model id.
+    pub fn decision(&self, model_id: &str) -> Result<OpenAIDecisionModel, AiMuxError> {
+        OpenAIDecisionModel::new(model_id, self.model_config("decision"))
+    }
+
     /// A Responses API model; `provider()` is `"{name}.responses"`.
     #[must_use]
     pub fn responses(&self, model_id: &str) -> OpenAIResponsesModel {
@@ -374,6 +386,13 @@ impl OpenAIProvider {
 impl Provider for OpenAIProvider {
     fn discovery(&self) -> Option<&dyn ProviderDiscovery> {
         Some(self)
+    }
+
+    fn decision_model(
+        &self,
+        model_id: &str,
+    ) -> Result<Box<dyn aimux_core::DecisionModel>, AiMuxError> {
+        Ok(Box::new(self.decision(model_id)?))
     }
 
     fn language_model(&self, model_id: &str) -> Result<Arc<dyn LanguageModel>, AiMuxError> {

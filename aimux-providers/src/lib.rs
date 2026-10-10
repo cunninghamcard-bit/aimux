@@ -232,8 +232,9 @@ pub use mistral::{
     MistralSpeechModel, MistralTranscriptionModel, create_mistral, mistral,
 };
 pub use openai::{
-    OpenAIEmbeddingModel, OpenAIImageModel, OpenAIProvider, OpenAIProviderSettings,
-    OpenAIResponsesModel, OpenAISpeechModel, OpenAITranscriptionModel, create_openai,
+    OpenAIDecisionModel, OpenAIEmbeddingModel, OpenAIImageModel, OpenAIProvider,
+    OpenAIProviderSettings, OpenAIResponsesModel, OpenAISpeechModel, OpenAITranscriptionModel,
+    create_openai,
 };
 pub use vertex::{
     GoogleAuthOptions, GoogleAuthScopes, VertexAnthropicModel, VertexAnthropicProvider,
@@ -389,3 +390,8 @@ pub use tinyfish::{
 pub use you_com::{
     YouComProvider, YouComProviderSettings, YouComSearchModel, create_you_com, you_com,
 };
+
+mod decision_scoring;
+mod decision_support;
+mod runtime_decision;
+mod systemone;

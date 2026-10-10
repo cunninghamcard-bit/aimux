@@ -1,0 +1,494 @@
+//! Official-contract tests against a local HTTP server; no live API access.
+use std::collections::HashMap;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
+use aimux_core::decision_model::*;
+use aimux_core::provider_registry::{ProviderRegistry, create_provider_registry};
+use aimux_core::recording::{self, RingRecorder};
+use aimux_core::replay::{MockDecisionReplayModel, replay_decision_with_model};
+use aimux_core::{AiMuxError, Provider};
+use aimux_providers::{OpenAIProviderSettings, create_openai};
+use serde_json::{Value, json};
+use serial_test::serial;
+use wiremock::matchers::{body_json, header, method, path};
+use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+mod common;
+
+fn fixture() -> Value {
+    serde_json::from_str(include_str!("fixtures/openai_decisions.json")).unwrap()
+}
+fn options() -> DecisionCallOptions {
+    serde_json::from_value(fixture()["options"].clone()).unwrap()
+}
+fn settings(server: &MockServer, api_key: &str) -> OpenAIProviderSettings {
+    OpenAIProviderSettings {
+        base_url: Some(format!("{}/v1", server.uri())),
+        api_key: Some(api_key.into()),
+        organization: Some("org-test".into()),
+        project: Some("proj-test".into()),
+        headers: Some(HashMap::from([(
+            "X-Client".into(),
+            Some("decision-tests".into()),
+        )])),
+        ..Default::default()
+    }
+}
+fn model(server: &MockServer) -> Box<dyn DecisionModel> {
+    create_openai(settings(server, "decision-secret"))
+        .unwrap()
+        .decision_model("gpt-6-luna")
+        .unwrap()
+}
+/// The caller's registry at replay time: same provider id, its own endpoint
+/// and credential (RFC-0036: recordings carry identity only).
+fn replay_registry(server: &MockServer) -> ProviderRegistry {
+    let openai: Arc<dyn Provider> =
+        Arc::new(create_openai(settings(server, "replacement-key")).unwrap());
+    create_provider_registry(
+        [("openai".to_string(), openai)].into_iter().collect(),
+        Default::default(),
+    )
+}
+async fn mount(server: &MockServer, response: Value) {
+    Mock::given(method("POST"))
+        .and(path("/v1/decisions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(response))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn native_wire_maps_all_questions_and_preserves_partial_refusal() {
+    let server = MockServer::start().await;
+    let mut expected = fixture()["request"].clone();
+    expected["safety_identifier"] = json!("opaque-user");
+    Mock::given(method("POST"))
+        .and(path("/v1/decisions"))
+        .and(header("authorization", "Bearer decision-secret"))
+        .and(header("openai-organization", "org-test"))
+        .and(header("openai-project", "proj-test"))
+        .and(header("x-client", "decision-tests"))
+        .and(header("x-per-call", "yes"))
+        .and(body_json(expected))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&fixture()["response"]))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut request = options();
+    request.headers = Some(HashMap::from([("X-Per-Call".into(), "yes".into())]));
+    request.provider_options = Some(HashMap::from([
+        (
+            "openai".into(),
+            json!({"safety_identifier":"opaque-user"})
+                .as_object()
+                .cloned()
+                .unwrap(),
+        ),
+        (
+            "other-provider".into(),
+            json!({"ignored":true}).as_object().cloned().unwrap(),
+        ),
+    ]));
+    let result = decide(model(&server).as_ref(), request).await.unwrap();
+    assert!(matches!(
+        result.answers["restricted"],
+        DecisionAnswer::Refusal
+    ));
+    assert!(matches!(
+        result.answers["urgent"],
+        DecisionAnswer::Boolean {
+            probability_true: 0.925
+        }
+    ));
+    assert_eq!(result.rounding, DecisionRounding::default());
+    assert_eq!(result.probability_source, DecisionProbabilitySource::Native);
+    assert_eq!(
+        result.response.as_ref().unwrap().body.as_ref().unwrap(),
+        &fixture()["response"]
+    );
+    assert_eq!(
+        result.usage.as_ref().unwrap().input_tokens.no_cache,
+        Some(70)
+    );
+    assert_eq!(
+        result.provider_metadata.unwrap()["openai"]["future_metadata"]["preserved"],
+        true
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn response_order_and_usage_metadata_do_not_discard_answers() {
+    for usage in [
+        Value::Null,
+        json!({}),
+        json!({"input_tokens":12}),
+        json!({"input_tokens":1,"output_tokens":0,"total_tokens":9,"input_tokens_details":{"cached_tokens":2,"cache_write_tokens":0}}),
+    ] {
+        let server = MockServer::start().await;
+        let mut response = fixture()["response"].clone();
+        response["usage"] = usage.clone();
+        response["answers"].as_array_mut().unwrap().reverse();
+        response["answers"][1]["probabilities"]
+            .as_array_mut()
+            .unwrap()
+            .reverse();
+        mount(&server, response).await;
+        let result = decide(model(&server).as_ref(), options()).await.unwrap();
+        assert_eq!(result.answers.len(), 4);
+        assert_eq!(
+            result.usage.and_then(|usage| usage.raw),
+            usage.as_object().cloned()
+        );
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn json_state_is_text_evidence_and_all_question_types_can_refuse() {
+    let server = MockServer::start().await;
+    let mut response = fixture()["response"].clone();
+    for answer in response["answers"].as_array_mut().unwrap() {
+        *answer = json!({"name":answer["name"], "type":"refusal"});
+    }
+    mount(&server, response).await;
+    let mut request = options();
+    request.state = json!({"messages":[{"role":"user","content":"ordinary JSON"}]});
+    let result = decide(model(&server).as_ref(), request.clone())
+        .await
+        .unwrap();
+    assert!(
+        result
+            .answers
+            .values()
+            .all(|a| matches!(a, DecisionAnswer::Refusal))
+    );
+    let body: Value = server.received_requests().await.unwrap()[0]
+        .body_json()
+        .unwrap();
+    assert_eq!(body["input"], request.state.to_string());
+}
+
+#[tokio::test]
+#[serial]
+async fn malformed_answers_fail_with_http_context() {
+    let mut cases = Vec::new();
+    for (pointer, value) in [
+        ("/answers/0/name", json!("unknown")),
+        ("/answers/0/name", Value::Null),
+        ("/answers/0/probability", json!(1.1)),
+        ("/answers/1/choice", json!(true)),
+        ("/answers/1/choice", json!("unknown")),
+        ("/answers/1/probabilities/1/value", json!("billing")),
+        ("/answers/1/probabilities/1/probability", json!(0.5)),
+        ("/answers/2/probabilities/1/value", json!(0)),
+        ("/answers/2/probabilities/1/value", json!(9)),
+        ("/answers/2/probabilities/1/label", json!("wrong")),
+        ("/answers/2/score", json!(0.1)),
+        ("/answers/3/name", json!("urgent")),
+        ("/answers/3/type", json!("skipped")),
+    ] {
+        let mut response = fixture()["response"].clone();
+        *response.pointer_mut(pointer).unwrap() = value;
+        cases.push(response);
+    }
+    let mut missing = fixture()["response"].clone();
+    missing["answers"].as_array_mut().unwrap().pop();
+    cases.push(missing);
+    let mut extra = fixture()["response"].clone();
+    extra["answers"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name":"extra","type":"refusal"}));
+    cases.push(extra);
+    for response in cases {
+        let server = MockServer::start().await;
+        mount(&server, response).await;
+        let error = decide(model(&server).as_ref(), options())
+            .await
+            .unwrap_err();
+        let AiMuxError::ApiCall(error) = error else {
+            panic!("expected HTTP context: {error}");
+        };
+        assert_eq!(error.status_code, Some(200));
+        assert!(!error.is_retryable);
+        assert!(error.response_body.is_some());
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn unsupported_native_fields_and_limits_fail_before_http() {
+    let server = MockServer::start().await;
+    let mut cases = Vec::new();
+    let mut guidance = fixture()["options"].clone();
+    guidance["questions"][0]["instructions"] = json!({"rule":"structured"});
+    cases.push(guidance);
+    let mut criteria = fixture()["options"].clone();
+    criteria["questions"][0]["criteria"] = json!({"true":"yes"});
+    cases.push(criteria);
+    let mut levels = fixture()["options"].clone();
+    levels["questions"][2]["levels"][0] = json!({"label":"low", "unsupported":true});
+    cases.push(levels);
+    let mut choice = fixture()["options"].clone();
+    choice["questions"][1]["options"]
+        .as_array_mut()
+        .unwrap()
+        .pop();
+    cases.push(choice);
+    let mut opts = fixture()["options"].clone();
+    opts["provider_options"] = json!({"openai":{"temperature":1}});
+    cases.push(opts);
+    for request in cases {
+        let request = serde_json::from_value(request).unwrap();
+        assert!(decide(model(&server).as_ref(), request).await.is_err());
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+#[serial]
+async fn retry_and_standard_provider_errors_use_the_shared_transport() {
+    let server = MockServer::start().await;
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counter = attempts.clone();
+    Mock::given(path("/v1/decisions"))
+        .respond_with(move |_: &Request| {
+            if counter.fetch_add(1, Ordering::Relaxed) == 0 {
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "0")
+                    .set_body_json(json!({"error":{"message":"busy","code":"rate_limit_exceeded"}}))
+            } else {
+                ResponseTemplate::new(200).set_body_json(&fixture()["response"])
+            }
+        })
+        .mount(&server)
+        .await;
+    let model = model(&server);
+    let mut request = options();
+    request.max_retries = Some(1);
+    decide(model.as_ref(), request).await.unwrap();
+    assert_eq!(attempts.load(Ordering::Relaxed), 2);
+    server.reset().await;
+    Mock::given(path("/v1/decisions"))
+        .respond_with(
+            ResponseTemplate::new(401)
+                .set_body_json(json!({"error":{"message":"bad key","code":"invalid_api_key"}})),
+        )
+        .mount(&server)
+        .await;
+    let AiMuxError::ApiCall(error) = decide(model.as_ref(), options()).await.unwrap_err() else {
+        panic!("API error");
+    };
+    assert_eq!(error.provider_code.as_deref(), Some("invalid_api_key"));
+    assert!(!error.is_retryable);
+}
+
+#[test]
+fn factory_is_explicit_and_preserves_the_provider_boundary() {
+    let provider = create_openai(OpenAIProviderSettings {
+        api_key: Some("key".into()),
+        ..Default::default()
+    })
+    .unwrap();
+    let model = provider.decision_model("deployment-alias").unwrap();
+    assert_eq!(model.model_id(), "deployment-alias");
+    assert!(provider.decision_model(" ").is_err());
+    let other = aimux_providers::deepseek::create_deepseek(
+        aimux_providers::deepseek::DeepSeekProviderSettings {
+            api_key: Some("key".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        other.decision_model("any"),
+        Err(AiMuxError::UnsupportedFunctionality(_))
+    ));
+    assert_eq!(model.capabilities().min_choices, Some(2));
+}
+
+struct StopRecording;
+impl Drop for StopRecording {
+    fn drop(&mut self) {
+        recording::init_recording(None);
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn unified_recording_replays_refusals_and_rebuilds_the_same_provider_config() {
+    let server = MockServer::start().await;
+    mount(&server, fixture()["response"].clone()).await;
+    let recorder = Arc::new(RingRecorder::new());
+    recording::init_recording(Some(recorder.clone()));
+    let _stop = StopRecording;
+    let result = decide(model(&server).as_ref(), options()).await.unwrap();
+    recording::init_recording(None);
+    let records = recorder.completed();
+    assert_eq!(records.len(), 1);
+    assert!(records[0].complete);
+    assert!(
+        !serde_json::to_string(&records)
+            .unwrap()
+            .contains("decision-secret")
+    );
+    let mock = MockDecisionReplayModel::new("openai", "gpt-6-luna", records.clone()).unwrap();
+    let replay = decide(&mock, options()).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(replay.answers).unwrap(),
+        serde_json::to_value(&result.answers).unwrap()
+    );
+    let replay_server = MockServer::start().await;
+    common::replay::mount_recording(&replay_server, &records[0]).await;
+    let rebuilt = aimux_providers::rebuild_decision_provider(
+        &records[0].provider,
+        &replay_registry(&replay_server),
+    )
+    .unwrap();
+    let again = replay_decision_with_model(&records[0], rebuilt.as_ref())
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(again.answers).unwrap(),
+        serde_json::to_value(result.answers).unwrap()
+    );
+    let request = &replay_server.received_requests().await.unwrap()[0];
+    assert_eq!(request.headers["authorization"], "Bearer replacement-key");
+    assert_eq!(request.headers["openai-project"], "proj-test");
+    assert_eq!(request.headers["x-client"], "decision-tests");
+}
+
+#[tokio::test]
+#[serial]
+async fn images_typed_choices_and_score_descriptions_roundtrip_and_key_replay() {
+    let contract: Value = serde_json::from_str(include_str!(
+        "../../contract-tests/fixtures/decision-openai-full.json"
+    ))
+    .unwrap();
+    let server = MockServer::start().await;
+    Mock::given(path("/v1/decisions"))
+        .and(body_json(contract["request"].clone()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&contract["response"]))
+        .mount(&server)
+        .await;
+    let request: DecisionCallOptions = serde_json::from_value(contract["options"].clone()).unwrap();
+    let recorder = Arc::new(RingRecorder::new());
+    recording::init_recording(Some(recorder.clone()));
+    let _stop = StopRecording;
+    let result = decide(model(&server).as_ref(), request.clone())
+        .await
+        .unwrap();
+    recording::init_recording(None);
+    assert!(
+        matches!(&result.answers["choice"],DecisionAnswer::Choice{selected,value:Some(DecisionValue::Boolean(true)),..} if selected=="boolean_true")
+    );
+    assert!(
+        matches!(&result.answers["score"],DecisionAnswer::Score{levels,..} if serde_json::to_value(levels).unwrap()==contract["options"]["questions"][1]["levels"])
+    );
+    let records = recorder.completed();
+    let mock = MockDecisionReplayModel::new("openai", "gpt-6-luna", records.clone()).unwrap();
+    decide(&mock, request.clone()).await.unwrap();
+    let mut changed = request.clone();
+    changed.images.clear();
+    assert!(decide(&mock, changed).await.is_err());
+    let mut changed = request.clone();
+    changed.images[0].detail = Some("high".into());
+    assert!(decide(&mock, changed).await.is_err());
+    let replay_server = MockServer::start().await;
+    common::replay::mount_recording(&replay_server, &records[0]).await;
+    let rebuilt = aimux_providers::rebuild_decision_provider(
+        &records[0].provider,
+        &replay_registry(&replay_server),
+    )
+    .unwrap();
+    let again = replay_decision_with_model(&records[0], rebuilt.as_ref())
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(result.answers).unwrap(),
+        serde_json::to_value(again.answers).unwrap()
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn malformed_image_answers_bound_error_context_but_preserve_wire_and_response_evidence() {
+    use aimux_core::shared::FileBytes;
+    use base64::Engine;
+
+    let bytes = vec![42; 8192];
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    for data in [FileBytes::Binary(bytes), FileBytes::Base64(encoded.clone())] {
+        let server = MockServer::start().await;
+        let raw =
+            json!({"model":"gpt-6-luna","answers":[],"metadata":{"api_key":"response-secret"}});
+        mount(&server, raw.clone()).await;
+        let mut request = options();
+        request.images = vec![DecisionImage {
+            data,
+            media_type: "image/png".into(),
+            detail: Some("low".into()),
+        }];
+        let error = decide(model(&server).as_ref(), request).await.unwrap_err();
+        let AiMuxError::ApiCall(error) = error else {
+            panic!("expected contextual API error");
+        };
+        let data_url = format!("data:image/png;base64,{encoded}");
+        assert_eq!(error.status_code, Some(200));
+        assert!(!error.is_retryable);
+        assert_eq!(
+            error.request_body_values["input"][0]["content"][0]["image_url"],
+            format!("[STRING {} bytes]", data_url.len())
+        );
+        assert_eq!(error.request_body_values["model"], "gpt-6-luna");
+        assert_eq!(
+            error.data.as_ref().unwrap()["metadata"]["api_key"],
+            "[REDACTED]"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(error.response_body.as_ref().unwrap()).unwrap(),
+            raw
+        );
+        let calls = server.received_requests().await.unwrap();
+        assert_eq!(calls.len(), 1);
+        let wire: Value = calls[0].body_json().unwrap();
+        assert_eq!(wire["input"][0]["content"][0]["image_url"], data_url);
+        assert_eq!(wire["input"][0]["content"][0]["detail"], "low");
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn bad_media_and_duplicate_native_values_are_rejected_before_http() {
+    let contract: Value = serde_json::from_str(include_str!(
+        "../../contract-tests/fixtures/decision-openai-full.json"
+    ))
+    .unwrap();
+    let server = MockServer::start().await;
+    for (pointer, value) in [
+        ("/images/0/data", json!("bad!")),
+        ("/images/0/detail", json!("unknown")),
+        ("/images/0/media_type", json!("text/plain")),
+        ("/questions/0/options/1/value", json!(true)),
+        ("/questions/1/levels/1/label", json!("low")),
+    ] {
+        let mut request = contract["options"].clone();
+        *request.pointer_mut(pointer).unwrap() = value;
+        assert!(
+            decide(
+                model(&server).as_ref(),
+                serde_json::from_value(request).unwrap()
+            )
+            .await
+            .is_err()
+        );
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}

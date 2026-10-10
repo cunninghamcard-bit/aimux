@@ -48,6 +48,9 @@ use crate::video_model::VideoModel;
 /// A provider has no `name()`: the name it was registered under belongs to
 /// whoever holds the registry, and each model reports its own
 /// [`LanguageModel::provider`] string.
+///
+/// [`decision_model`](Self::decision_model) is an aimux extension (RFC-0037):
+/// a deployment may expose both language generation and typed decisions.
 pub trait Provider: Send + Sync {
     /// Create a typed decision model (aimux extension).
     /// # Errors

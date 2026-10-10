@@ -7,11 +7,11 @@ import type { JsonValue } from "./serde_json/JsonValue";
  * Options passed to [`EvaluationModel::do_evaluate`]
  * (`EvaluationModelV4CallOptions`).
  */
-export type EvaluationCallOptions = {
+export type EvaluationCallOptions = { 
 /**
  * One shared state, even when the value is an array.
  */
-state: EvaluationInput,
+state: EvaluationInput, 
 /**
  * Questions by id; insertion order is the question order.
  */

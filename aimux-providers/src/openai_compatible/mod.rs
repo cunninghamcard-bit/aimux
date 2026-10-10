@@ -248,6 +248,24 @@ impl Provider for OpenAICompatibleProvider {
         Some(self)
     }
 
+    /// Native decisions for the official runtimes (RFC-0038): Ollama,
+    /// llama.cpp, LocalAI, Laya, vLLM, SGLang and Cloudflare Workers AI.
+    /// Other compatible hosts return `UnsupportedFunctionality`.
+    fn decision_model(
+        &self,
+        model_id: &str,
+    ) -> Result<Box<dyn aimux_core::DecisionModel>, AiMuxError> {
+        Ok(Box::new(
+            crate::runtime_decision::RuntimeDecisionModel::new(
+                model_id,
+                &self.name,
+                crate::decision_support::DecisionEndpoint::Compatible(
+                    self.model_config("decision"),
+                ),
+            )?,
+        ))
+    }
+
     fn language_model(&self, model_id: &str) -> Result<Arc<dyn LanguageModel>, AiMuxError> {
         Ok(self.call(model_id))
     }

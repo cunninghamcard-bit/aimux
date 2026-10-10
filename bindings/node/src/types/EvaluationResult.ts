@@ -9,7 +9,7 @@ import type { JsonValue } from "./serde_json/JsonValue";
 /**
  * The result of [`EvaluationModel::do_evaluate`] (`EvaluationModelV4Result`).
  */
-export type EvaluationResult = {
+export type EvaluationResult = { 
 /**
  * Exactly one answer per question, under the original question ids.
  */

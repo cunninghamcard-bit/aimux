@@ -129,6 +129,7 @@ fn options() -> DecisionCallOptions {
                 options: ["billing", "technical", "sales"]
                     .into_iter()
                     .map(|label| DecisionOption {
+                        value: None,
                         label: label.into(),
                         description: None,
                     })
@@ -316,6 +317,7 @@ async fn invalid_requests_never_reach_http() {
     if let DecisionQuestion::Choice { options, .. } = &mut too_many_choices.questions[1] {
         *options = (0..256)
             .map(|index| DecisionOption {
+                value: None,
                 label: format!("option{index}"),
                 description: None,
             })
@@ -385,10 +387,12 @@ async fn official_provider_failures_use_standard_retry_rules_and_preserve_codes(
 
 #[test]
 fn non_decision_provider_returns_unsupported() {
-    let provider = aimux_providers::create_openai(aimux_providers::OpenAIProviderSettings {
-        api_key: Some("test".into()),
-        ..Default::default()
-    })
+    let provider = aimux_providers::deepseek::create_deepseek(
+        aimux_providers::deepseek::DeepSeekProviderSettings {
+            api_key: Some("test".into()),
+            ..Default::default()
+        },
+    )
     .unwrap();
     assert!(matches!(
         provider.decision_model("gpt-test"),
@@ -424,6 +428,7 @@ async fn official_requests_accept_single_and_255_choices_and_more_than_20_questi
                 options: labels
                     .iter()
                     .map(|label| DecisionOption {
+                        value: None,
                         label: label.clone(),
                         description: None,
                     })
