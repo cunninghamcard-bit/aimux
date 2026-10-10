@@ -21,7 +21,7 @@ pub struct DecisionImage {
     /// On the wire in #226's externally tagged form, `{"Base64": "..."}` or
     /// `{"Binary": [...]}`, which the bindings send.
     #[serde(with = "tagged_file_bytes")]
-    #[ts(as = "crate::shared::FileBytes")]
+    #[ts(type = "{ \"Base64\": string } | { \"Binary\": Array<number> }")]
     pub data: crate::shared::FileBytes,
     pub media_type: String,
     /// Provider image detail, for example OpenAI's `low`, `high`, `auto`, `original`.
