@@ -364,7 +364,6 @@ fn convert_response(
                     .and_then(|((total, read), write)| total.checked_sub(read)?.checked_sub(write)),
                 cache_read: cached,
                 cache_write: written,
-                ..Default::default()
             },
             output_tokens: OutputTokenUsage {
                 total: output,
@@ -372,7 +371,6 @@ fn convert_response(
                     .zip(reasoning)
                     .and_then(|(total, reasoning)| total.checked_sub(reasoning)),
                 reasoning,
-                ..Default::default()
             },
             raw: raw.as_object().cloned(),
         }
