@@ -1,0 +1,15 @@
+[package]
+name = "aimux-provider"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AI SDK LanguageModelV4 specification types for aimux (design draft, not wired)"
+publish = false
+
+# #200 §2.1 constraint 1: no dependency on any other aimux crate.
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

@@ -2,6 +2,7 @@
 members = [
     "aimux-core",
     "aimux-ffi",
+    "aimux-provider",
     "aimux-provider-utils",
     "aimux-providers",
     "aimux-stream",
