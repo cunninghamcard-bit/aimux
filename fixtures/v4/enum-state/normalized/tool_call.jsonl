@@ -1,0 +1,15 @@
+{"toolCallId":"call_1","toolName":"weather","input":{"city":"Tokyo"}}
+{"toolCallId":"call_1","toolName":"weather","input":{"city":"Tokyo"}}
+{"toolCallId":"call_1","toolName":"weather","input":{"city":"Tokyo"},"dynamic":true}
+{"toolCallId":"call_1","toolName":"weather","input":{"city":"Tokyo"},"providerExecuted":true}
+{"toolCallId":"call_1","toolName":"weather","input":{"city":"Tokyo"},"providerExecuted":true}
+{"toolCallId":"call_1","toolName":"weather","input":{"city":"Tokyo"},"providerExecuted":true,"dynamic":true}
+{"toolCallId":"call_1","toolName":"weather","input":{"city":"Tokyo"},"providerExecuted":false}
+{"toolCallId":"call_1","toolName":"weather","input":{"city":"Tokyo"},"providerExecuted":false}
+{"toolCallId":"call_1","toolName":"weather","input":{"city":"Tokyo"},"providerExecuted":false,"dynamic":true}
+{"toolCallId":"call_1","toolName":"weather","input":{"city":"Tokyo"}}
+{"toolCallId":"call_1","toolName":"weather","input":{"city":"Tokyo"}}
+{"toolCallId":"call_1","toolName":"weather","input":{"city":"Tokyo"},"dynamic":true}
+{"toolCallId":"call_1","toolName":"weather","input":"{\"city\":","dynamic":true,"invalid":true,"error":{"name":"AI_InvalidToolInputError","toolName":"weather","toolInput":"{\"city\":","cause":"EOF while parsing"}}
+{"toolCallId":"call_1","toolName":"weather","input":"{\"city\":","providerExecuted":true,"dynamic":true,"providerMetadata":{"openai":{"itemId":"fc_1"}},"invalid":true,"error":{"name":"AI_InvalidToolInputError","toolName":"weather","toolInput":"{\"city\":","cause":"EOF while parsing"}}
+{"toolCallId":"call_1","toolName":"weather","input":{"city":"Tokyo"},"providerMetadata":{"openai":{"itemId":"fc_1"}}}

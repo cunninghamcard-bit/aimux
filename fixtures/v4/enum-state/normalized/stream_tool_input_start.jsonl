@@ -1,0 +1,10 @@
+{"type":"tool-input-start","id":"call_1","toolName":"weather","dynamic":false}
+{"type":"tool-input-start","id":"call_1","toolName":"weather","dynamic":false}
+{"type":"tool-input-start","id":"call_1","toolName":"weather","dynamic":true}
+{"type":"tool-input-start","id":"call_1","toolName":"weather","providerExecuted":true,"dynamic":false}
+{"type":"tool-input-start","id":"call_1","toolName":"weather","providerExecuted":true,"dynamic":false}
+{"type":"tool-input-start","id":"call_1","toolName":"weather","providerExecuted":true,"dynamic":true}
+{"type":"tool-input-start","id":"call_1","toolName":"weather","providerExecuted":false,"dynamic":false}
+{"type":"tool-input-start","id":"call_1","toolName":"weather","providerExecuted":false,"dynamic":false}
+{"type":"tool-input-start","id":"call_1","toolName":"weather","providerExecuted":false,"dynamic":true}
+{"type":"tool-input-start","id":"call_1","toolName":"weather","dynamic":false,"title":"Weather"}
