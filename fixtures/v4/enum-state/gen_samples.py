@@ -14,9 +14,11 @@ def dump(v):
 ERR = {"name": "AI_InvalidToolInputError", "toolName": "weather",
        "toolInput": "{\"city\":", "cause": "EOF while parsing"}
 
-def tool_call(dynamic=None, invalid=None, error=None, pe=None, inp=None, meta=False):
+_DEFAULT = object()
+
+def tool_call(dynamic=None, invalid=None, error=None, pe=None, inp=_DEFAULT, meta=False):
     v = {"toolCallId": "call_1", "toolName": "weather",
-         "input": {"city": "Tokyo"} if inp is None else inp}
+         "input": {"city": "Tokyo"} if inp is _DEFAULT else inp}
     if pe is not None: v["providerExecuted"] = pe
     if dynamic is not None: v["dynamic"] = dynamic
     if meta: v["providerMetadata"] = {"openai": {"itemId": "fc_1"}}
@@ -44,6 +46,35 @@ tool_calls += [
     tool_call(dynamic=True, invalid=True, error=ERR, inp="{\"city\":", pe=True, meta=True),
     tool_call(meta=True),
 ]
+# RFC-0042:84-93 core side: the parsed value of each provider text vector
+# (raw text itself is in raw_tool_call.jsonl, compared byte for byte). A
+# string stays a string (`"{\"x\":1}"` is not an object); empty text and
+# `{"a":` are invalid dynamic calls with an error, never `{}`.
+def vector_error(text):
+    return {"name": "AI_InvalidToolInputError", "toolName": "weather",
+            "toolInput": text, "cause": "JSON parsing failed"}
+tool_calls += [
+    tool_call(inp="Tokyo"),
+    tool_call(inp="{\"x\":1}"),
+    tool_call(inp=123),
+    tool_call(inp=True),
+    tool_call(inp=None),
+    tool_call(inp={"a": 2}),
+    tool_call(inp=100.0),
+    tool_call(dynamic=True, invalid=True, error=vector_error(""), inp=""),
+    tool_call(dynamic=True, invalid=True, error=vector_error("{\"a\":"), inp="{\"a\":"),
+]
+# Non-canonical spellings of rows 4 and 5 (duplicate key, `1e2`): compared by
+# JSON semantics with normalized/tool_call_semantic.jsonl, not byte for byte.
+tool_call_semantic_text = [
+    '{"toolCallId":"call_1","toolName":"weather","input":{"a":1,"a":2}}',
+    '{"toolCallId":"call_1","toolName":"weather","input":1e2}',
+]
+tool_call_semantic_norm = [
+    tool_call(inp={"a": 2}),
+    tool_call(inp=100.0),
+]
+
 # D26: rejected by try_from from E.2 on (invalid without dynamic:true, or without error).
 tool_calls_rejected = [
     tool_call(invalid=True, error=ERR, inp="{\"city\":"),
@@ -113,6 +144,10 @@ files = {
 }
 import os
 os.makedirs("normalized", exist_ok=True)
+with open("tool_call_semantic.jsonl", "w") as f:
+    f.write("".join(t + "\n" for t in tool_call_semantic_text))
+with open("normalized/tool_call_semantic.jsonl", "w") as f:
+    f.write("".join(dump(r) + "\n" for r in tool_call_semantic_norm))
 for name, (rows, norm) in files.items():
     with open(f"{name}.jsonl", "w") as f:
         f.write("".join(dump(r) + "\n" for r in rows))

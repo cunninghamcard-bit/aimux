@@ -70,7 +70,9 @@ fn check<T: Serialize + DeserializeOwned>(name: &str) {
 fn check_normalized<T: Serialize + DeserializeOwned>(name: &str) {
     let normalized = dir().join("normalized").join(format!("{name}.jsonl"));
     let out = round_trip::<T>(&normalized);
-    for (i, (got, want)) in out.iter().zip(lines(&normalized)).enumerate() {
+    let expected = lines(&normalized);
+    assert_eq!(out.len(), expected.len(), "normalized/{name}: line count");
+    for (i, (got, want)) in out.iter().zip(expected).enumerate() {
         assert_eq!(*got, want, "normalized/{name}.jsonl line {}", i + 1);
     }
 }
@@ -85,6 +87,21 @@ fn tool_call_samples_match_baseline() {
 #[test]
 fn tool_call_rejected_samples_match_baseline() {
     check::<ToolCall>("tool_call_rejected");
+}
+
+/// RFC-0042:84-93 core values in non-canonical spellings (duplicate key ->
+/// last wins, `1e2` -> 100.0): compared by JSON semantics, not bytes.
+#[test]
+fn tool_call_semantic_samples_match_by_json_value() {
+    let file = dir().join("tool_call_semantic.jsonl");
+    let expected = lines(&dir().join("normalized").join("tool_call_semantic.jsonl"));
+    let out = round_trip::<ToolCall>(&file);
+    assert_eq!(out.len(), expected.len(), "tool_call_semantic: line count");
+    for (i, (got, want)) in out.iter().zip(&expected).enumerate() {
+        let got: serde_json::Value = serde_json::from_str(got).unwrap();
+        let want: serde_json::Value = serde_json::from_str(want).unwrap();
+        assert_eq!(got, want, "tool_call_semantic.jsonl line {}", i + 1);
+    }
 }
 
 #[test]
@@ -115,6 +132,10 @@ fn text_stream_tool_input_start_samples_match_baseline() {
 /// the sample itself, byte for byte.
 #[test]
 fn baseline_equals_samples() {
+    if std::env::var_os("AIMUX_BLESS_ENUM_STATE").is_some() {
+        // The baseline is being rewritten by the other tests right now.
+        return;
+    }
     for name in [
         "tool_call",
         "tool_call_rejected",
