@@ -12,7 +12,7 @@ open PR：只有 #24–#27（E.0/E.1/E.2/E.3a），对本文引用的行只改 `
 | W1 Fetch 边界 | 对 | fetch.rs:160-171、:180-198 | ALIGN:394-421、:275-284 | MNT |
 | W2 encode 纯函数 | **部分已有** | OpenAI chat 已经有共用的 body 构建：`build_request_body_with_chat_options`（openai/convert.rs:1094），generate 和 stream 都调它（model.rs:182、:339），之后才走 `post_json_to_api`（:185、:345）。其他协议族没逐个核 | ALIGN:112；RFC-0036:41、:48（rig 的说法 RFC 没写） | OWN |
 | W3 decode 共用 | 部分核实 | finish 和 usage 在两条路径共用：`parse_finish_reason`（model.rs:271、:642），`convert_usage`（:278、:537）。内容解析是不是共用没核。调研引的行号都对：transform_stream.rs:60，response_handler.rs:51、105、222、242，三处 finish 映射 | — | OWN |
-| W4 鉴权在 fetch 装饰器 | 对，**但描述有误** | azure/mod.rs:259 不是"构造时写入"，而是 `BearerTokenFetch` 这个 Fetch 装饰器在请求时才写（:243-259，没有 authorization 时才补）。sigv4：`SigV4Fetch` 在 sigv4_fetch.rs:292，实现 Fetch 在 :333 | ALIGN:460-470 | MNT |
+| W4 鉴权在 fetch 装饰器 | 对，**但描述有误** | azure/mod.rs:250-273 不是"构造时写入"，而是 `BearerTokenFetch` 这个 Fetch 装饰器在请求时才写（`BearerTokenFetch` 在 :244，`impl Fetch` 在 :250-273，没有 authorization 时才补）。sigv4：`SigV4Fetch` 在 sigv4_fetch.rs:292，实现 Fetch 在 :333 | ALIGN:460-470 | MNT |
 | W5 SSE 不进 Fetch | 对 | ALIGN:247-273（约束 2） | 同左 | MNT |
 | W6 preset 数据化 | **已基本完成**（调研稿没提） | openai_compatible/config.rs:1-8 写明"SDK 用函数的地方这里都是数据"；`ConvertUsage` enum 在 :57（OpenAICompatible/Alibaba/MoonshotAI）；`BaseUrl::Preset` 引用 `PresetDescriptor`（:34-41） | ALIGN:156（D12，运行时 descriptor 表）、:765、:771 | MNT |
 | W7 crate 拆分没开始 | 对 | 8455db9a 根目录只有 core/provider-utils/providers/stream/ffi。u1.6 分支另有 `aimux-provider` | ALIGN:247-273 | MNT |
