@@ -1,0 +1,1254 @@
+{
+  "schema_version": 1,
+  "artifacts": [
+    {
+      "package": "aimux-ffi",
+      "kind": "staticlib",
+      "target": "x86_64-unknown-linux-gnu",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 70000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "go-build",
+        "matrix": {
+          "target": "x86_64-unknown-linux-gnu"
+        }
+      },
+      "path": "libaimux_ffi-x86_64-unknown-linux-gnu.a"
+    },
+    {
+      "package": "aimux-ffi",
+      "kind": "staticlib",
+      "target": "x86_64-apple-darwin",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 70000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "go-build",
+        "matrix": {
+          "target": "x86_64-apple-darwin"
+        }
+      },
+      "path": "libaimux_ffi-x86_64-apple-darwin.a"
+    },
+    {
+      "package": "aimux-ffi",
+      "kind": "staticlib",
+      "target": "aarch64-apple-darwin",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 70000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "go-build",
+        "matrix": {
+          "target": "aarch64-apple-darwin"
+        }
+      },
+      "path": "libaimux_ffi-aarch64-apple-darwin.a"
+    },
+    {
+      "package": "aimux-ffi",
+      "kind": "staticlib",
+      "target": "x86_64-pc-windows-gnu",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 70000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "go-build",
+        "matrix": {
+          "target": "x86_64-pc-windows-gnu"
+        }
+      },
+      "path": "libaimux_ffi-x86_64-pc-windows-gnu.a"
+    },
+    {
+      "package": "aimux-ffi",
+      "kind": "cdylib",
+      "target": "x86_64-unknown-linux-gnu",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 24200000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "ffi-build",
+        "matrix": {
+          "artifact": "libaimux_ffi-linux-x64.so"
+        }
+      },
+      "path": "libaimux_ffi-linux-x64.so"
+    },
+    {
+      "package": "aimux-ffi",
+      "kind": "cdylib",
+      "target": "aarch64-apple-darwin",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 24200000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "ffi-build",
+        "matrix": {
+          "artifact": "libaimux_ffi-macos-arm64.dylib"
+        }
+      },
+      "path": "libaimux_ffi-macos-arm64.dylib"
+    },
+    {
+      "package": "aimux-ffi",
+      "kind": "cdylib",
+      "target": "x86_64-pc-windows-msvc",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 24200000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "ffi-build",
+        "matrix": {
+          "artifact": "aimux_ffi-windows-x64.dll"
+        }
+      },
+      "path": "aimux_ffi-windows-x64.dll"
+    },
+    {
+      "package": "aimux-ffi",
+      "kind": "ios-framework-binary",
+      "target": "aarch64-apple-ios",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 67108864
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "flutter-ffi-mobile",
+        "matrix": {
+          "targets": "aarch64-apple-ios"
+        }
+      }
+    },
+    {
+      "package": "aimux-ffi",
+      "kind": "ios-framework-binary",
+      "target": "aarch64-apple-ios-sim",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 67108864
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "flutter-ffi-mobile",
+        "matrix": {
+          "targets": "aarch64-apple-ios-sim"
+        }
+      }
+    },
+    {
+      "package": "aimux-ffi",
+      "kind": "ios-xcframework",
+      "target": "aarch64-apple-ios+aarch64-apple-ios-sim",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "unpacked": {
+          "product_cap_bytes": 136314880
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "flutter-ffi-mobile",
+        "matrix": {
+          "platform": "ios"
+        }
+      },
+      "path": "aimux_ffi.xcframework"
+    },
+    {
+      "package": "aimux-ffi",
+      "kind": "ios-xcframework-info-plist",
+      "target": "aarch64-apple-ios+aarch64-apple-ios-sim",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 1000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "flutter-ffi-mobile",
+        "matrix": {
+          "platform": "ios"
+        }
+      },
+      "path": "aimux_ffi.xcframework/Info.plist"
+    },
+    {
+      "package": "aimux-ffi",
+      "kind": "android-so",
+      "target": "aarch64-linux-android",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 9000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "flutter-ffi-mobile",
+        "matrix": {
+          "targets": "aarch64-linux-android"
+        }
+      },
+      "path": "android/arm64-v8a/libaimux_ffi.so"
+    },
+    {
+      "package": "aimux-ffi",
+      "kind": "android-so",
+      "target": "armv7-linux-androideabi",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 9000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "flutter-ffi-mobile",
+        "matrix": {
+          "targets": "armv7-linux-androideabi"
+        }
+      },
+      "path": "android/armeabi-v7a/libaimux_ffi.so"
+    },
+    {
+      "package": "aimux-ffi",
+      "kind": "android-so",
+      "target": "x86_64-linux-android",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 9000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "flutter-ffi-mobile",
+        "matrix": {
+          "targets": "x86_64-linux-android"
+        }
+      },
+      "path": "android/x86_64/libaimux_ffi.so"
+    },
+    {
+      "package": "aimux-ffi",
+      "kind": "android-so-total",
+      "target": "arm64-v8a+armeabi-v7a+x86_64",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "unpacked": {
+          "product_cap_bytes": 23100000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "flutter-ffi-mobile",
+        "matrix": {
+          "platform": "android"
+        }
+      },
+      "path": "android"
+    },
+    {
+      "package": "aimux-cli",
+      "kind": "bin",
+      "target": "x86_64-unknown-linux-gnu",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 32000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "console-build",
+        "matrix": {
+          "target": "x86_64-unknown-linux-gnu"
+        }
+      },
+      "path": "aimux-cli-linux-x64"
+    },
+    {
+      "package": "aimux-cli",
+      "kind": "bin",
+      "target": "aarch64-apple-darwin",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 32000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "console-build",
+        "matrix": {
+          "target": "aarch64-apple-darwin"
+        }
+      },
+      "path": "aimux-cli-macos-arm64"
+    },
+    {
+      "package": "aimux-cli",
+      "kind": "bin",
+      "target": "x86_64-pc-windows-msvc",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 32000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "console-build",
+        "matrix": {
+          "target": "x86_64-pc-windows-msvc"
+        }
+      },
+      "path": "aimux-cli-windows-x64.exe"
+    },
+    {
+      "package": "aimux-replay",
+      "kind": "bin",
+      "target": "x86_64-unknown-linux-gnu",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 32000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "console-build",
+        "matrix": {
+          "target": "x86_64-unknown-linux-gnu"
+        }
+      },
+      "path": "aimux-replay-linux-x64"
+    },
+    {
+      "package": "aimux-replay",
+      "kind": "bin",
+      "target": "aarch64-apple-darwin",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 32000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "console-build",
+        "matrix": {
+          "target": "aarch64-apple-darwin"
+        }
+      },
+      "path": "aimux-replay-macos-arm64"
+    },
+    {
+      "package": "aimux-replay",
+      "kind": "bin",
+      "target": "x86_64-pc-windows-msvc",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 32000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "console-build",
+        "matrix": {
+          "target": "x86_64-pc-windows-msvc"
+        }
+      },
+      "path": "aimux-replay-windows-x64.exe"
+    },
+    {
+      "package": "aimux-web",
+      "kind": "bin",
+      "target": "x86_64-unknown-linux-gnu",
+      "feature_set": "embed-frontend",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 40000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "console-build",
+        "matrix": {
+          "target": "x86_64-unknown-linux-gnu"
+        }
+      },
+      "path": "aimux-web-linux-x64"
+    },
+    {
+      "package": "aimux-web",
+      "kind": "bin",
+      "target": "aarch64-apple-darwin",
+      "feature_set": "embed-frontend",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 40000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "console-build",
+        "matrix": {
+          "target": "aarch64-apple-darwin"
+        }
+      },
+      "path": "aimux-web-macos-arm64"
+    },
+    {
+      "package": "aimux-web",
+      "kind": "bin",
+      "target": "x86_64-pc-windows-msvc",
+      "feature_set": "embed-frontend",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 40000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "console-build",
+        "matrix": {
+          "target": "x86_64-pc-windows-msvc"
+        }
+      },
+      "path": "aimux-web-windows-x64.exe"
+    },
+    {
+      "package": "aimux-node",
+      "kind": "node-addon",
+      "target": "win32-x64-msvc",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 24200000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "node-build",
+        "matrix": {
+          "target": "x86_64-pc-windows-msvc"
+        }
+      },
+      "path": "aimux.win32-x64-msvc.node",
+      "note": "npm package @arcships/aimux"
+    },
+    {
+      "package": "aimux-node-win32-x64-msvc",
+      "kind": "npm-tgz",
+      "target": "win32-x64-msvc",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "packed": {
+          "product_cap_bytes": 24500000
+        },
+        "unpacked": {
+          "product_cap_bytes": 25000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "node-publish"
+      },
+      "note": "npm package @arcships/aimux-win32-x64-msvc; published by napi prepublish (bindings/node/package.json prepublishOnly)"
+    },
+    {
+      "package": "aimux-node",
+      "kind": "node-addon",
+      "target": "win32-arm64-msvc",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 24200000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "node-build",
+        "matrix": {
+          "target": "aarch64-pc-windows-msvc"
+        }
+      },
+      "path": "aimux.win32-arm64-msvc.node",
+      "note": "npm package @arcships/aimux"
+    },
+    {
+      "package": "aimux-node-win32-arm64-msvc",
+      "kind": "npm-tgz",
+      "target": "win32-arm64-msvc",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "packed": {
+          "product_cap_bytes": 24500000
+        },
+        "unpacked": {
+          "product_cap_bytes": 25000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "node-publish"
+      },
+      "note": "npm package @arcships/aimux-win32-arm64-msvc; published by napi prepublish (bindings/node/package.json prepublishOnly)"
+    },
+    {
+      "package": "aimux-node",
+      "kind": "node-addon",
+      "target": "darwin-x64",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 24200000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "node-build",
+        "matrix": {
+          "target": "x86_64-apple-darwin"
+        }
+      },
+      "path": "aimux.darwin-x64.node",
+      "note": "npm package @arcships/aimux"
+    },
+    {
+      "package": "aimux-node-darwin-x64",
+      "kind": "npm-tgz",
+      "target": "darwin-x64",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "packed": {
+          "product_cap_bytes": 24500000
+        },
+        "unpacked": {
+          "product_cap_bytes": 25000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "node-publish"
+      },
+      "note": "npm package @arcships/aimux-darwin-x64; published by napi prepublish (bindings/node/package.json prepublishOnly)"
+    },
+    {
+      "package": "aimux-node",
+      "kind": "node-addon",
+      "target": "darwin-arm64",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 24200000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "node-build",
+        "matrix": {
+          "target": "aarch64-apple-darwin"
+        }
+      },
+      "path": "aimux.darwin-arm64.node",
+      "note": "npm package @arcships/aimux"
+    },
+    {
+      "package": "aimux-node-darwin-arm64",
+      "kind": "npm-tgz",
+      "target": "darwin-arm64",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "packed": {
+          "product_cap_bytes": 24500000
+        },
+        "unpacked": {
+          "product_cap_bytes": 25000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "node-publish"
+      },
+      "note": "npm package @arcships/aimux-darwin-arm64; published by napi prepublish (bindings/node/package.json prepublishOnly)"
+    },
+    {
+      "package": "aimux-node",
+      "kind": "node-addon",
+      "target": "linux-x64-gnu",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 24200000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "node-build",
+        "matrix": {
+          "target": "x86_64-unknown-linux-gnu"
+        }
+      },
+      "path": "aimux.linux-x64-gnu.node",
+      "note": "npm package @arcships/aimux"
+    },
+    {
+      "package": "aimux-node-linux-x64-gnu",
+      "kind": "npm-tgz",
+      "target": "linux-x64-gnu",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "packed": {
+          "product_cap_bytes": 24500000
+        },
+        "unpacked": {
+          "product_cap_bytes": 25000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "node-publish"
+      },
+      "note": "npm package @arcships/aimux-linux-x64-gnu; published by napi prepublish (bindings/node/package.json prepublishOnly)"
+    },
+    {
+      "package": "aimux-node",
+      "kind": "node-addon",
+      "target": "linux-arm64-gnu",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 24200000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "node-build",
+        "matrix": {
+          "target": "aarch64-unknown-linux-gnu"
+        }
+      },
+      "path": "aimux.linux-arm64-gnu.node",
+      "note": "npm package @arcships/aimux"
+    },
+    {
+      "package": "aimux-node-linux-arm64-gnu",
+      "kind": "npm-tgz",
+      "target": "linux-arm64-gnu",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "packed": {
+          "product_cap_bytes": 24500000
+        },
+        "unpacked": {
+          "product_cap_bytes": 25000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "node-publish"
+      },
+      "note": "npm package @arcships/aimux-linux-arm64-gnu; published by napi prepublish (bindings/node/package.json prepublishOnly)"
+    },
+    {
+      "package": "aimux-node",
+      "kind": "npm-tgz",
+      "target": "any",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "packed": {
+          "product_cap_bytes": 2000000
+        },
+        "unpacked": {
+          "product_cap_bytes": 5000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "node-publish"
+      },
+      "note": "npm package @arcships/aimux"
+    },
+    {
+      "package": "aimux-python",
+      "kind": "wheel",
+      "target": "linux-x64",
+      "feature_set": "abi3-py38",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 24200000
+        },
+        "packed": {
+          "product_cap_bytes": 24500000
+        },
+        "unpacked": {
+          "product_cap_bytes": 25000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "python-release",
+        "matrix": {
+          "os": "ubuntu-latest"
+        }
+      },
+      "note": "actual platform tag must be read from wheel metadata at measure time (RFC-0038a §4.2)"
+    },
+    {
+      "package": "aimux-python",
+      "kind": "wheel",
+      "target": "macos-arm64",
+      "feature_set": "abi3-py38",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 24200000
+        },
+        "packed": {
+          "product_cap_bytes": 24500000
+        },
+        "unpacked": {
+          "product_cap_bytes": 25000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "python-release",
+        "matrix": {
+          "os": "macos-latest"
+        }
+      },
+      "note": "actual platform tag must be read from wheel metadata at measure time (RFC-0038a §4.2)"
+    },
+    {
+      "package": "aimux-python",
+      "kind": "wheel",
+      "target": "windows-x64",
+      "feature_set": "abi3-py38",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 24200000
+        },
+        "packed": {
+          "product_cap_bytes": 24500000
+        },
+        "unpacked": {
+          "product_cap_bytes": 25000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "python-release",
+        "matrix": {
+          "os": "windows-latest"
+        }
+      },
+      "note": "actual platform tag must be read from wheel metadata at measure time (RFC-0038a §4.2)"
+    },
+    {
+      "package": "aimux-stream",
+      "kind": "crate",
+      "target": "any",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "packed": {
+          "product_cap_bytes": 9500000
+        },
+        "unpacked": {
+          "product_cap_bytes": 20000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "rust-publish"
+      }
+    },
+    {
+      "package": "aimux-core",
+      "kind": "crate",
+      "target": "any",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "packed": {
+          "product_cap_bytes": 9500000
+        },
+        "unpacked": {
+          "product_cap_bytes": 20000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "rust-publish"
+      }
+    },
+    {
+      "package": "aimux-provider-utils",
+      "kind": "crate",
+      "target": "any",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "packed": {
+          "product_cap_bytes": 9500000
+        },
+        "unpacked": {
+          "product_cap_bytes": 20000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "rust-publish"
+      }
+    },
+    {
+      "package": "aimux-providers",
+      "kind": "crate",
+      "target": "any",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "packed": {
+          "product_cap_bytes": 9500000
+        },
+        "unpacked": {
+          "product_cap_bytes": 20000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "rust-publish"
+      }
+    },
+    {
+      "package": "aimux-ffi",
+      "kind": "crate",
+      "target": "any",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "packed": {
+          "product_cap_bytes": 9500000
+        },
+        "unpacked": {
+          "product_cap_bytes": 20000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "rust-publish"
+      }
+    },
+    {
+      "package": "aimux-java",
+      "kind": "jar-main",
+      "target": "jvm",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "packed": {
+          "product_cap_bytes": 2000000
+        },
+        "unpacked": {
+          "product_cap_bytes": 5000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "jvm-publish"
+      }
+    },
+    {
+      "package": "aimux-java",
+      "kind": "jar-sources",
+      "target": "jvm",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "packed": {
+          "product_cap_bytes": 2000000
+        },
+        "unpacked": {
+          "product_cap_bytes": 5000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "jvm-publish"
+      }
+    },
+    {
+      "package": "aimux-java",
+      "kind": "jar-javadoc",
+      "target": "jvm",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "packed": {
+          "product_cap_bytes": 10000000
+        },
+        "unpacked": {
+          "product_cap_bytes": 30000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "jvm-publish"
+      }
+    },
+    {
+      "package": "aimux-java",
+      "kind": "maven-pom",
+      "target": "jvm",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 1000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "jvm-publish"
+      }
+    },
+    {
+      "package": "aimux-java",
+      "kind": "gradle-module-metadata",
+      "target": "jvm",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 1000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "jvm-publish"
+      }
+    },
+    {
+      "package": "aimux-java",
+      "kind": "pgp-signature",
+      "target": "jvm",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 16384
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "jvm-publish"
+      },
+      "note": "signing.sign(mavenJava) with SIGNING_KEY secret"
+    },
+    {
+      "package": "aimux-java",
+      "kind": "checksum",
+      "target": "jvm",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 1024
+        }
+      },
+      "status": "unregistered",
+      "reason": "md5/sha1 files are generated implicitly by Gradle maven-publish during upload; no workflow step produces a stageable file to measure"
+    },
+    {
+      "package": "aimux-kotlin",
+      "kind": "jar-main",
+      "target": "jvm",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "packed": {
+          "product_cap_bytes": 2000000
+        },
+        "unpacked": {
+          "product_cap_bytes": 5000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "jvm-publish"
+      }
+    },
+    {
+      "package": "aimux-kotlin",
+      "kind": "jar-sources",
+      "target": "jvm",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "packed": {
+          "product_cap_bytes": 2000000
+        },
+        "unpacked": {
+          "product_cap_bytes": 5000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "jvm-publish"
+      }
+    },
+    {
+      "package": "aimux-kotlin",
+      "kind": "jar-javadoc",
+      "target": "jvm",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "packed": {
+          "product_cap_bytes": 10000000
+        },
+        "unpacked": {
+          "product_cap_bytes": 30000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "jvm-publish"
+      }
+    },
+    {
+      "package": "aimux-kotlin",
+      "kind": "maven-pom",
+      "target": "jvm",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 1000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "jvm-publish"
+      }
+    },
+    {
+      "package": "aimux-kotlin",
+      "kind": "gradle-module-metadata",
+      "target": "jvm",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 1000000
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "jvm-publish"
+      }
+    },
+    {
+      "package": "aimux-kotlin",
+      "kind": "pgp-signature",
+      "target": "jvm",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 16384
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "jvm-publish"
+      },
+      "note": "signing.sign(mavenJava) with SIGNING_KEY secret"
+    },
+    {
+      "package": "aimux-kotlin",
+      "kind": "checksum",
+      "target": "jvm",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 1024
+        }
+      },
+      "status": "unregistered",
+      "reason": "md5/sha1 files are generated implicitly by Gradle maven-publish during upload; no workflow step produces a stageable file to measure"
+    },
+    {
+      "package": "aimux-ffi",
+      "kind": "c-header",
+      "target": "any",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "raw": {
+          "product_cap_bytes": 1000000
+        }
+      },
+      "status": "unregistered",
+      "reason": "aimux-ffi/aimux-ffi.h is only uploaded by ci.yml ffi-build (a CI artifact); no release.yml job publishes it, so there is no release path to register"
+    },
+    {
+      "package": "aimux-flutter",
+      "kind": "pub-archive",
+      "target": "any",
+      "feature_set": "default",
+      "build_variant": "release",
+      "metrics": {
+        "packed": {
+          "product_cap_bytes": 34870000
+        },
+        "unpacked": {
+          "product_cap_bytes": 134217728
+        }
+      },
+      "status": "mapped",
+      "workflow": {
+        "file": ".github/workflows/release.yml",
+        "job": "flutter-publish"
+      },
+      "note": "flutter pub publish builds the archive itself; measuring the exact upload needs a frozen-directory step (RFC-0038a §4.3)"
+    }
+  ]
+}

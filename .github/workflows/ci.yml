@@ -404,6 +404,10 @@ jobs:
         run: python3 scripts/gen_providers_doc.py --check
       - name: Provider boundaries (no call-level reads or provider-name branches in providers, removed names stay removed)
         run: bash scripts/check_provider_boundaries.sh
+      - name: Q0 size gate (artifact inventory maps to workflow jobs; budget comparator negative tests)
+        run: |
+          python3 scripts/quality/check-inventory.py
+          python3 -m unittest discover -s scripts/quality/tests -v
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: ts-rs export drift (checked-in types must match generator output)
