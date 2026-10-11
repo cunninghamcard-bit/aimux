@@ -1209,9 +1209,6 @@ pub(crate) fn build_request_body_with_chat_options(
     Ok(RequestBodyResult { body, warnings })
 }
 
-/// Moved to [`super::decode`] (W.2); re-exported for the public path.
-pub use super::decode::parse_finish_reason;
-
 #[cfg(test)]
 mod tests {
     use super::*;

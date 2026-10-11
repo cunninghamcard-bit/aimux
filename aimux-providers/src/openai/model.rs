@@ -29,7 +29,7 @@ use aimux_provider_utils::{
 
 use super::config::OpenAIModelConfig;
 use super::convert::RequestBodyResult;
-use super::decode::{convert_usage, finish_reason};
+use super::decode::{convert_usage, finish_reason, parse_finish_reason};
 use super::types::{ChatCompletionResponse, StreamChunk, UsageResponse};
 
 /// An OpenAI chat-completions language model.
@@ -625,7 +625,7 @@ impl Transformer for OpenAIChatStream {
             if let Some(reason) = choice.finish_reason {
                 self.end_reasoning(controller);
                 self.stream_errored = false;
-                self.final_finish_reason = Some(finish_reason(Some(&reason)));
+                self.final_finish_reason = Some(parse_finish_reason(&reason));
             }
         }
     }
