@@ -233,6 +233,69 @@ pub struct RawToolCall {
     pub provider_metadata: Option<ProviderMetadata>,
 }
 
+/// Static (declared up front) or dynamic (defined at runtime, e.g. MCP) tool
+/// (A7 D2). Used by stream `ToolInputStart`; on the wire it is the `dynamic`
+/// boolean.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum ToolKind {
+    #[default]
+    Static,
+    Dynamic,
+}
+
+impl ToolKind {
+    /// `true` for [`ToolKind::Dynamic`].
+    #[must_use]
+    pub fn is_dynamic(self) -> bool {
+        self == Self::Dynamic
+    }
+
+    /// From the wire boolean: `true` is dynamic, `false` static.
+    #[must_use]
+    pub fn from_dynamic(dynamic: bool) -> Self {
+        if dynamic { Self::Dynamic } else { Self::Static }
+    }
+}
+
+/// serde for a [`ToolKind`] written as the `dynamic` boolean, always present
+/// (A7 D25); an absent field deserializes as `Static` via `serde(default)`.
+pub(crate) mod tool_kind_bool {
+    use super::ToolKind;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    /// Write the boolean.
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    pub fn serialize<S: Serializer>(kind: &ToolKind, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_bool(kind.is_dynamic())
+    }
+
+    /// `null` / `false` -> Static, `true` -> Dynamic.
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<ToolKind, D::Error> {
+        Ok(Option::<bool>::deserialize(d)?.map_or(ToolKind::Static, ToolKind::from_dynamic))
+    }
+}
+
+/// serde for an `Option<ToolKind>` written as an optional `dynamic` boolean;
+/// the three states absent / false / true are kept.
+pub(crate) mod tool_kind_option {
+    use super::ToolKind;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    /// Write the boolean, or nothing (with `skip_serializing_if`).
+    #[allow(clippy::ref_option)]
+    pub fn serialize<S: Serializer>(kind: &Option<ToolKind>, s: S) -> Result<S::Ok, S::Error> {
+        match kind {
+            Some(kind) => s.serialize_bool(kind.is_dynamic()),
+            None => s.serialize_none(),
+        }
+    }
+
+    /// `false` -> `Some(Static)`, `true` -> `Some(Dynamic)`, `null` -> `None`.
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<ToolKind>, D::Error> {
+        Ok(Option::<bool>::deserialize(d)?.map(ToolKind::from_dynamic))
+    }
+}
+
 // A7 (D2): static calls are tools declared up front; dynamic calls are tools
 // defined at runtime (e.g. MCP). Only a dynamic call can be invalid, and an
 // invalid call always carries its error (D26). The JSON shape is unchanged and

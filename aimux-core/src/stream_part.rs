@@ -11,7 +11,7 @@ use crate::error::AiMuxError;
 use crate::result::{
     GeneratedFile, RawToolApprovalRequest, ReasoningFileOutput, Source, ToolApprovalRequestOutput,
 };
-use crate::tool::{RawToolCall, ToolCall, ToolResult};
+use crate::tool::{RawToolCall, ToolCall, ToolKind, ToolResult};
 use crate::types::{FinishReason, ProviderMetadata, ResponseMetadata, Usage, Warning};
 
 /// A single chunk in the stream returned by `do_stream`.
@@ -79,9 +79,16 @@ pub enum StreamPart<C = RawToolCall, A = RawToolApprovalRequest, R = GeneratedFi
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_executed: Option<bool>,
         /// Whether the tool is dynamic (defined at runtime, e.g. MCP tools).
-        #[ts(optional)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        dynamic: Option<bool>,
+        // A7 E.4: provider-layer (V4 `stream-part.ts:58`) passthrough, so the
+        // three states absent / false / true are kept: `None` /
+        // `Some(Static)` / `Some(Dynamic)`.
+        #[ts(optional, as = "Option<bool>")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "crate::tool::tool_kind_option"
+        )]
+        dynamic: Option<ToolKind>,
         /// Optional title for the tool call.
         #[ts(optional)]
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -235,9 +242,11 @@ pub enum TextStreamPart {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_executed: Option<bool>,
         /// Whether the tool is dynamic (defined at runtime, e.g. MCP tools).
-        #[ts(optional)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        dynamic: Option<bool>,
+        // A7 E.4 / D25: core always writes the boolean
+        // (`stream-language-model-call.ts:809`); absent and false are Static.
+        #[ts(optional, as = "Option<bool>")]
+        #[serde(default, with = "crate::tool::tool_kind_bool")]
+        dynamic: ToolKind,
         /// Optional title for the tool call.
         #[ts(optional)]
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -397,6 +406,18 @@ impl StreamPart<ToolCall, ToolApprovalRequestOutput, ReasoningFileOutput> {
                     Self::File(value) => Some(TextStreamPart::File(value)),
                     Self::ReasoningFile(value) => Some(TextStreamPart::ReasoningFile(value)),
                     Self::Source(value) => Some(TextStreamPart::Source(value)),
+                    // A7 E.4 / D25: absent -> Static (stream-language-model-call.ts:809
+                    // also consults the tool set; core has none here).
+                    Self::ToolInputStart { id, tool_name, provider_executed, dynamic, title, provider_metadata } => {
+                        Some(TextStreamPart::ToolInputStart {
+                            id,
+                            tool_name,
+                            provider_executed,
+                            dynamic: dynamic.unwrap_or(ToolKind::Static),
+                            title,
+                            provider_metadata,
+                        })
+                    }
                     $(Self::$variant { $($field),* } => Some(TextStreamPart::$variant { $($field),* }),)*
                 }
             };
@@ -407,7 +428,6 @@ impl StreamPart<ToolCall, ToolApprovalRequestOutput, ReasoningFileOutput> {
             TextEnd { id, provider_metadata }
             StreamStart { warnings }
             Error { error }
-            ToolInputStart { id, tool_name, provider_executed, dynamic, title, provider_metadata }
             ToolInputDelta { id, delta, provider_metadata }
             ToolInputEnd { id, provider_metadata }
             ReasoningStart { id, provider_metadata }

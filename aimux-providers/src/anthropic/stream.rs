@@ -1382,7 +1382,7 @@ impl AnthropicMessagesStream {
                     id: id.clone(),
                     tool_name: custom_name.clone(),
                     provider_executed: Some(true),
-                    dynamic,
+                    dynamic: dynamic.map(aimux_core::tool::ToolKind::from_dynamic),
                     title: None,
                     provider_metadata: None,
                 });
