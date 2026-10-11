@@ -720,3 +720,112 @@ fn _assert_provider_is_shareable() {
     fn shareable<T: Send + Sync + 'static>() {}
     shareable::<OpenAICompatibleProvider>();
 }
+
+// ── A.4: compat request body key order (ALIGN:789-800) ───────────────────────
+
+/// One chat request with `options`; returns the body bytes as sent.
+async fn sent_chat_body(options: Value) -> String {
+    let mock = MockFetch::new(vec![Canned::json(&json!({
+        "id": "chatcmpl-order", "object": "chat.completion", "created": 1,
+        "model": "m",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "x"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    }))]);
+    let provider = create_openai_compatible(groq_settings(&mock)).unwrap();
+    let options: CallOptions = serde_json::from_value(options).unwrap();
+    provider.chat("m").do_generate(&options).await.unwrap();
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 1);
+    String::from_utf8(seen[0].body.clone()).unwrap()
+}
+
+/// Byte offset of top-level key `key` in a compact JSON object.
+fn key_at(body: &str, key: &str) -> usize {
+    body.find(&format!("\"{key}\":"))
+        .unwrap_or_else(|| panic!("{key} missing in {body}"))
+}
+
+fn prompt() -> Value {
+    json!([{"role": "user", "content": [{"type": "text", "text": "hi"}]}])
+}
+
+fn weather_tool() -> Value {
+    json!([{"type": "function", "name": "weather",
+        "inputSchema": {"type": "object", "properties": {}}}])
+}
+
+/// The body bytes follow ALIGN:789-800 (openai-compatible@3.0.62 chat args
+/// :270-325): model, user → sampling, response_format, stop, seed → unknown
+/// provider-namespace fields → reasoning_effort, verbosity → messages,
+/// tools, tool_choice. `serde_json::Value` ignores order, so this asserts
+/// on the bytes.
+#[tokio::test]
+async fn compat_body_keys_follow_the_documented_order() {
+    let body = sent_chat_body(json!({
+        "prompt": prompt(),
+        "temperature": 0.5,
+        "stopSequences": ["END"],
+        "seed": 7,
+        "tools": weather_tool(),
+        "toolChoice": "auto",
+        "providerOptions": {"groq": {
+            "zzzUnknown": 1,
+            "user": "u1",
+            "reasoningEffort": "low",
+            "textVerbosity": "low"
+        }}
+    }))
+    .await;
+    let order = [
+        "model",
+        "user",
+        "temperature",
+        "stop",
+        "seed",
+        "zzzUnknown",
+        "reasoning_effort",
+        "verbosity",
+        "messages",
+        "tools",
+        "tool_choice",
+    ];
+    let at: Vec<usize> = order.iter().map(|k| key_at(&body, k)).collect();
+    for (i, pair) in at.windows(2).enumerate() {
+        assert!(
+            pair[0] < pair[1],
+            "{} must come before {}: {body}",
+            order[i],
+            order[i + 1]
+        );
+    }
+}
+
+/// An unknown field may override earlier fields (sampling), but not the
+/// fields assigned after it: `messages` / `tools` / `tool_choice` from the
+/// provider namespace are replaced by the real ones.
+#[tokio::test]
+async fn unknown_fields_override_sampling_but_not_messages_or_tools() {
+    let body = sent_chat_body(json!({
+        "prompt": prompt(),
+        "temperature": 0.5,
+        "tools": weather_tool(),
+        "toolChoice": "auto",
+        "providerOptions": {"groq": {
+            "temperature": 0.9,
+            "messages": "bogus",
+            "tools": "bogus",
+            "tool_choice": "bogus"
+        }}
+    }))
+    .await;
+    let sent: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(sent["temperature"], json!(0.9), "{body}");
+    assert_eq!(sent["messages"][0]["role"], json!("user"), "{body}");
+    assert_eq!(
+        sent["tools"][0]["function"]["name"],
+        json!("weather"),
+        "{body}"
+    );
+    assert_eq!(sent["tool_choice"], json!("auto"), "{body}");
+    assert!(!body.contains("bogus"), "{body}");
+}
