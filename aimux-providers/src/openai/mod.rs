@@ -31,7 +31,7 @@ pub use decision::OpenAIDecisionModel;
 pub use embedding::OpenAIEmbeddingModel;
 pub use files::OpenAIFiles;
 pub use image::OpenAIImageModel;
-pub use model::OpenAIModel;
+pub use model::{EncodedChatRequest, OpenAIModel};
 pub use responses::OpenAIResponsesModel;
 pub use speech::OpenAISpeechModel;
 pub use tools::{OpenAIComputerAction, OpenAIComputerSafetyCheck};

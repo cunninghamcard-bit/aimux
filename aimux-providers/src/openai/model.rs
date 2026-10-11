@@ -28,9 +28,7 @@ use aimux_provider_utils::{
 };
 
 use super::config::OpenAIModelConfig;
-use super::convert::{
-    RequestBodyResult, build_request_body_with_chat_options, parse_finish_reason,
-};
+use super::convert::{RequestBodyResult, parse_finish_reason};
 use super::types::{ChatCompletionResponse, StreamChunk, UsageResponse};
 
 /// An OpenAI chat-completions language model.
@@ -133,26 +131,95 @@ impl LanguageModel for OpenAIModel {
     }
 
     async fn do_generate(&self, options: &CallOptions) -> Result<GenerateResult, AiMuxError> {
-        let headers = self
+        let encoded = self.encode_request(options, false).await?;
+        let http = self
             .config
-            .request_headers(options.headers.as_ref())
-            .await?;
-        let http =
-            self.config
-                .http_request(self.config.url("/chat/completions")?, headers, options);
-        execute_generate(http, &self.model_id, options, self.config.chat_options).await
+            .http_request(encoded.url.clone(), encoded.headers.clone(), options);
+        execute_generate(http, encoded).await
     }
 
     async fn do_stream(&self, options: &CallOptions) -> Result<StreamResult, AiMuxError> {
+        let encoded = self.encode_request(options, true).await?;
+        let http = self
+            .config
+            .http_request(encoded.url.clone(), encoded.headers.clone(), options);
+        execute_stream(http, encoded, options).await
+    }
+}
+
+impl OpenAIModel {
+    /// The request this model would send for `options`, as plain data and
+    /// without touching the transport (W.1). Resolves the configured URL and
+    /// headers (credential included), then calls the pure [`encode_chat`].
+    ///
+    /// # Errors
+    ///
+    /// Returns header/credential resolution errors and request-build
+    /// conversion errors.
+    #[doc(hidden)]
+    pub async fn encode_request(
+        &self,
+        options: &CallOptions,
+        stream: bool,
+    ) -> Result<EncodedChatRequest, AiMuxError> {
         let headers = self
             .config
             .request_headers(options.headers.as_ref())
             .await?;
-        let http =
-            self.config
-                .http_request(self.config.url("/chat/completions")?, headers, options);
-        execute_stream(http, &self.model_id, options, self.config.chat_options).await
+        encode_chat(
+            self.config.url("/chat/completions")?,
+            headers,
+            &self.model_id,
+            options,
+            stream,
+            self.config.chat_options,
+        )
     }
+}
+
+/// An encoded OpenAI chat-completions request: plain data only (no
+/// transport, no closures). Content-type, user-agent and the transport are
+/// added by the `aimux-provider-utils` helper when it is sent.
+#[derive(Debug, Clone)]
+pub struct EncodedChatRequest {
+    /// Full chat-completions URL.
+    pub url: String,
+    /// Resolved request headers (credential included).
+    pub headers: Vec<(String, String)>,
+    /// The JSON request body.
+    pub body: Value,
+    /// Call warnings produced while building the body.
+    pub warnings: Vec<Warning>,
+}
+
+/// Encode an OpenAI chat-completions request (W.1): a pure function from the
+/// resolved URL/headers, model id and call options to plain data. The only
+/// place the chat body is built.
+///
+/// # Errors
+///
+/// Returns request-build conversion errors.
+pub(crate) fn encode_chat(
+    url: String,
+    headers: Vec<(String, String)>,
+    model_id: &str,
+    options: &CallOptions,
+    stream: bool,
+    parse_chat_options: super::options::ChatOptionsParser,
+) -> Result<EncodedChatRequest, AiMuxError> {
+    let RequestBodyResult { body, warnings } =
+        super::convert::build_request_body_with_chat_options(
+            model_id,
+            options,
+            stream,
+            parse_chat_options,
+        )?;
+    Ok(EncodedChatRequest {
+        url,
+        headers,
+        body,
+        warnings,
+    })
 }
 
 // ── Shared OpenAI chat-completions execution ─────────────────────────────────
@@ -164,8 +231,7 @@ impl LanguageModel for OpenAIModel {
 /// Execute a non-streaming OpenAI chat-completion request.
 ///
 /// `http` carries the full chat-completions URL, the auth and request headers
-/// and the transport; `model_id` is placed in the request body's `model`
-/// field.
+/// and the transport; `encoded` is the request from [`encode_chat`].
 ///
 /// # Errors
 ///
@@ -174,13 +240,9 @@ impl LanguageModel for OpenAIModel {
 /// `choices` is empty.
 pub(crate) async fn execute_generate(
     http: HttpRequest,
-    model_id: &str,
-    options: &CallOptions,
-    parse_chat_options: super::options::ChatOptionsParser,
+    encoded: EncodedChatRequest,
 ) -> Result<GenerateResult, AiMuxError> {
-    let request_result =
-        build_request_body_with_chat_options(model_id, options, false, parse_chat_options)?;
-    let body = request_result.body;
+    let EncodedChatRequest { body, warnings, .. } = encoded;
 
     let resp = aimux_provider_utils::post_json_to_api(
         http,
@@ -302,7 +364,7 @@ pub(crate) async fn execute_generate(
         content,
         finish_reason,
         usage,
-        warnings: request_result.warnings,
+        warnings,
         provider_metadata,
         response: Some(aimux_core::shared::ResponseInfo {
             id: data.id,
@@ -322,8 +384,7 @@ pub(crate) async fn execute_generate(
 /// Execute a streaming OpenAI chat-completion request.
 ///
 /// `http` carries the full chat-completions URL, the auth and request headers
-/// and the transport; `model_id` is placed in the request body's `model`
-/// field.
+/// and the transport; `encoded` is the request from [`encode_chat`].
 ///
 /// # Errors
 ///
@@ -331,15 +392,12 @@ pub(crate) async fn execute_generate(
 /// stream fails; transport errors surface as `Err` items in the stream.
 pub(crate) async fn execute_stream(
     http: HttpRequest,
-    model_id: &str,
+    encoded: EncodedChatRequest,
     options: &CallOptions,
-    parse_chat_options: super::options::ChatOptionsParser,
 ) -> Result<StreamResult, AiMuxError> {
-    let request_result =
-        build_request_body_with_chat_options(model_id, options, true, parse_chat_options)?;
     // M9 (RFC-0016): keep the warnings computed while building the body —
     // they are emitted in `StreamStart` below instead of being dropped.
-    let RequestBodyResult { body, warnings } = request_result;
+    let EncodedChatRequest { body, warnings, .. } = encoded;
     let endpoint = http.url.clone();
 
     let resp = aimux_provider_utils::post_json_to_api(
