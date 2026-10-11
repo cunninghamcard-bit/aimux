@@ -20,13 +20,13 @@ use aimux_core::{
 use aimux_provider_utils::HeaderMapOpt;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::openai::OpenAIProviderSettings;
 use crate::openai_compatible::{OpenAICompatibleProviderSettings, create_openai_compatible};
 
 /// Per-handle options of [`provider_handle`] (#226).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderOptions {
     /// Override the default or environment base URL.
     pub base_url: Option<String>,
@@ -38,9 +38,6 @@ pub struct ProviderOptions {
     pub project: Option<String>,
     /// Decision retry-count default; a per-call `max_retries` still wins.
     pub max_retries: Option<u32>,
-    /// Generation request-body overrides. Native decisions refuse a handle
-    /// that carries them (#226).
-    pub body_overrides: Option<Value>,
 }
 
 /// Official local decision runtimes: name, default base URL, base URL env.
@@ -154,7 +151,6 @@ pub fn provider_handle(
     Ok(Box::new(ProviderHandle {
         inner,
         max_retries: options.max_retries,
-        has_body_overrides: options.body_overrides.is_some(),
         api_key_source,
     }))
 }
@@ -163,31 +159,13 @@ pub fn provider_handle(
 struct ProviderHandle {
     inner: Arc<dyn Provider>,
     max_retries: Option<u32>,
-    has_body_overrides: bool,
     /// Credential source when the handle resolved the key itself (the
     /// placeholder or an environment variable); `None` keeps the model's own.
     api_key_source: Option<String>,
 }
 
-impl ProviderHandle {
-    fn generation_overrides_unsupported(&self) -> Result<(), AiMuxError> {
-        if self.has_body_overrides {
-            return Err(AiMuxError::UnsupportedFunctionality(
-                "body_overrides are not supported by the package model factories".into(),
-            ));
-        }
-        Ok(())
-    }
-}
-
 impl Provider for ProviderHandle {
     fn decision_model(&self, id: &str) -> Result<Box<dyn DecisionModel>, AiMuxError> {
-        if self.has_body_overrides {
-            return Err(AiMuxError::UnsupportedFunctionality(
-                "native decisions require an official adapter without generation body_overrides"
-                    .into(),
-            ));
-        }
         let model = self.inner.decision_model(id)?;
         if self.max_retries.is_none() && self.api_key_source.is_none() {
             return Ok(model);
@@ -203,15 +181,12 @@ impl Provider for ProviderHandle {
         }))
     }
     fn language_model(&self, id: &str) -> Result<Arc<dyn LanguageModel>, AiMuxError> {
-        self.generation_overrides_unsupported()?;
         self.inner.language_model(id)
     }
     fn embedding_model(&self, id: &str) -> Result<Arc<dyn EmbeddingModel>, AiMuxError> {
-        self.generation_overrides_unsupported()?;
         self.inner.embedding_model(id)
     }
     fn image_model(&self, id: &str) -> Result<Arc<dyn ImageModel>, AiMuxError> {
-        self.generation_overrides_unsupported()?;
         self.inner.image_model(id)
     }
     fn transcription_model(
