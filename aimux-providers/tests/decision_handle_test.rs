@@ -153,11 +153,11 @@ async fn recorded_decision_file_contains_no_raw_credentials() {
     );
 }
 
-/// #226 (D15): a keyless local runtime sends the placeholder credential
-/// `Authorization: Bearer not-needed`.
+/// D15/D24: a keyless local runtime is `auth = none` and sends no
+/// `Authorization` header at all (absent, not empty).
 #[tokio::test]
 #[serial]
-async fn keyless_local_runtime_sends_placeholder_bearer() {
+async fn keyless_local_runtime_sends_no_authorization_header() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(500).set_body_json(json!({"error": "stop"})))
@@ -189,11 +189,10 @@ async fn keyless_local_runtime_sends_placeholder_bearer() {
     recording::init_recording(None);
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].headers["authorization"], "Bearer not-needed");
-    let recorded = serde_json::to_string(&recorder.completed()).unwrap();
     assert!(
-        !recorded.contains("not-needed"),
-        "placeholder key leaked into the recording: {recorded}"
+        !requests[0].headers.contains_key("authorization"),
+        "unexpected Authorization header: {:?}",
+        requests[0].headers.get("authorization")
     );
 }
 

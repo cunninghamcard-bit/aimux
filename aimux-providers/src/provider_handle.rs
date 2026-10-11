@@ -46,9 +46,6 @@ const LOCAL_RUNTIMES: &[(&str, &str, &str)] = &[
     ("laya", "http://127.0.0.1:8000/v1", "LAYA_BASE_URL"),
 ];
 
-/// #226's key for a local runtime started without one.
-const PLACEHOLDER_API_KEY: &str = "not-needed";
-
 fn non_empty_env(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -63,7 +60,8 @@ fn non_empty_env(name: &str) -> Option<String> {
 ///   request time (#200:538); `Some("")` is used as given and never falls
 ///   back (RFC-0040:67). With `options.base_url` set and no key, no env is
 ///   read and no credential is sent.
-/// - local runtimes: `api_key = None` sends the placeholder key `not-needed`;
+/// - local runtimes: `api_key = None` is `auth = none`: no `Authorization`
+///   header is sent (RFC-0040:155, D24);
 ///   no `{NAME}_API_KEY` is read. The base URL is `options.base_url`, else
 ///   `{NAME}_BASE_URL`, else the runtime's default local endpoint.
 ///
@@ -136,14 +134,13 @@ fn provider_handle_with(
                 .clone()
                 .or_else(|| non_empty_env(url_env))
                 .unwrap_or_else(|| (*default_url).into());
-            // Explicit key, else the placeholder `not-needed` (sent as
-            // `Authorization: Bearer not-needed`). No `{NAME}_API_KEY` is read.
-            let api_key = api_key.unwrap_or_else(|| PLACEHOLDER_API_KEY.into());
+            // Explicit key, else `auth = none`: no Authorization header
+            // (D24). No `{NAME}_API_KEY` is read.
             Arc::new(create_openai_compatible(
                 OpenAICompatibleProviderSettings {
                     name: name.into(),
                     base_url,
-                    api_key: Some(api_key),
+                    api_key,
                     headers: Some(headers),
                     ..Default::default()
                 },
@@ -272,11 +269,9 @@ mod env_tests {
         serde_json::from_str(text).unwrap()
     }
 
+    /// The fixtures already set `max_retries: 0`.
     fn options(name: &str) -> DecisionCallOptions {
-        let mut options: DecisionCallOptions =
-            serde_json::from_value(fixture(name)["options"].clone()).unwrap();
-        options.max_retries = Some(0);
-        options
+        serde_json::from_value(fixture(name)["options"].clone()).unwrap()
     }
 
     async fn mock(route: &str, name: &str) -> MockServer {
