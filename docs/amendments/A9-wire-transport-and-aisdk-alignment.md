@@ -12,7 +12,7 @@ open PR：只有 #24–#27（E.0/E.1/E.2/E.3a），对本文引用的行只改 `
 | W1 Fetch 边界 | 对 | fetch.rs:160-171、:180-198 | ALIGN:394-421、:275-284 | MNT |
 | W2 encode 纯函数 | **部分已有** | OpenAI chat 已经有共用的 body 构建：`build_request_body_with_chat_options`（openai/convert.rs:1094），generate 和 stream 都调它（model.rs:182、:339），之后才走 `post_json_to_api`（:185、:345）。其他协议族没逐个核 | ALIGN:112；RFC-0036:41、:48（rig 的说法 RFC 没写） | OWN |
 | W3 decode 共用 | 部分核实 | finish 和 usage 在两条路径共用：`parse_finish_reason`（model.rs:271、:642），`convert_usage`（:278、:537）。内容解析是不是共用没核。调研引的行号都对：transform_stream.rs:60，response_handler.rs:51、105、222、242，三处 finish 映射 | — | OWN |
-| W4 鉴权在 fetch 装饰器 | 对，**但描述有误** | azure/mod.rs:259 不是"构造时写入"，而是 `BearerTokenFetch` 这个 Fetch 装饰器在请求时才写（:243-259，没有 authorization 时才补）。sigv4：`SigV4Fetch` 在 sigv4_fetch.rs:292，实现 Fetch 在 :333 | ALIGN:460-470 | MNT |
+| W4 鉴权在 fetch 装饰器 | 对，**但描述有误** | azure/mod.rs:250-273 不是"构造时写入"，而是 `BearerTokenFetch` 这个 Fetch 装饰器在请求时才写（`BearerTokenFetch` 在 :244，`impl Fetch` 在 :250-273，没有 authorization 时才补）。sigv4：`SigV4Fetch` 在 sigv4_fetch.rs:292，实现 Fetch 在 :333 | ALIGN:460-470 | MNT |
 | W5 SSE 不进 Fetch | 对 | ALIGN:247-273（约束 2） | 同左 | MNT |
 | W6 preset 数据化 | **已基本完成**（调研稿没提） | openai_compatible/config.rs:1-8 写明"SDK 用函数的地方这里都是数据"；`ConvertUsage` enum 在 :57（OpenAICompatible/Alibaba/MoonshotAI）；`BaseUrl::Preset` 引用 `PresetDescriptor`（:34-41） | ALIGN:156（D12，运行时 descriptor 表）、:765、:771 | MNT |
 | W7 crate 拆分没开始 | 对 | 8455db9a 根目录只有 core/provider-utils/providers/stream/ffi。u1.6 分支另有 `aimux-provider` | ALIGN:247-273 | MNT |
@@ -56,9 +56,11 @@ open PR：只有 #24–#27（E.0/E.1/E.2/E.3a），对本文引用的行只改 `
 
 | 条目 | 现状 file:line | 为什么不改 |
 |---|---|---|
-| W1 Fetch 边界 | `aimux-provider-utils/src/fetch.rs:160-171`：`trait Fetch` 只有 `fetch(FetchRequest) -> FetchResponse`，一次请求一次响应，不跟随重定向（重定向由 http.rs 的 helper 逐跳决定）；`:174` `FetchFunction = Arc<dyn Fetch>`；默认传输在请求时解析（`:177` 起） | 已经是 ALIGN:394-421、:275-284 要的边界：传输只管一跳 HTTP，编码/解码、重试、重定向都在它外面。再拆没有收益 |
-| W4 鉴权放在 fetch 装饰器 | Azure `BearerTokenFetch`（`aimux-providers/src/azure/mod.rs:243`，`impl Fetch` `:248-262`）：请求时才 resolve token，只有没有 `authorization` 时才补；SigV4 `SigV4Fetch`（`aimux-provider-utils/src/sigv4_fetch.rs:292`，`impl Fetch` `:333`）对最终请求签名 | 符合 ALIGN:460-470：凭据在请求时、在合并完 per-call headers 之后才写，encode 函数不需要知道鉴权。A9 原表里"构造时写入"的描述是错的，代码本来就是对的 |
+| W1 Fetch 边界 | `aimux-provider-utils/src/fetch.rs:160-171`：`trait Fetch` 只有 `fetch(FetchRequest) -> FetchResponse`，一次请求一次响应，不跟随重定向（重定向由 http.rs 的 helper 逐跳决定）；`:180` `FetchFunction = Arc<dyn Fetch>`；默认传输在请求时解析（`:182` 起，`default_fetch` `:184`） | 已经是 ALIGN:394-421、:275-284 要的边界：传输只管一跳 HTTP，编码/解码、重试、重定向都在它外面。再拆没有收益 |
+| W4 鉴权放在 fetch 装饰器 | Azure `BearerTokenFetch`（`aimux-providers/src/azure/mod.rs:244`，`impl Fetch` `:250-273`）：请求时才 resolve token，只有没有 `authorization` 时才补；SigV4 `SigV4Fetch`（`aimux-provider-utils/src/sigv4_fetch.rs:292`，`impl Fetch` `:333`）对最终请求签名 | 符合 ALIGN:460-470：凭据在请求时、在合并完 per-call headers 之后才写，encode 函数不需要知道鉴权（OpenAI chat 见下面“W.1 的鉴权位置”）。A9 原表里"构造时写入"的描述是错的，代码本来就是对的 |
 | W5 SSE 不进 Fetch | SSE 解析在 `aimux-provider-utils/src/response_handler.rs:378` `create_event_source_response_handler`，作用在 Fetch 返回的响应 body 上；`Fetch` trait（fetch.rs:164）不认识 SSE | 就是 ALIGN:247-273 约束 2：传输只交字节，流式协议在 helper 层解析。不改 |
 | W6 preset 数据化 | `aimux-providers/src/openai_compatible/config.rs:1-8`（SDK 用函数的地方这里都是数据）；`BaseUrl::Preset { descriptor: &'static PresetDescriptor }` `:36-37`；`ConvertUsage` enum `:57` | ALIGN:156（D12）、:765、:771 要的"descriptor 是数据"已经做到；W.* 不再动 |
+
+W.1 的鉴权位置（签名以 #39 `exp/w1-openai-chat-encode@c4e80246` 为准）：纯函数 `encode_chat(url, headers, model_id, &CallOptions, stream, parse_chat_options) -> Result<EncodedChatRequest, AiMuxError>`（`aimux-providers/src/openai/model.rs:202-209`）不碰鉴权：它收到的 `headers` 已经解析好，自己不读凭据、不加 `authorization`。`authorization` 只在 `encode_request`（`model.rs:160`）里加：它调 `OpenAIModelConfig::request_headers`（`aimux-providers/src/openai/config.rs:139`）解析凭据。原生 OpenAI 的 `Bearer <key>` 来自 provider headers：`create_openai` 用 `ProviderHeaders::bearer(...)` 构造（`openai/mod.rs:249`），请求时由 `self.headers.resolve()`（`config.rs:143`）解析出来；`:153-162` 只是 `token_provider` 分支，只有合并后的 headers 里没有 `authorization` 时才补 `Bearer <token>`。然后把结果交给 `encode_chat`（`model.rs:169`）。
 
 W7（crate 拆分）属于阶段 3，不在 1W。W2/W3 只做 OpenAI chat（W.1、W.2），其他协议族列为待查。
