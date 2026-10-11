@@ -372,7 +372,8 @@ def compare(manifest: dict, budgets: dict, report: dict) -> dict:
     - mapped artifact, budget present, measured: pass iff actual <= H
     - mapped artifact, budget present, not measured: ARTIFACT_MISSING
     - mapped artifact, no budget: BUDGET_UNREGISTERED
-    - inventory status 'unregistered': listed, never a failure (1.9b)
+    - inventory status 'unregistered': listed and skipped only if the ID is in
+      UNREGISTERED_ALLOWLIST and has no budget; otherwise BUDGET_INVALID (1.9b)
     """
     measured = {}
     for r in report["measurements"]:

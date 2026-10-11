@@ -2,7 +2,8 @@
 """Compare a size report against registered budgets (RFC-0038a §3.2, §9.1).
 
 Passes iff every registered metric has actual <= H. Inventory entries marked
-'unregistered' are listed and never fail (PHASES 1.9; completion is 1.9b).
+'unregistered' are skipped only if on UNREGISTERED_ALLOWLIST with no budget;
+any other unregistered entry fails as BUDGET_INVALID (PHASES 1.9; completion is 1.9b).
 --report-only is the Q0 transitional mode (RFC-0038a §12 :428): it lets
 BUDGET_EXCEEDED / ARTIFACT_MISSING through but still exits 1 on
 BUDGET_UNREGISTERED and BUDGET_INVALID (RFC-0038a §9.4 :377).
