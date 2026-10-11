@@ -104,7 +104,7 @@ pub fn create_groq(settings: GroqProviderSettings) -> Result<GroqProvider, AiMux
             Vec::new(),
             settings.headers,
         )
-        .with_user_agent("groq", "4.0.52"),
+        .with_user_agent("groq", crate::shared::aisdk_pins::GROQ),
         fetch: settings.fetch,
     })
 }

@@ -350,7 +350,7 @@ async fn should_pass_headers_and_the_xai_user_agent() {
     assert_eq!(header("content-type"), "application/json");
     assert_eq!(header("custom-provider-header"), "provider-header-value");
     assert_eq!(header("custom-request-header"), "request-header-value");
-    assert!(header("user-agent").contains("ai-sdk-xai/5.0.12"));
+    assert!(header("user-agent").contains(&format!("ai-sdk-xai/{}", pinned("@ai-sdk/xai"))));
 }
 
 /// TS: "should return binary audio data"
@@ -429,4 +429,21 @@ async fn should_use_the_real_date_when_no_custom_date_provider_is_specified() {
         .expect("an RFC 3339 timestamp");
     assert!(before <= timestamp && timestamp <= after);
     assert_eq!(result.response.model_id.as_deref(), Some(""));
+}
+
+/// The version `fixtures/aisdk/VERSIONS.json` pins for `package`.
+fn pinned(package: &str) -> String {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../fixtures/aisdk/VERSIONS.json"
+    );
+    let versions: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    // `{version, integrity}` (unit 1.11) or a bare version string.
+    let entry = &versions[package];
+    entry["version"]
+        .as_str()
+        .or_else(|| entry.as_str())
+        .unwrap()
+        .to_string()
 }

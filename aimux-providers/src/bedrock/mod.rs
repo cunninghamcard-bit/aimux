@@ -487,7 +487,13 @@ impl BedrockEndpoint {
             }
         };
         let mut headers = normalize_headers(headers).into_iter().collect();
-        with_user_agent_suffix(&mut headers, "ai-sdk-amazon-bedrock/5.0.100");
+        with_user_agent_suffix(
+            &mut headers,
+            &format!(
+                "ai-sdk-amazon-bedrock/{}",
+                crate::shared::aisdk_pins::AMAZON_BEDROCK
+            ),
+        );
         Ok(headers
             .into_iter()
             .map(|(name, value)| (name, Some(value)))

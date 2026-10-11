@@ -100,7 +100,7 @@ pub fn create_deepseek(settings: DeepSeekProviderSettings) -> Result<DeepSeekPro
             Vec::new(),
             settings.headers,
         )
-        .with_user_agent("deepseek", "3.0.56"),
+        .with_user_agent("deepseek", crate::shared::aisdk_pins::DEEPSEEK),
         fetch: settings.fetch,
     })
 }

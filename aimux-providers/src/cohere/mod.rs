@@ -118,7 +118,7 @@ pub fn create_cohere(settings: CohereProviderSettings) -> Result<CohereProvider,
         Vec::new(),
         settings.headers,
     );
-    let headers = headers.with_user_agent(options::NAMESPACE, "4.0.52");
+    let headers = headers.with_user_agent(options::NAMESPACE, crate::shared::aisdk_pins::COHERE);
     Ok(CohereProvider {
         generate_id: settings.generate_id,
         base_url,

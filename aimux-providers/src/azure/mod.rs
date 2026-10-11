@@ -231,12 +231,13 @@ pub fn create_azure(
         resource_name: settings.resource_name,
         base_url,
         speech_base_url,
-        speech_headers: speech_headers.with_user_agent(options::NAMESPACE, "4.0.84"),
+        speech_headers: speech_headers
+            .with_user_agent(options::NAMESPACE, crate::shared::aisdk_pins::AZURE),
         info,
         api_version: settings.api_version,
         use_deployment_based_urls: settings.use_deployment_based_urls,
         fetch,
-        headers: headers.with_user_agent(options::NAMESPACE, "4.0.84"),
+        headers: headers.with_user_agent(options::NAMESPACE, crate::shared::aisdk_pins::AZURE),
     })
 }
 
