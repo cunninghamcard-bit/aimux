@@ -1215,7 +1215,9 @@ pub fn parse_finish_reason(s: &str) -> FinishReason {
     let unified = match s {
         "stop" => FinishReasonUnified::Stop,
         "length" => FinishReasonUnified::Length,
-        "tool_calls" => FinishReasonUnified::ToolCalls,
+        // Legacy `function_call` is a tool-call stop too (AI SDK
+        // map-openai-finish-reason.ts:13-15).
+        "function_call" | "tool_calls" => FinishReasonUnified::ToolCalls,
         "content_filter" => FinishReasonUnified::ContentFilter,
         _ => FinishReasonUnified::Other,
     };
@@ -1228,6 +1230,13 @@ pub fn parse_finish_reason(s: &str) -> FinishReason {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn function_call_finish_reason_is_tool_calls() {
+        let reason = parse_finish_reason("function_call");
+        assert!(matches!(reason.unified, FinishReasonUnified::ToolCalls));
+        assert_eq!(reason.raw.as_deref(), Some("function_call"));
+    }
     use aimux_core::language_model_message::ToolCallPart;
 
     fn replayed_arguments(input: Value) -> Value {
