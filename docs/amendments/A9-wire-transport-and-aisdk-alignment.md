@@ -64,3 +64,7 @@ open PR：只有 #24–#27（E.0/E.1/E.2/E.3a），对本文引用的行只改 `
 W.1 的鉴权位置（签名以 #39 `exp/w1-openai-chat-encode@c4e80246` 为准）：纯函数 `encode_chat(url, headers, model_id, &CallOptions, stream, parse_chat_options) -> Result<EncodedChatRequest, AiMuxError>`（`aimux-providers/src/openai/model.rs:202-209`）不碰鉴权：它收到的 `headers` 已经解析好，自己不读凭据、不加 `authorization`。`authorization` 只在 `encode_request`（`model.rs:160`）里加：它调 `OpenAIModelConfig::request_headers`（`aimux-providers/src/openai/config.rs:139`）解析凭据。原生 OpenAI 的 `Bearer <key>` 来自 provider headers：`create_openai` 用 `ProviderHeaders::bearer(...)` 构造（`openai/mod.rs:249`），请求时由 `self.headers.resolve()`（`config.rs:143`）解析出来；`:153-162` 只是 `token_provider` 分支，只有合并后的 headers 里没有 `authorization` 时才补 `Bearer <token>`。然后把结果交给 `encode_chat`（`model.rs:169`）。
 
 W7（crate 拆分）属于阶段 3，不在 1W。W2/W3 只做 OpenAI chat（W.1、W.2），其他协议族列为待查。
+
+## 测试说明：user-agent 版本的录制守护（#46）
+
+anthropic、google、openai-compatible、openai 各有且只有一条 provider 层录制（不经过 `ai`，录下的 user-agent 以 `ai-sdk-<pkg>/<ver>` 开头）：`fixtures/aisdk/anthropic/messages-stream-basic.json`、`google/generate-stream-basic.json`、`openai-compatible/chat-stream-basic.json`、`openai/chat-stream-basic.json`。各自的 `*_stream_basic` 测试断言 aimux 发出的 `ai-sdk-<pkg>/<ver>` 是录制 user-agent 的前缀；其余录制走 `ai`（`ai/7.0.127 …`），只能核对 `ai-sdk-provider-utils/<ver>`。常量和 VERSIONS.json 一起改成别的版本时，只有这条录制会让测试变红（#46 变异表）。重新录制时不能删掉或改成经过 `ai` 录制，否则包版本就没有守护了。
