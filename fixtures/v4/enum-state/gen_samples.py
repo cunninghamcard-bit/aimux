@@ -82,11 +82,12 @@ tool_calls_rejected = [
     tool_call(dynamic=True, invalid=True, inp="{\"city\":"),
 ]
 
-def tool_result(dynamic=None, is_error=None, preliminary=None, meta=False):
+def tool_result(dynamic=None, is_error=None, preliminary=None, meta=False, pe=None):
     v = {"toolCallId": "call_1", "toolName": "web_search", "result": {"hits": 3}}
     if is_error is not None: v["isError"] = is_error
     if preliminary is not None: v["preliminary"] = preliminary
     if dynamic is not None: v["dynamic"] = dynamic
+    if pe is not None: v["providerExecuted"] = pe
     if meta: v["providerMetadata"] = {"xai": {"id": "fs_1"}}
     return v
 
@@ -95,6 +96,21 @@ tool_results = [tool_result(dynamic=d) for d in (None, False, True)] + [
     tool_result(preliminary=True, dynamic=False), tool_result(preliminary=False),
     tool_result(meta=True),
 ]
+# E.3a: providerExecuted three states (absent rows above), crossed with
+# dynamic; includes provider-executed without dynamic (A7 correction).
+tool_results += [tool_result(dynamic=d, pe=p) for p in (False, True) for d in (None, False, True)]
+
+def norm_tool_result(v):
+    # A7 D25 + correction: client-executed (providerExecuted not true) always
+    # writes the dynamic boolean (execute-tool-call.ts:169,199); provider-
+    # executed passes dynamic through (stream-language-model-call.ts:774,789).
+    # providerExecuted itself is always passed through. Enforced from E.3.
+    out = dict(v)
+    if v.get("providerExecuted") is not True:
+        out["dynamic"] = bool(v.get("dynamic", False))
+    order = ["toolCallId", "toolName", "result", "isError", "preliminary",
+             "dynamic", "providerExecuted", "providerMetadata"]
+    return {k: out[k] for k in order if k in out}
 
 def raw_tool_call(inp, dynamic=None, pe=None):
     v = {"toolCallId": "call_1", "toolName": "weather", "input": inp}
@@ -134,10 +150,9 @@ input_starts.append(input_start(title="Weather"))
 files = {
     "tool_call": (tool_calls, norm_tool_call),
     "tool_call_rejected": (tool_calls_rejected, None),
-    # ToolResult has no providerExecuted field at 8455db9a (it documents itself
-    # as a provider-executed result); E.3 decides client vs provider. Until
-    # then its normalized form is the identity (A7 correction: passthrough).
-    "tool_result": (tool_results, lambda v: v),
+    # E.3a adds the providerExecuted field (passthrough); the D25 normalized
+    # form below is the E.3 target (see enum_state_wire_test.rs).
+    "tool_result": (tool_results, norm_tool_result),
     "raw_tool_call": (raw_tool_calls, lambda v: v),
     "stream_tool_input_start": (input_starts, norm_input_start),
     "text_stream_tool_input_start": (input_starts, norm_input_start),

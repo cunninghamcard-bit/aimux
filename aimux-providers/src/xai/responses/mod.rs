@@ -159,6 +159,7 @@ fn image_generation_result(part: &Value, tool_name: String) -> ToolResult {
         ),
     };
     ToolResult {
+        provider_executed: None,
         tool_call_id: part
             .get("id")
             .and_then(Value::as_str)
@@ -276,6 +277,7 @@ impl LanguageModel for XaiResponsesModel {
                         .unwrap_or(Value::Null);
 
                 content.push(GenerateContent::ToolResult(ToolResult {
+                    provider_executed: None,
                     tool_call_id: part_id.to_string(),
                     tool_name,
                     result: json!({ "queries": queries, "results": results }),
@@ -314,6 +316,7 @@ impl LanguageModel for XaiResponsesModel {
                 }));
                 if part_type == "web_search_call" {
                     content.push(GenerateContent::ToolResult(ToolResult {
+                        provider_executed: None,
                         tool_call_id: part_id.to_string(),
                         tool_name,
                         result: map_web_search_action(part.get("action").unwrap_or(&Value::Null)),
@@ -1057,6 +1060,7 @@ impl Transformer for XaiResponsesStream {
                                         })).collect::<Vec<_>>())
                                     }).unwrap_or(Value::Null);
                             controller.enqueue(StreamPart::ToolResult(ToolResult {
+                                provider_executed: None,
                                 tool_call_id: part_id.to_string(),
                                 tool_name,
                                 result: json!({ "queries": queries, "results": results }),
@@ -1124,6 +1128,7 @@ impl Transformer for XaiResponsesStream {
 
                         if event_type == "response.output_item.done" {
                             controller.enqueue(StreamPart::ToolResult(ToolResult {
+                                provider_executed: None,
                                 tool_call_id: part_id.to_string(),
                                 tool_name,
                                 result: if item_type == "web_search_call" {

@@ -452,6 +452,7 @@ impl Transformer for HuggingFaceResponsesStream {
                                         item.get("output").and_then(|v| v.as_str())
                                     {
                                         controller.enqueue(StreamPart::ToolResult(ToolResult {
+                                            provider_executed: None,
                                             tool_call_id: call_id,
                                             tool_name: name.clone(),
                                             result: Value::String(output.to_string()),
@@ -1040,6 +1041,7 @@ fn build_generate_content(response: &Value) -> Result<Vec<GenerateContent>, AiMu
 
                 if let Some(output) = part.get("output").filter(|v| !v.is_null()) {
                     content.push(GenerateContent::ToolResult(ToolResult {
+                        provider_executed: None,
                         tool_call_id: id.to_string(),
                         tool_name: name.to_string(),
                         result: output.clone(),
@@ -1065,6 +1067,7 @@ fn build_generate_content(response: &Value) -> Result<Vec<GenerateContent>, AiMu
 
                 if let Some(tools) = part.get("tools").filter(|v| !v.is_null()) {
                     content.push(GenerateContent::ToolResult(ToolResult {
+                        provider_executed: None,
                         tool_call_id: id.to_string(),
                         tool_name: "list_tools".to_string(),
                         result: json!({ "tools": tools }),

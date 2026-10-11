@@ -512,6 +512,12 @@ pub struct ToolResult {
     #[ts(optional)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dynamic: Option<bool>,
+    /// Whether the tool was executed by the provider (AI SDK
+    /// `generate-text/tool-result.ts:17,32`; #200:2292). Passed through as
+    /// given: absent / false / true.
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_executed: Option<bool>,
     /// Additional provider-specific metadata for the tool result.
     #[ts(optional)]
     #[serde(default, skip_serializing_if = "Option::is_none")]

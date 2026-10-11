@@ -41,6 +41,7 @@ pub(crate) fn provider_tool_content(
     };
     let result = |id: &str, tool_name: String, value: Value, meta| {
         GenerateContent::ToolResult(ToolResult {
+            provider_executed: None,
             tool_call_id: id.to_string(),
             tool_name,
             result: value,

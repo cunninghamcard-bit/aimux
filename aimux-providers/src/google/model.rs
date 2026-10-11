@@ -478,6 +478,7 @@ impl GoogleLanguageModelStream {
                             .map(std::string::ToString::to_string)
                             .unwrap_or_default();
                         controller.enqueue(StreamPart::ToolResult(ToolResult {
+                            provider_executed: None,
                             tool_call_id: call_id.clone(),
                             tool_name: self.code_execution_tool_name.clone(),
                             result: json!({ "outcome": outcome, "output": output }),
@@ -532,6 +533,7 @@ impl GoogleLanguageModelStream {
                         part.get("thoughtSignature").and_then(|v| v.as_str()),
                     );
                     controller.enqueue(StreamPart::ToolResult(ToolResult {
+                        provider_executed: None,
                         tool_call_id: id,
                         tool_name: format!("server:{tool_type}"),
                         result: response,
@@ -834,6 +836,7 @@ fn extract_content_from_candidate(
                         .map(std::string::ToString::to_string)
                         .unwrap_or_default();
                     content.push(GenerateContent::ToolResult(ToolResult {
+                        provider_executed: None,
                         tool_call_id: call_id.clone(),
                         tool_name: code_execution_tool_name.to_string(),
                         result: json!({ "outcome": outcome, "output": output }),
@@ -965,6 +968,7 @@ fn extract_content_from_candidate(
                     part.get("thoughtSignature").and_then(|v| v.as_str()),
                 );
                 content.push(GenerateContent::ToolResult(ToolResult {
+                    provider_executed: None,
                     tool_call_id: id,
                     tool_name: format!("server:{tool_type}"),
                     result: response,

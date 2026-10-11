@@ -189,10 +189,43 @@ fn tool_call_semantic_samples_match_by_json_value() {
     }
 }
 
+/// E.3a: `ToolResult.providerExecuted` is passed through, so every sample
+/// (including the providerExecuted x dynamic rows) round-trips byte for byte;
+/// the rows that existed at 8455db9a still equal their baseline. The
+/// `normalized/` lines (A7 D25 + correction: client-executed always writes
+/// `dynamic`, provider-executed passes it through) are a fixed point here;
+/// `serialize(x) == normalize(x)` is E.3's enum.
 #[test]
 fn tool_result_samples_match_baseline() {
-    check::<ToolResult>("tool_result");
+    let sample = dir().join("tool_result.jsonl");
+    let out = round_trip::<ToolResult>(&sample);
+    assert_eq!(out, lines(&sample), "tool_result.jsonl: passthrough");
+    let baseline = lines(&dir().join("baseline").join("tool_result.jsonl"));
+    assert_eq!(baseline.len(), 8, "8455db9a baseline rows");
+    assert_eq!(
+        &out[..baseline.len()],
+        &baseline[..],
+        "old rows vs 8455db9a"
+    );
     check_normalized::<ToolResult>("tool_result");
+}
+
+/// E.3a: absent / false / true round-trip byte for byte, including a
+/// provider-executed result without `dynamic` (A7 correction).
+#[test]
+fn tool_result_provider_executed_is_passed_through() {
+    let base = r#""toolCallId":"call_1","toolName":"web_search","result":{"hits":3}"#;
+    for (extra, want) in [
+        ("", None),
+        (r#","providerExecuted":false"#, Some(false)),
+        (r#","providerExecuted":true"#, Some(true)),
+        (r#","dynamic":true,"providerExecuted":true"#, Some(true)),
+    ] {
+        let json = format!("{{{base}{extra}}}");
+        let result: ToolResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(result.provider_executed, want, "{json}");
+        assert_eq!(serde_json::to_string(&result).unwrap(), json);
+    }
 }
 
 #[test]
@@ -222,8 +255,9 @@ fn baseline_equals_samples() {
         // The baseline is being rewritten by the other tests right now.
         return;
     }
+    // tool_result: E.3a appended providerExecuted rows that 8455db9a cannot
+    // represent; its old rows are compared in tool_result_samples_match_baseline.
     for name in [
-        "tool_result",
         "raw_tool_call",
         "stream_tool_input_start",
         "text_stream_tool_input_start",
