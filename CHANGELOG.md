@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- Streamed tool-call accumulation has one implementation. `aimux-stream` no
+  longer has a public tool-call tracker or its own second `ToolCallStreamPart`
+  type; it keeps only line and SSE parsing. In `aimux-provider-utils` the
+  `streaming_tool_call_tracker` and `streaming_tool_call_argument_state`
+  modules are private; the `StreamingToolCall*` items stay re-exported for
+  provider crates but are hidden from the docs as an internal wire-format
+  accumulator. A tool-call delta that cannot be attributed to one call is
+  handled like the AI SDK (`@ai-sdk/provider-utils` 5.0.53): an ambiguous
+  continuation or a blank name with no match is dropped; a delta with no name
+  and no open call, or a `type` other than `function`, ends the stream with
+  `InvalidResponseData` (differential test, #44).
+
 - aimux's public JSON equals the AI SDK's JSON. Struct fields serialize
   camelCase (`toolCallId`, `providerOptions`, `inputTokens`); unions carry the
   AI SDK's tag and strings (`{"type":"text-delta"}`, `"tool-call"`,
