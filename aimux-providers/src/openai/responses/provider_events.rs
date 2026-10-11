@@ -33,7 +33,7 @@ pub(crate) fn provider_tool_content(
         GenerateContent::ToolCall(RawToolCall {
             tool_call_id: id.to_string(),
             tool_name,
-            input,
+            input: input.into(),
             provider_executed: executed,
             dynamic,
             provider_metadata: meta,

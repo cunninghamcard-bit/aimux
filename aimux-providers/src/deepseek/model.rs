@@ -442,7 +442,7 @@ impl LanguageModel for DeepSeekChatLanguageModel {
                     .filter(|id| !id.is_empty())
                     .unwrap_or_else(generate_id),
                 tool_name: call.function.name,
-                input: call.function.arguments,
+                input: call.function.arguments.into(),
                 provider_executed: None,
                 dynamic: None,
                 provider_metadata: None,

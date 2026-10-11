@@ -237,7 +237,7 @@ impl LanguageModel for MistralModel {
                 content.push(GenerateContent::ToolCall(RawToolCall {
                     tool_call_id: tc.id,
                     tool_name: tc.function.name,
-                    input,
+                    input: input.into(),
                     provider_executed: None,
                     dynamic: None,
                     provider_metadata: None,

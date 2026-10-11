@@ -111,7 +111,7 @@ pub async fn parse_tool_call(
             Err(AiMuxError::NoSuchTool {
                 tool_name: tool_call.tool_name.clone(),
                 available_tools: None,
-                tool_input: Some(tool_call.input.clone()),
+                tool_input: Some(tool_call.input.to_string()),
             })
         };
         return match parsed {
@@ -196,7 +196,7 @@ fn parse_and_validate_tool_call(
         }
         return Err(AiMuxError::NoSuchTool {
             tool_name: tool_call.tool_name.clone(),
-            tool_input: Some(tool_call.input.clone()),
+            tool_input: Some(tool_call.input.to_string()),
             available_tools: Some(
                 tools
                     .iter()
@@ -216,7 +216,7 @@ fn parse_and_validate_tool_call(
     let validator = jsonschema::validator_for(&function_tool.input_schema).map_err(|error| {
         AiMuxError::InvalidToolInput {
             tool_name: tool_call.tool_name.clone(),
-            tool_input: tool_call.input.clone(),
+            tool_input: tool_call.input.to_string(),
             cause: format!("input schema is invalid: {error}"),
         }
     })?;
@@ -226,7 +226,7 @@ fn parse_and_validate_tool_call(
         .validate(&input)
         .map_err(|error| AiMuxError::InvalidToolInput {
             tool_name: tool_call.tool_name.clone(),
-            tool_input: tool_call.input.clone(),
+            tool_input: tool_call.input.to_string(),
             cause: format!("Type validation failed: Value: {input}.\nError message: {error}"),
         })?;
     Ok((input, None))
@@ -240,7 +240,7 @@ fn parse_json_input(tool_call: &RawToolCall) -> Result<Value, AiMuxError> {
     let value: Value =
         serde_json::from_str(&tool_call.input).map_err(|error| AiMuxError::InvalidToolInput {
             tool_name: tool_call.tool_name.clone(),
-            tool_input: tool_call.input.clone(),
+            tool_input: tool_call.input.to_string(),
             cause: format!(
                 "JSON parsing failed: Text: {}.\nError message: {error}",
                 tool_call.input
@@ -249,7 +249,7 @@ fn parse_json_input(tool_call: &RawToolCall) -> Result<Value, AiMuxError> {
     if contains_forbidden_prototype(&value) {
         return Err(AiMuxError::InvalidToolInput {
             tool_name: tool_call.tool_name.clone(),
-            tool_input: tool_call.input.clone(),
+            tool_input: tool_call.input.to_string(),
             cause: format!(
                 "JSON parsing failed: Text: {}.\nError message: Object contains forbidden prototype property",
                 tool_call.input
@@ -302,7 +302,7 @@ fn invalid_tool_call(tool_call: RawToolCall, error: AiMuxError) -> ToolCall {
     // structured input into the next turn's transcript, so an unknown tool
     // called with perfectly good arguments must still parse here.
     let input = serde_json::from_str(&tool_call.input)
-        .unwrap_or_else(|_| Value::String(tool_call.input.clone()));
+        .unwrap_or_else(|_| Value::String(tool_call.input.to_string()));
     ToolCall {
         invalid: Some(true),
         error: Some(error),
@@ -396,10 +396,11 @@ fn raw_from_invalid(tool_call: &ToolCall) -> Result<(RawToolCall, AiMuxError), A
             tool_name: tool_call.tool_name.clone(),
             // An invalid call keeps unparsable argument text as a JSON string
             // (see `invalid_tool_call`); that text is the raw input.
-            input: raw_tool_call_text(&error).unwrap_or_else(|| match &tool_call.input {
+            input: (raw_tool_call_text(&error).unwrap_or_else(|| match &tool_call.input {
                 Value::String(text) => text.clone(),
                 input => input.to_string(),
-            }),
+            }))
+            .into(),
             provider_executed: tool_call.provider_executed,
             dynamic: tool_call.dynamic,
             provider_metadata: tool_call.provider_metadata.clone(),
@@ -697,7 +698,7 @@ mod tests {
         RawToolCall {
             tool_call_id: id.to_string(),
             tool_name: "weather".to_string(),
-            input: input.to_string(),
+            input: input.to_string().into(),
             provider_executed: None,
             dynamic: None,
             provider_metadata: None,

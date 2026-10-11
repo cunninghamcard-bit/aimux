@@ -323,7 +323,7 @@ impl LanguageModel for GroqChatLanguageModel {
                     .filter(|id| !id.is_empty())
                     .unwrap_or_else(generate_id),
                 tool_name: tool_call.function.name,
-                input: tool_call.function.arguments,
+                input: tool_call.function.arguments.into(),
                 provider_executed: None,
                 dynamic: None,
                 provider_metadata: None,

@@ -247,7 +247,7 @@ pub fn to_chat_completion(result: &GenerateResult, model: &str) -> ChatCompletio
                 let arguments = if call.input.trim().is_empty() {
                     "{}".to_string()
                 } else {
-                    call.input.clone()
+                    call.input.to_string()
                 };
                 tool_calls.push(ChatCompletionToolCall {
                     id: call.tool_call_id.clone(),
