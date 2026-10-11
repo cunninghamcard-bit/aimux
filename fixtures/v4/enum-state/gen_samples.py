@@ -154,7 +154,9 @@ files = {
     # form below is the E.3 target (see enum_state_wire_test.rs).
     "tool_result": (tool_results, norm_tool_result),
     "raw_tool_call": (raw_tool_calls, lambda v: v),
-    "stream_tool_input_start": (input_starts, norm_input_start),
+    # E.4: provider-layer StreamPart keeps the V4 tri-state (stream-part.ts:58);
+    # only the core TextStreamPart is normalized (stream-language-model-call.ts:809).
+    "stream_tool_input_start": (input_starts, lambda v: v),
     "text_stream_tool_input_start": (input_starts, norm_input_start),
 }
 import os

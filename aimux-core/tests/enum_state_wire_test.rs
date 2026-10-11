@@ -287,10 +287,60 @@ fn stream_tool_input_start_samples_match_baseline() {
     check_normalized::<StreamPart>("stream_tool_input_start");
 }
 
+/// E.4: provider-layer `StreamPart::ToolInputStart` keeps `dynamic` as given
+/// (V4 `stream-part.ts:58`): byte for byte with the 8455db9a baseline (above).
+/// Core `TextStreamPart::ToolInputStart` always writes the boolean (A7 D25,
+/// `stream-language-model-call.ts:809`): samples serialize to `normalized/`.
 #[test]
-fn text_stream_tool_input_start_samples_match_baseline() {
-    check::<TextStreamPart>("text_stream_tool_input_start");
+fn text_stream_tool_input_start_samples_match_normalized() {
+    let sample = dir().join("text_stream_tool_input_start.jsonl");
+    let normalized = lines(
+        &dir()
+            .join("normalized")
+            .join("text_stream_tool_input_start.jsonl"),
+    );
+    let out = round_trip::<TextStreamPart>(&sample);
+    assert_eq!(out.len(), normalized.len());
+    for (i, (got, want)) in out.iter().zip(&normalized).enumerate() {
+        assert_eq!(
+            got,
+            want,
+            "text_stream_tool_input_start.jsonl line {}",
+            i + 1
+        );
+    }
     check_normalized::<TextStreamPart>("text_stream_tool_input_start");
+}
+
+/// E.4: absent and `false` are the same core variant; the provider layer
+/// keeps them apart; core conversion maps absent to Static.
+#[test]
+fn tool_input_start_kind() {
+    use aimux_core::tool::ToolKind;
+    let base = r#""type":"tool-input-start","id":"t","toolName":"weather""#;
+    let parse = |extra: &str| -> TextStreamPart {
+        serde_json::from_str(&format!("{{{base}{extra}}}")).unwrap()
+    };
+    assert_eq!(
+        serde_json::to_string(&parse("")).unwrap(),
+        serde_json::to_string(&parse(r#","dynamic":false"#)).unwrap()
+    );
+    let provider: StreamPart = serde_json::from_str(&format!("{{{base}}}")).unwrap();
+    assert_eq!(
+        serde_json::to_string(&provider).unwrap(),
+        format!("{{{base}}}")
+    );
+    let StreamPart::ToolInputStart { dynamic, .. } = &provider else {
+        panic!()
+    };
+    assert_eq!(*dynamic, None);
+    let concrete: StreamPart<ToolCall, _, _> =
+        serde_json::from_str(&format!("{{{base},\"dynamic\":true}}")).unwrap();
+    let Some(TextStreamPart::ToolInputStart { dynamic, .. }) = concrete.into_text_stream_part()
+    else {
+        panic!()
+    };
+    assert_eq!(dynamic, ToolKind::Dynamic);
 }
 
 /// At 8455db9a every sample already round-tripped unchanged: the baseline is
@@ -304,11 +354,7 @@ fn baseline_equals_samples() {
     }
     // tool_result: E.3a appended providerExecuted rows that 8455db9a cannot
     // represent; its old rows are compared in tool_result_samples_match_baseline.
-    for name in [
-        "raw_tool_call",
-        "stream_tool_input_start",
-        "text_stream_tool_input_start",
-    ] {
+    for name in ["raw_tool_call", "stream_tool_input_start"] {
         let sample = lines(&dir().join(format!("{name}.jsonl")));
         let baseline = lines(&dir().join("baseline").join(format!("{name}.jsonl")));
         assert_eq!(sample, baseline, "{name}");
