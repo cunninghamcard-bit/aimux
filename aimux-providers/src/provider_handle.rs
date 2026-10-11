@@ -74,11 +74,18 @@ pub fn provider_handle(
     api_key: Option<String>,
     options: Option<ProviderOptions>,
 ) -> Result<Box<dyn Provider>, AiMuxError> {
-    provider_handle_with(name, api_key, options, Handles::default())
+    provider_handle_with(
+        name,
+        api_key,
+        options,
+        #[cfg(test)]
+        Handles::default(),
+    )
 }
 
-/// What [`provider_handle`] uses from its surroundings: the env source of a
-/// package-default key and the transport. Only this crate's tests set them.
+/// Test-only injection for [`provider_handle_with`]: the env source of a
+/// package-default key and the transport. Not compiled into the library.
+#[cfg(test)]
 #[derive(Default)]
 struct Handles {
     env: crate::shared::EnvSource,
@@ -89,7 +96,7 @@ fn provider_handle_with(
     name: &str,
     api_key: Option<String>,
     options: Option<ProviderOptions>,
-    handles: Handles,
+    #[cfg(test)] handles: Handles,
 ) -> Result<Box<dyn Provider>, AiMuxError> {
     let options = options.unwrap_or_default();
     let mut headers: HeaderMapOpt = options
@@ -107,13 +114,12 @@ fn provider_handle_with(
             organization: options.organization.clone(),
             project: options.project.clone(),
             headers: Some(headers),
+            #[cfg(test)]
             fetch: handles.fetch,
             ..Default::default()
         })?;
         #[cfg(test)]
         let provider = provider.with_env_source(handles.env);
-        #[cfg(not(test))]
-        let _ = handles.env;
         Arc::new(if auth_none {
             provider.without_credential()
         } else {
@@ -225,7 +231,6 @@ mod env_tests {
     };
     use async_trait::async_trait;
     use serde_json::Value;
-    use serial_test::serial;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -322,7 +327,6 @@ mod env_tests {
     /// never looks one up, so `OLLAMA_API_KEY` / `VLLM_API_KEY` never reach
     /// the wire.
     #[tokio::test]
-    #[serial]
     async fn generic_provider_api_key_env_is_not_read() {
         for name in ["ollama", "vllm"] {
             let server = mock("/v1/systemone", "runtime").await;
@@ -360,7 +364,6 @@ mod env_tests {
     /// (2) The OpenAI package default env is read at request time: the key is
     /// put into the env only after the handle and the model exist.
     #[tokio::test]
-    #[serial]
     async fn openai_default_env_is_read_at_request_time() {
         let server = mock("/v1/decisions", "openai").await;
         let env = env(&[]);
@@ -382,7 +385,6 @@ mod env_tests {
     /// Unset default env fails the request (not the construction) with
     /// `LoadApiKey`, and nothing is sent.
     #[tokio::test]
-    #[serial]
     async fn openai_missing_default_env_fails_the_request() {
         let server = mock("/v1/decisions", "openai").await;
         let env = env(&[]);
@@ -395,7 +397,6 @@ mod env_tests {
 
     /// (3) `Some("")` is used as given and never falls back to the env.
     #[tokio::test]
-    #[serial]
     async fn explicit_empty_key_does_not_fall_back_to_env() {
         let server = mock("/v1/decisions", "openai").await;
         let env = env(&[("OPENAI_API_KEY", "sk-from-env")]);
@@ -418,7 +419,6 @@ mod env_tests {
     /// (4a) A changed base URL without a key reads no env and sends no
     /// credential.
     #[tokio::test]
-    #[serial]
     async fn changed_base_url_does_not_read_env() {
         let server = mock("/v1/decisions", "openai").await;
         let env = env(&[("OPENAI_API_KEY", "sk-from-env")]);
@@ -443,7 +443,6 @@ mod env_tests {
 
     /// (4b) `auth = none` (a keyless local runtime) reads no env.
     #[tokio::test]
-    #[serial]
     async fn auth_none_does_not_read_env() {
         let server = mock("/v1/systemone", "runtime").await;
         let env = env(&[("OPENAI_API_KEY", "sk-from-env"), ("LAYA_API_KEY", "x")]);
@@ -472,25 +471,37 @@ mod env_tests {
     /// (4c) Offline replay of a recorded decision reads no env and makes no
     /// request, even though the live handle reads its key from the env.
     #[tokio::test]
-    #[serial]
     async fn offline_replay_does_not_read_env() {
         let server = mock("/v1/decisions", "openai").await;
         let env = env(&[("OPENAI_API_KEY", "sk-from-env")]);
         let handle = openai(None, None, &env, &server);
+        // The recorder is process-global and the other tests here run in
+        // parallel, so this test keeps only the recording of its own call,
+        // told apart by a unique `state`.
+        let mut request = options("openai");
+        request.state = serde_json::json!({ "test": "offline_replay_does_not_read_env" });
         let recorder = Arc::new(RingRecorder::new());
         recording::init_recording(Some(recorder.clone()));
         let live = decide(
             handle.decision_model("gpt-6-luna").unwrap().as_ref(),
-            options("openai"),
+            request.clone(),
         )
         .await;
         recording::init_recording(None);
         live.unwrap();
-        let records = recorder.completed();
+        let records: Vec<_> = recorder
+            .completed()
+            .into_iter()
+            .filter(|record| {
+                serde_json::to_string(&record.input)
+                    .unwrap()
+                    .contains("offline_replay_does_not_read_env")
+            })
+            .collect();
         assert_eq!(records.len(), 1);
         env.lock().unwrap().reads.clear();
         let replay = MockDecisionReplayModel::new("openai", "gpt-6-luna", records).unwrap();
-        decide(&replay, options("openai")).await.unwrap();
+        decide(&replay, request).await.unwrap();
         assert!(reads(&env).is_empty(), "{:?}", reads(&env));
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
