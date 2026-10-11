@@ -8,8 +8,8 @@
 //! fixture; the inputs are rebuilt from the fixture's recorded `sdk.input`.
 //!
 //! The recorded `authorization` is redacted, so the key the case used is
-//! substituted back. The recorded SDK and runtime user-agent identifiers are
-//! replaced with the pinned provider package's user-agent suffix.
+//! substituted back. The user-agent aimux sends is checked against the
+//! recorded one (package and provider-utils parts).
 
 use aimux_core::tool::RawToolCall;
 use std::collections::{BTreeMap, VecDeque};
@@ -275,7 +275,7 @@ impl Fixture {
     }
 
     /// The recorded request must equal what went out: method, URL, headers
-    /// (names case-insensitively, with the pinned user-agent) and body.
+    /// (names case-insensitively; user-agent checked against the recording) and body.
     fn assert_request(&self, seen: &Seen, authorization: &str) {
         let recorded = &self.json["request"];
         assert_eq!(
@@ -292,14 +292,34 @@ impl Fixture {
             .iter()
             .map(|(k, v)| (k.to_ascii_lowercase(), v.as_str().unwrap().to_string()))
             .collect();
-        expected.insert(
-            "user-agent".to_string(),
-            format!(
-                "ai-sdk-openai/{} ai-sdk-provider-utils/{}",
-                pinned("@ai-sdk/openai"),
-                pinned("@ai-sdk/provider-utils")
-            ),
+        // The user-agent is checked against the recording, not overwritten:
+        // aimux sends `ai-sdk-openai/<v> ai-sdk-provider-utils/<v>`; every
+        // recording carries the same provider-utils part, and a provider-layer
+        // recording (not made through `ai`) starts with the same package part.
+        let recorded_ua = expected.remove("user-agent").expect("recorded user-agent");
+        let mut sent_headers = seen.headers.clone();
+        let sent_ua = sent_headers.remove("user-agent").expect("sent user-agent");
+        let (package_ua, utils_ua) = sent_ua
+            .split_once(' ')
+            .expect("package and provider-utils user-agent parts");
+        assert!(
+            package_ua.starts_with("ai-sdk-openai/")
+                && utils_ua.starts_with("ai-sdk-provider-utils/"),
+            "{}: sent user-agent {sent_ua:?}",
+            self.name
         );
+        assert!(
+            recorded_ua.contains(&format!(" {utils_ua} ")),
+            "{}: recorded user-agent {recorded_ua:?} lacks {utils_ua:?}",
+            self.name
+        );
+        if recorded_ua.starts_with("ai-sdk-openai/") {
+            assert!(
+                recorded_ua.starts_with(&format!("{package_ua} ")),
+                "{}: recorded user-agent {recorded_ua:?} does not start with {package_ua:?}",
+                self.name
+            );
+        }
         assert_eq!(
             expected.get("authorization").map(String::as_str),
             Some("<redacted>"),
@@ -307,7 +327,7 @@ impl Fixture {
             self.name
         );
         expected.insert("authorization".to_string(), authorization.to_string());
-        assert_eq!(seen.headers, expected, "{}: headers", self.name);
+        assert_eq!(sent_headers, expected, "{}: headers", self.name);
 
         assert_eq!(seen.json_body(), recorded["body"], "{}: body", self.name);
     }
@@ -628,6 +648,13 @@ async fn chat_headers_merge() {
 #[tokio::test]
 async fn chat_stream_basic() {
     let fixture = Fixture::load("chat-stream-basic");
+    assert!(
+        fixture.json["request"]["headers"]["user-agent"]
+            .as_str()
+            .unwrap()
+            .starts_with("ai-sdk-openai/"),
+        "chat-stream-basic is a provider-layer recording"
+    );
     let mock = fixture.mock();
     let model = create_openai(settings(&mock)).unwrap().chat("gpt-4o");
     assert_eq!(model.provider(), fixture.provider_string());
