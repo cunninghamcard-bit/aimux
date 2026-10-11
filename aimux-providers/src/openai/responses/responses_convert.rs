@@ -226,7 +226,7 @@ pub(crate) fn build_responses_generate_result_with_tools(
                 content.push(GenerateContent::ToolCall(RawToolCall {
                     tool_call_id: call_id,
                     tool_name: name,
-                    input,
+                    input: input.into(),
                     provider_executed: None,
                     dynamic: None,
                     provider_metadata: Some(
@@ -253,7 +253,7 @@ pub(crate) fn build_responses_generate_result_with_tools(
                 content.push(GenerateContent::ToolCall(RawToolCall {
                     tool_call_id: call_id,
                     tool_name: name,
-                    input,
+                    input: input.into(),
                     provider_executed: None,
                     dynamic: None,
                     provider_metadata: Some(
@@ -918,7 +918,7 @@ impl Transformer for OpenAIResponsesStream {
                             result: json!({"result": parsed["partial_image_b64"]}),
                             preliminary: Some(true),
                             is_error: None,
-                            dynamic: None,
+                            source: aimux_core::tool::ToolResultSource::provider(None),
                             provider_metadata: None,
                         }));
                     }
@@ -1208,7 +1208,7 @@ impl Transformer for OpenAIResponsesStream {
                                     controller.enqueue(StreamPart::ToolCall(RawToolCall {
                                         tool_call_id: call_id,
                                         tool_name: name,
-                                        input,
+                                        input: input.into(),
                                         provider_executed: None,
                                         dynamic: None,
                                         provider_metadata: Some(
@@ -1242,7 +1242,7 @@ impl Transformer for OpenAIResponsesStream {
                                     controller.enqueue(StreamPart::ToolCall(RawToolCall {
                                         tool_call_id: call_id,
                                         tool_name: name,
-                                        input,
+                                        input: input.into(),
                                         provider_executed: None,
                                         dynamic: None,
                                         provider_metadata: Some(
@@ -1404,7 +1404,9 @@ impl Transformer for OpenAIResponsesStream {
                                                                         id: call
                                                                             .tool_call_id
                                                                             .clone(),
-                                                                        delta: call.input.clone(),
+                                                                        delta: call
+                                                                            .input
+                                                                            .to_string(),
                                                                         provider_metadata: None,
                                                                     },
                                                                 );
@@ -1670,7 +1672,7 @@ fn provider_tool_start(item: &Value, names: &HashMap<String, String>) -> Vec<Str
         StreamPart::ToolCall(RawToolCall {
             tool_call_id: id.clone(),
             tool_name: name.clone(),
-            input: "{}".to_owned(),
+            input: "{}".to_owned().into(),
             provider_executed: hosted,
             dynamic: None,
             provider_metadata: None,

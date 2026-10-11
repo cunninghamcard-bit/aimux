@@ -458,7 +458,7 @@ impl GoogleLanguageModelStream {
                         controller.enqueue(StreamPart::ToolCall(RawToolCall {
                             tool_call_id: id.clone(),
                             tool_name: self.code_execution_tool_name.clone(),
-                            input: ec.to_string(),
+                            input: ec.to_string().into(),
                             provider_executed: Some(true),
                             dynamic: None,
                             provider_metadata: None,
@@ -483,7 +483,7 @@ impl GoogleLanguageModelStream {
                             result: json!({ "outcome": outcome, "output": output }),
                             is_error: None,
                             preliminary: None,
-                            dynamic: None,
+                            source: aimux_core::tool::ToolResultSource::provider(None),
                             provider_metadata: None,
                         }));
                     }
@@ -506,7 +506,7 @@ impl GoogleLanguageModelStream {
                     controller.enqueue(StreamPart::ToolCall(RawToolCall {
                         tool_call_id: id,
                         tool_name: format!("server:{tool_type}"),
-                        input: args.to_string(),
+                        input: args.to_string().into(),
                         provider_executed: Some(true),
                         dynamic: Some(true),
                         provider_metadata: Some(server_meta),
@@ -537,7 +537,7 @@ impl GoogleLanguageModelStream {
                         result: response,
                         is_error: None,
                         preliminary: None,
-                        dynamic: None,
+                        source: aimux_core::tool::ToolResultSource::provider(None),
                         provider_metadata: Some(server_meta),
                     }));
                 } else if let Some(inline) = part.get("inlineData") {
@@ -635,7 +635,7 @@ impl GoogleLanguageModelStream {
                     controller.enqueue(StreamPart::ToolCall(RawToolCall {
                         tool_call_id: id,
                         tool_name: name.to_string(),
-                        input: args_str,
+                        input: args_str.into(),
                         provider_executed: None,
                         dynamic: None,
                         provider_metadata: thought_sig_meta.clone(),
@@ -818,7 +818,7 @@ fn extract_content_from_candidate(
                     content.push(GenerateContent::ToolCall(RawToolCall {
                         tool_call_id: id.clone(),
                         tool_name: code_execution_tool_name.to_string(),
-                        input: ec.to_string(),
+                        input: ec.to_string().into(),
                         provider_executed: Some(true),
                         dynamic: None,
                         provider_metadata: None,
@@ -839,7 +839,7 @@ fn extract_content_from_candidate(
                         result: json!({ "outcome": outcome, "output": output }),
                         is_error: None,
                         preliminary: None,
-                        dynamic: None,
+                        source: aimux_core::tool::ToolResultSource::provider(None),
                         provider_metadata: None,
                     }));
                 }
@@ -890,7 +890,7 @@ fn extract_content_from_candidate(
                 content.push(GenerateContent::ToolCall(RawToolCall {
                     tool_call_id: id,
                     tool_name: name,
-                    input: input.to_string(),
+                    input: input.to_string().into(),
                     provider_executed: None,
                     dynamic: None,
                     provider_metadata: thought_sig_meta.clone(),
@@ -940,7 +940,7 @@ fn extract_content_from_candidate(
                 content.push(GenerateContent::ToolCall(RawToolCall {
                     tool_call_id: id,
                     tool_name: format!("server:{tool_type}"),
-                    input: input.to_string(),
+                    input: input.to_string().into(),
                     provider_executed: Some(true),
                     dynamic: Some(true),
                     provider_metadata: Some(server_meta),
@@ -970,7 +970,7 @@ fn extract_content_from_candidate(
                     result: response,
                     is_error: None,
                     preliminary: None,
-                    dynamic: None,
+                    source: aimux_core::tool::ToolResultSource::provider(None),
                     provider_metadata: Some(server_meta),
                 }));
                 last_server_tool_call_id = None;

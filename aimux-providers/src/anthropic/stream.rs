@@ -382,7 +382,7 @@ pub(crate) fn stream_parts_for_result_block(
                 result,
                 is_error,
                 preliminary: None,
-                dynamic: None,
+                source: aimux_core::tool::ToolResultSource::provider(None),
                 provider_metadata: tool_call_caller_metadata(caller, CANONICAL),
             })
         };
@@ -404,7 +404,7 @@ pub(crate) fn stream_parts_for_result_block(
                     }),
                     is_error: Some(true),
                     preliminary: None,
-                    dynamic: None,
+                    source: aimux_core::tool::ToolResultSource::provider(None),
                     provider_metadata: tool_call_caller_metadata(caller, CANONICAL),
                 })];
             };
@@ -502,7 +502,7 @@ pub(crate) fn stream_parts_for_result_block(
                 result: content.clone(),
                 is_error: *is_error,
                 preliminary: None,
-                dynamic: Some(true),
+                source: aimux_core::tool::ToolResultSource::provider(Some(true)),
                 provider_metadata: call.map(|(_, server)| {
                     provider_namespace(
                         options_name,
@@ -701,10 +701,11 @@ pub(crate) fn parse_anthropic_content(
                         || name.clone(),
                         |name| names.to_custom_tool_name(name).to_string(),
                     ),
-                    input: toolset_name.as_ref().map_or_else(
+                    input: (toolset_name.as_ref().map_or_else(
                         || input.to_string(),
                         |_| toolset_member_input(name, input).to_string(),
-                    ),
+                    ))
+                    .into(),
                     provider_executed: None,
                     dynamic: None,
                     provider_metadata: tool_call_metadata(
@@ -738,7 +739,7 @@ pub(crate) fn parse_anthropic_content(
                 content.push(GenerateContent::ToolCall(RawToolCall {
                     tool_call_id: id.clone(),
                     tool_name: names.to_custom_tool_name(provider_name).to_string(),
-                    input: normalized_server_tool_input(name, input).to_string(),
+                    input: normalized_server_tool_input(name, input).to_string().into(),
                     provider_executed: Some(true),
                     dynamic: (provider_name == "code_execution"
                         && names.mark_code_execution_dynamic())
@@ -756,7 +757,7 @@ pub(crate) fn parse_anthropic_content(
                 content.push(GenerateContent::ToolCall(RawToolCall {
                     tool_call_id: id.clone(),
                     tool_name: name.clone(),
-                    input: input.to_string(),
+                    input: input.to_string().into(),
                     provider_executed: Some(true),
                     dynamic: Some(true),
                     provider_metadata: Some(
@@ -800,7 +801,7 @@ pub(crate) fn parse_anthropic_content(
                             ),
                             is_error: None,
                             preliminary: None,
-                            dynamic: None,
+                            source: aimux_core::tool::ToolResultSource::provider(None),
                             provider_metadata: tool_call_caller_metadata(
                                 caller.as_ref(),
                                 CANONICAL,
@@ -836,7 +837,7 @@ pub(crate) fn parse_anthropic_content(
                         }),
                         is_error: Some(true),
                         preliminary: None,
-                        dynamic: None,
+                        source: aimux_core::tool::ToolResultSource::provider(None),
                         provider_metadata: tool_call_caller_metadata(caller.as_ref(), CANONICAL),
                     })),
                 }
@@ -856,7 +857,7 @@ pub(crate) fn parse_anthropic_content(
                     result,
                     is_error,
                     preliminary: None,
-                    dynamic: None,
+                    source: aimux_core::tool::ToolResultSource::provider(None),
                     provider_metadata: tool_call_caller_metadata(caller.as_ref(), CANONICAL),
                 }));
             }
@@ -871,7 +872,7 @@ pub(crate) fn parse_anthropic_content(
                     result,
                     is_error,
                     preliminary: None,
-                    dynamic: None,
+                    source: aimux_core::tool::ToolResultSource::provider(None),
                     provider_metadata: None,
                 }));
             }
@@ -891,7 +892,7 @@ pub(crate) fn parse_anthropic_content(
                     result: payload.clone(),
                     is_error: None,
                     preliminary: None,
-                    dynamic: None,
+                    source: aimux_core::tool::ToolResultSource::provider(None),
                     provider_metadata: None,
                 }));
             }
@@ -910,7 +911,7 @@ pub(crate) fn parse_anthropic_content(
                     result,
                     is_error,
                     preliminary: None,
-                    dynamic: None,
+                    source: aimux_core::tool::ToolResultSource::provider(None),
                     provider_metadata: None,
                 }));
             }
@@ -925,7 +926,7 @@ pub(crate) fn parse_anthropic_content(
                     result,
                     is_error,
                     preliminary: None,
-                    dynamic: None,
+                    source: aimux_core::tool::ToolResultSource::provider(None),
                     provider_metadata: None,
                 }));
             }
@@ -945,7 +946,7 @@ pub(crate) fn parse_anthropic_content(
                     result: payload.clone(),
                     is_error: *is_error,
                     preliminary: None,
-                    dynamic: Some(true),
+                    source: aimux_core::tool::ToolResultSource::provider(Some(true)),
                     provider_metadata: call.map(|(_, server)| {
                         provider_namespace(
                             options_name,
@@ -1417,7 +1418,7 @@ impl AnthropicMessagesStream {
                 controller.enqueue(StreamPart::ToolCall(RawToolCall {
                     tool_call_id: id.clone(),
                     tool_name: name.clone(),
-                    input: input.to_string(),
+                    input: input.to_string().into(),
                     provider_executed: Some(true),
                     dynamic: Some(true),
                     provider_metadata: Some(
@@ -1639,7 +1640,7 @@ impl AnthropicMessagesStream {
                 controller.enqueue(StreamPart::ToolCall(RawToolCall {
                     tool_call_id: id,
                     tool_name: name,
-                    input,
+                    input: input.into(),
                     provider_executed,
                     dynamic,
                     provider_metadata,

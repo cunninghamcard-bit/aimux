@@ -168,7 +168,7 @@ fn image_generation_result(part: &Value, tool_name: String) -> ToolResult {
         result,
         is_error,
         preliminary: None,
-        dynamic: None,
+        source: aimux_core::tool::ToolResultSource::provider(None),
         provider_metadata: None,
     }
 }
@@ -232,7 +232,7 @@ impl LanguageModel for XaiResponsesModel {
                         .unwrap_or("")
                         .to_string(),
                     tool_name: tool_name.clone(),
-                    input: "{}".to_string(),
+                    input: "{}".to_string().into(),
                     provider_executed: Some(true),
                     dynamic: None,
                     provider_metadata: None,
@@ -251,7 +251,7 @@ impl LanguageModel for XaiResponsesModel {
                 content.push(GenerateContent::ToolCall(RawToolCall {
                     tool_call_id: part_id.to_string(),
                     tool_name: tool_name.clone(),
-                    input: String::new(),
+                    input: aimux_core::tool::RawArguments::default(),
                     provider_executed: Some(true),
                     dynamic: None,
                     provider_metadata: None,
@@ -281,7 +281,7 @@ impl LanguageModel for XaiResponsesModel {
                     result: json!({ "queries": queries, "results": results }),
                     is_error: None,
                     preliminary: None,
-                    dynamic: None,
+                    source: aimux_core::tool::ToolResultSource::provider(None),
                     provider_metadata: None,
                 }));
                 continue;
@@ -307,7 +307,7 @@ impl LanguageModel for XaiResponsesModel {
                 content.push(GenerateContent::ToolCall(RawToolCall {
                     tool_call_id: part_id.to_string(),
                     tool_name: tool_name.clone(),
-                    input: tool_input,
+                    input: tool_input.into(),
                     provider_executed: Some(true),
                     dynamic: None,
                     provider_metadata: None,
@@ -319,7 +319,7 @@ impl LanguageModel for XaiResponsesModel {
                         result: map_web_search_action(part.get("action").unwrap_or(&Value::Null)),
                         is_error: None,
                         preliminary: None,
-                        dynamic: None,
+                        source: aimux_core::tool::ToolResultSource::provider(None),
                         provider_metadata: None,
                     }));
                 }
@@ -373,7 +373,7 @@ impl LanguageModel for XaiResponsesModel {
                     content.push(GenerateContent::ToolCall(RawToolCall {
                         tool_call_id: call_id.to_string(),
                         tool_name: name.to_string(),
-                        input,
+                        input: input.into(),
                         provider_executed: None,
                         dynamic: None,
                         provider_metadata: None,
@@ -1029,7 +1029,7 @@ impl Transformer for XaiResponsesStream {
                             controller.enqueue(StreamPart::ToolCall(RawToolCall {
                                 tool_call_id: part_id.to_string(),
                                 tool_name: tool_name.clone(),
-                                input: input.to_string(),
+                                input: input.to_string().into(),
                                 provider_executed: Some(true),
                                 dynamic: None,
                                 provider_metadata: None,
@@ -1062,7 +1062,7 @@ impl Transformer for XaiResponsesStream {
                                 result: json!({ "queries": queries, "results": results }),
                                 is_error: None,
                                 preliminary: None,
-                                dynamic: None,
+                                source: aimux_core::tool::ToolResultSource::provider(None),
                                 provider_metadata: None,
                             }));
                         }
@@ -1115,7 +1115,7 @@ impl Transformer for XaiResponsesStream {
                             controller.enqueue(StreamPart::ToolCall(RawToolCall {
                                 tool_call_id: part_id.to_string(),
                                 tool_name: tool_name.clone(),
-                                input: tool_input,
+                                input: tool_input.into(),
                                 provider_executed: Some(true),
                                 dynamic: None,
                                 provider_metadata: None,
@@ -1135,7 +1135,7 @@ impl Transformer for XaiResponsesStream {
                                 },
                                 is_error: None,
                                 preliminary: None,
-                                dynamic: None,
+                                source: aimux_core::tool::ToolResultSource::provider(None),
                                 provider_metadata: None,
                             }));
                         }
@@ -1225,7 +1225,7 @@ impl Transformer for XaiResponsesStream {
                             controller.enqueue(StreamPart::ToolCall(RawToolCall {
                                 tool_call_id: call_id.to_string(),
                                 tool_name: name.to_string(),
-                                input,
+                                input: input.into(),
                                 provider_executed: None,
                                 dynamic: None,
                                 provider_metadata: None,

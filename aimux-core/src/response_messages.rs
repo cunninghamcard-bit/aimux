@@ -22,8 +22,9 @@ use crate::shared::{FileBytes, GeneratedFileData, SharedProviderMetadata};
 /// malformed primitive input must not be replayed as a prompt tool-call input.
 /// JavaScript's `typeof value === "object"` includes arrays and null, so those
 /// values are intentionally retained here as well.
-pub(crate) fn response_tool_call_input(input: &Value, invalid: Option<bool>) -> Value {
-    if invalid == Some(true) && !matches!(input, Value::Object(_) | Value::Array(_) | Value::Null) {
+pub(crate) fn response_tool_call_input(call: &crate::tool::ToolCall) -> Value {
+    let input = call.input();
+    if call.is_invalid() && !matches!(input, Value::Object(_) | Value::Array(_) | Value::Null) {
         Value::Object(serde_json::Map::new())
     } else {
         input.clone()
@@ -239,7 +240,7 @@ impl ResponseMessageBuilder {
                 GenerateContent::ToolApprovalRequest(approval) => {
                     ContentPart::ToolApprovalRequest {
                         approval_id: approval.approval_id.clone(),
-                        tool_call_id: approval.tool_call.tool_call_id.clone(),
+                        tool_call_id: approval.tool_call.tool_call_id().to_string(),
                         reason: approval.reason.clone(),
                         is_automatic: approval.is_automatic,
                         signature: approval.signature.clone(),
@@ -247,11 +248,11 @@ impl ResponseMessageBuilder {
                     }
                 }
                 GenerateContent::ToolCall(call) => ContentPart::ToolCall {
-                    tool_call_id: call.tool_call_id.clone(),
-                    tool_name: call.tool_name.clone(),
-                    input: response_tool_call_input(&call.input, call.invalid),
-                    provider_executed: call.provider_executed,
-                    provider_options: call.provider_metadata.clone(),
+                    tool_call_id: call.tool_call_id().to_string(),
+                    tool_name: call.tool_name().to_string(),
+                    input: response_tool_call_input(call),
+                    provider_executed: call.provider_executed(),
+                    provider_options: call.provider_metadata().cloned(),
                 },
                 GenerateContent::ToolResult(result) => ContentPart::ToolResult {
                     tool_call_id: result.tool_call_id.clone(),

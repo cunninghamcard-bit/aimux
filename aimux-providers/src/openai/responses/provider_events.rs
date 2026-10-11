@@ -33,7 +33,7 @@ pub(crate) fn provider_tool_content(
         GenerateContent::ToolCall(RawToolCall {
             tool_call_id: id.to_string(),
             tool_name,
-            input,
+            input: input.into(),
             provider_executed: executed,
             dynamic,
             provider_metadata: meta,
@@ -46,7 +46,7 @@ pub(crate) fn provider_tool_content(
             result: value,
             is_error: None,
             preliminary: None,
-            dynamic: None,
+            source: aimux_core::tool::ToolResultSource::provider(None),
             provider_metadata: meta,
         })
     };

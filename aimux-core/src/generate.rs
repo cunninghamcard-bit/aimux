@@ -741,7 +741,7 @@ pub(crate) async fn generate_text_from_language_model_prompt(
             GenerateContent::ToolCall(call) => {
                 let parsed = tool_calls
                     .iter()
-                    .find(|parsed| parsed.tool_call_id == call.tool_call_id)
+                    .find(|parsed| parsed.tool_call_id() == call.tool_call_id)
                     .expect("every tool call was parsed above");
                 rm.tool_call(parsed);
             }
@@ -776,7 +776,7 @@ pub(crate) async fn generate_text_from_language_model_prompt(
             GenerateContent::ToolApprovalRequest(approval) => {
                 let call = tool_calls
                     .iter()
-                    .find(|call| call.tool_call_id == approval.tool_call_id)
+                    .find(|call| call.tool_call_id() == approval.tool_call_id)
                     .ok_or_else(|| AiMuxError::ToolCallNotFoundForApproval {
                         tool_call_id: approval.tool_call_id.clone(),
                         approval_id: approval.approval_id.clone(),
@@ -789,7 +789,9 @@ pub(crate) async fn generate_text_from_language_model_prompt(
                     signature: None,
                 });
             }
-            GenerateContent::ToolResult(result) => rm.tool_result(result.clone()),
+            // Provider output becomes step content: mark it provider-executed
+            // (A7 E.3; convert-language-model-content.ts:113).
+            GenerateContent::ToolResult(result) => rm.tool_result(result.clone().into_core()),
         }
     }
 
@@ -1204,7 +1206,7 @@ pub async fn stream_text(
                             &messages,
                             operation_instructions.as_deref(),
                         ).await;
-                        tool_calls.insert(parsed.tool_call_id.clone(), parsed.clone());
+                        tool_calls.insert(parsed.tool_call_id().to_string(), parsed.clone());
                         yield Ok(TextStreamPart::ToolCall(parsed));
                     }
                     Ok(StreamPart::File(file)) => {
@@ -1413,15 +1415,11 @@ pub fn generate_text_result_to_chat_completion(
                     .tool_calls
                     .iter()
                     .map(|tool_call| ChatCompletionToolCall {
-                        id: tool_call.tool_call_id.clone(),
+                        id: tool_call.tool_call_id().to_string(),
                         tool_type: "function".to_string(),
                         function: ChatCompletionFunction {
-                            name: tool_call.tool_name.clone(),
-                            arguments: parsed_tool_call_arguments(
-                                &tool_call.input,
-                                tool_call.invalid,
-                                tool_call.error.as_ref(),
-                            ),
+                            name: tool_call.tool_name().to_string(),
+                            arguments: parsed_tool_call_arguments(tool_call),
                         },
                     })
                     .collect(),

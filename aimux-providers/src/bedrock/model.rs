@@ -181,7 +181,7 @@ impl LanguageModel for BedrockModel {
                     {
                         is_json_response_from_tool = true;
                         *part = GenerateContent::Text {
-                            text: tool.input.clone(),
+                            text: tool.input.to_string(),
                             provider_metadata: None,
                         };
                     }
@@ -555,7 +555,7 @@ impl AmazonBedrockChatStream {
                 controller.enqueue(StreamPart::ToolCall(RawToolCall {
                     tool_call_id: normalize_tool_call_id(&id, self.model_id.contains("mistral.")),
                     tool_name: name,
-                    input,
+                    input: input.into(),
                     provider_executed: None,
                     dynamic: None,
                     provider_metadata: None,
@@ -812,7 +812,7 @@ fn extract_content(
             input: if tool_use.input.is_null() {
                 "{}".into()
             } else {
-                tool_use.input.to_string()
+                tool_use.input.to_string().into()
             },
             provider_executed: None,
             dynamic: None,

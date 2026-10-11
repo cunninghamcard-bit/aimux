@@ -27,6 +27,12 @@ preliminary?: boolean,
  */
 dynamic?: boolean, 
 /**
+ * Whether the tool was executed by the provider (AI SDK
+ * `generate-text/tool-result.ts:17,32`; #200:2292). Passed through as
+ * given: absent / false / true.
+ */
+providerExecuted?: boolean, 
+/**
  * Additional provider-specific metadata for the tool result.
  */
 providerMetadata?: { [key in string]: { [key in string]: JsonValue } }, };

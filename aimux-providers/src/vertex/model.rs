@@ -462,7 +462,7 @@ impl VertexModelStream {
                                 RawToolCall {
                                     tool_call_id: id,
                                     tool_name: name.to_owned(),
-                                    input: String::new(),
+                                    input: aimux_core::tool::RawArguments::default(),
                                     provider_executed: None,
                                     dynamic: None,
                                     provider_metadata: tool_metadata.clone(),
@@ -570,7 +570,7 @@ impl VertexModelStream {
                     controller.enqueue(StreamPart::ToolCall(RawToolCall {
                         tool_call_id: id,
                         tool_name: name.to_string(),
-                        input: args_str,
+                        input: args_str.into(),
                         provider_executed: None,
                         dynamic: None,
                         provider_metadata: tool_metadata,
@@ -622,7 +622,7 @@ impl VertexModelStream {
                         controller.enqueue(StreamPart::ToolCall(RawToolCall {
                             tool_call_id: id.clone(),
                             tool_name: self.code_execution_tool_name.clone(),
-                            input: ec.to_string(),
+                            input: ec.to_string().into(),
                             provider_executed: Some(true),
                             dynamic: None,
                             provider_metadata: Some(vertex_server_tool_metadata(
@@ -651,7 +651,7 @@ impl VertexModelStream {
                             result: json!({ "outcome": outcome, "output": output }),
                             is_error: None,
                             preliminary: None,
-                            dynamic: None,
+                            source: aimux_core::tool::ToolResultSource::provider(None),
                             provider_metadata: Some(vertex_server_tool_metadata(
                                 call_id,
                                 "code_execution",
@@ -680,7 +680,7 @@ impl VertexModelStream {
                     controller.enqueue(StreamPart::ToolCall(RawToolCall {
                         tool_call_id: id,
                         tool_name: format!("server:{tool_type}"),
-                        input: args.to_string(),
+                        input: args.to_string().into(),
                         provider_executed: Some(true),
                         dynamic: Some(true),
                         provider_metadata: Some(server_meta),
@@ -711,7 +711,7 @@ impl VertexModelStream {
                         result: response,
                         is_error: None,
                         preliminary: None,
-                        dynamic: None,
+                        source: aimux_core::tool::ToolResultSource::provider(None),
                         provider_metadata: Some(server_meta),
                     }));
                 }
@@ -849,7 +849,7 @@ fn finish_streaming_tool_call(
         id: call.tool_call_id.clone(),
         provider_metadata: call.provider_metadata.clone(),
     });
-    call.input = result.final_json;
+    call.input = result.final_json.into();
     events.push(StreamPart::ToolCall(call));
     events
 }
@@ -904,7 +904,7 @@ fn extract_content_from_candidate(
                     content.push(GenerateContent::ToolCall(RawToolCall {
                         tool_call_id: id.clone(),
                         tool_name: code_execution_tool_name.to_string(),
-                        input: ec.to_string(),
+                        input: ec.to_string().into(),
                         provider_executed: Some(true),
                         dynamic: None,
                         provider_metadata: Some(vertex_server_tool_metadata(
@@ -928,7 +928,7 @@ fn extract_content_from_candidate(
                         result: json!({ "outcome": outcome, "output": output }),
                         is_error: None,
                         preliminary: None,
-                        dynamic: None,
+                        source: aimux_core::tool::ToolResultSource::provider(None),
                         provider_metadata: Some(vertex_server_tool_metadata(
                             call_id,
                             "code_execution",
@@ -1024,7 +1024,7 @@ fn extract_content_from_candidate(
                 content.push(GenerateContent::ToolCall(RawToolCall {
                     tool_call_id: id,
                     tool_name: name,
-                    input: input.to_string(),
+                    input: input.to_string().into(),
                     provider_executed: None,
                     dynamic: None,
                     provider_metadata,
@@ -1048,7 +1048,7 @@ fn extract_content_from_candidate(
                 content.push(GenerateContent::ToolCall(RawToolCall {
                     tool_call_id: id,
                     tool_name: format!("server:{tool_type}"),
-                    input: input.to_string(),
+                    input: input.to_string().into(),
                     provider_executed: Some(true),
                     dynamic: Some(true),
                     provider_metadata: Some(server_meta),
@@ -1075,7 +1075,7 @@ fn extract_content_from_candidate(
                     result: response,
                     is_error: None,
                     preliminary: None,
-                    dynamic: None,
+                    source: aimux_core::tool::ToolResultSource::provider(None),
                     provider_metadata: Some(server_meta),
                 }));
             }
