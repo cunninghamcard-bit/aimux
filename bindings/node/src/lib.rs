@@ -644,12 +644,6 @@ pub struct ProviderConfig {
     /// name (`provider()` / `createProvider()`). Only parameters the preset
     /// declares are accepted.
     pub params: Option<std::collections::HashMap<String, String>>,
-    /// Why the JS object was refused (a call-level key, an unknown field, a
-    /// mistyped value), reported as `InvalidArgumentError` by
-    /// [`native_config`] instead of being dropped.
-    #[napi(skip)]
-    #[serde(skip)]
-    pub invalid: Option<String>,
 }
 
 /// Reject keys that belong somewhere else before the generic unknown-field
@@ -680,30 +674,64 @@ impl FromNapiValue for ProviderConfig {
             let value = unsafe { serde_json::Value::from_napi_value(env, value.raw())? };
             raw.insert(name, value);
         }
-        let invalid = |message: String| Self {
-            invalid: Some(message),
-            ..Self::default()
+        // A refused object (call-level key, unknown field, mistyped value)
+        // throws `InvalidArgumentError` right here; nothing is kept on the
+        // config itself.
+        let invalid = |message: String| -> Result<Self> {
+            let env = Env::from_raw(env);
+            Err(crate::error::create_throwable(
+                &env,
+                &AiMuxBindingError::from(AiMuxError::InvalidArgument(message)),
+            )?)
         };
         if let Some(message) = reject_removed_keys(&raw) {
-            return Ok(invalid(message));
+            return invalid(message);
         }
-        Ok(
-            serde_json::from_value::<Self>(serde_json::Value::Object(raw))
-                .unwrap_or_else(|error| invalid(error.to_string())),
-        )
+        match serde_json::from_value::<Self>(serde_json::Value::Object(raw)) {
+            Ok(config) => Ok(config),
+            Err(error) => invalid(error.to_string()),
+        }
     }
 }
 
 impl ValidateNapiValue for ProviderConfig {}
 
-impl ProviderConfig {
-    /// The refusal recorded while reading the JS object, if any.
-    fn check(&self) -> MResult<()> {
-        match &self.invalid {
-            Some(message) => Err(AiMuxBindingError::from(&AiMuxError::InvalidArgument(
-                message.clone(),
-            ))),
-            None => Ok(()),
+/// The native constructors' 3rd argument: a base URL string or a
+/// [`ProviderConfig`]. Unlike napi's `Either`, which swallows the member
+/// error and reports "Value is none of these types", this dispatches on the
+/// JS type so a refused config object surfaces its own
+/// `InvalidArgumentError`.
+pub enum ConfigArg {
+    Url(String),
+    Config(ProviderConfig),
+}
+
+impl TypeName for ConfigArg {
+    fn type_name() -> &'static str {
+        "string | ProviderConfig"
+    }
+
+    fn value_type() -> ValueType {
+        ValueType::Unknown
+    }
+}
+
+impl ValidateNapiValue for ConfigArg {}
+
+impl FromNapiValue for ConfigArg {
+    unsafe fn from_napi_value(env: sys::napi_env, napi_val: sys::napi_value) -> Result<Self> {
+        let value = unsafe { Unknown::from_napi_value(env, napi_val)? };
+        match value.get_type()? {
+            ValueType::String => Ok(Self::Url(unsafe {
+                String::from_napi_value(env, napi_val)?
+            })),
+            ValueType::Object => Ok(Self::Config(unsafe {
+                ProviderConfig::from_napi_value(env, napi_val)?
+            })),
+            _ => Err(Error::new(
+                Status::InvalidArg,
+                "config must be a base URL string or a ProviderConfig object".to_owned(),
+            )),
         }
     }
 }
@@ -720,7 +748,7 @@ struct NativeConfig {
     project: Option<String>,
 }
 
-fn native_config(config: Option<Either<String, ProviderConfig>>) -> MResult<NativeConfig> {
+fn native_config(config: Option<ConfigArg>) -> MResult<NativeConfig> {
     let mut native = NativeConfig {
         base_url: None,
         headers: None,
@@ -729,9 +757,8 @@ fn native_config(config: Option<Either<String, ProviderConfig>>) -> MResult<Nati
     };
     match config {
         None => {}
-        Some(Either::A(url)) => native.base_url = Some(url),
-        Some(Either::B(cfg)) => {
-            cfg.check()?;
+        Some(ConfigArg::Url(url)) => native.base_url = Some(url),
+        Some(ConfigArg::Config(cfg)) => {
             native.base_url = cfg.base_url;
             if let Some(json_str) = &cfg.headers {
                 let h: std::collections::HashMap<String, String> =
@@ -1026,7 +1053,7 @@ pub fn list_sessions() -> AimuxResult<String> {
 pub async fn openai(
     api_key: String,
     model_id: String,
-    config: Option<Either<String, ProviderConfig>>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<ConfigArg>,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1057,7 +1084,7 @@ pub async fn openai(
 pub async fn anthropic(
     api_key: String,
     model_id: String,
-    config: Option<Either<String, ProviderConfig>>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<ConfigArg>,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1090,7 +1117,7 @@ pub async fn anthropic(
 pub async fn deepseek(
     api_key: String,
     model_id: String,
-    config: Option<Either<String, ProviderConfig>>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<ConfigArg>,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1117,7 +1144,7 @@ pub async fn deepseek(
 pub async fn google(
     api_key: String,
     model_id: String,
-    config: Option<Either<String, ProviderConfig>>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<ConfigArg>,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1150,7 +1177,7 @@ pub async fn google(
 pub async fn cohere(
     api_key: String,
     model_id: String,
-    config: Option<Either<String, ProviderConfig>>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<ConfigArg>,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1183,7 +1210,7 @@ pub async fn cohere(
 pub async fn mistral(
     api_key: String,
     model_id: String,
-    config: Option<Either<String, ProviderConfig>>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<ConfigArg>,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1216,7 +1243,7 @@ pub async fn mistral(
 pub async fn xai(
     api_key: String,
     model_id: String,
-    config: Option<Either<String, ProviderConfig>>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<ConfigArg>,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1251,7 +1278,7 @@ pub async fn bedrock(
     secret_access_key: String,
     region: String,
     model_id: String,
-    config: Option<Either<String, ProviderConfig>>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<ConfigArg>,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1295,7 +1322,7 @@ pub async fn vertex(
     project: String,
     location: String,
     model_id: String,
-    config: Option<Either<String, ProviderConfig>>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<ConfigArg>,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1332,7 +1359,7 @@ pub async fn anthropic_aws(
     api_key: String,
     region: String,
     model_id: String,
-    config: Option<Either<String, ProviderConfig>>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<ConfigArg>,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1375,7 +1402,7 @@ pub async fn azure(
     resource_name: String,
     deployment: String,
     api_version: Option<String>,
-    config: Option<Either<String, ProviderConfig>>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<ConfigArg>,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1425,7 +1452,7 @@ pub async fn provider(
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
-            let settings = named_settings(api_key, config.map(Either::B))?;
+            let settings = named_settings(api_key, config.map(ConfigArg::Config))?;
             let model = create_named_provider(&name, settings)
                 .and_then(|p| p.language_model(&model_id))
                 .map_err(|e| AiMuxBindingError::from(&e))?;
@@ -1537,7 +1564,7 @@ pub async fn create_provider(
 ) -> AimuxResult<ProviderHandle> {
     AimuxResult({
         let __r: crate::error::MResult<ProviderHandle> = async {
-            let settings = named_settings(api_key, config.map(Either::B))?;
+            let settings = named_settings(api_key, config.map(ConfigArg::Config))?;
             let inner =
                 create_named_provider(&name, settings).map_err(|e| AiMuxBindingError::from(&e))?;
             Ok(ProviderHandle { inner })
@@ -1567,12 +1594,9 @@ pub async fn get_model_specs(source_url: Option<String>) -> AimuxResult<String> 
 /// The settings of a by-name provider from a Node `ProviderConfig` (3rd
 /// factory arg). Organization and project become their headers, below the
 /// caller's own.
-fn named_settings(
-    api_key: Option<String>,
-    config: Option<Either<String, ProviderConfig>>,
-) -> MResult<PresetSettings> {
+fn named_settings(api_key: Option<String>, config: Option<ConfigArg>) -> MResult<PresetSettings> {
     let params = match &config {
-        Some(Either::B(cfg)) => cfg.params.clone().unwrap_or_default(),
+        Some(ConfigArg::Config(cfg)) => cfg.params.clone().unwrap_or_default(),
         _ => Default::default(),
     };
     let native = native_config(config)?;

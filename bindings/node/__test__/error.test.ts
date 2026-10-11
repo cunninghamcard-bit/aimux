@@ -293,7 +293,9 @@ for (const key of ['bodyOverrides', 'body_overrides', 'notAField']) {
       () => createProvider('groq', 'sk-test-fake-key', config),
       () => openai('sk-test-fake-key', 'gpt-4o', config),
     ]) {
-      const err = (await t.throwsAsync(make)) as AimuxError
+      // Native constructors refuse while converting the argument (a sync
+      // throw); the async wrappers reject. Either way it is the typed error.
+      const err = (await t.throwsAsync(async () => make())) as AimuxError
       t.true(err instanceof InvalidArgumentError)
       t.regex(err.message, new RegExp(`unknown field \`${key}\``))
       t.notRegex(err.message, /no longer supported/)
@@ -316,7 +318,7 @@ test('provider config maxRetries points to the call options, not a generic unkno
     () => createProvider('groq', 'sk-test-fake-key', config),
     () => openai('sk-test-fake-key', 'gpt-4o', config),
   ]) {
-    const err = (await t.throwsAsync(make)) as AimuxError
+    const err = (await t.throwsAsync(async () => make())) as AimuxError
     t.true(err instanceof InvalidArgumentError)
     t.regex(err.message, /call-level option: pass it in the call options \(`maxRetries`\)/)
     t.notRegex(err.message, /unknown field/)
