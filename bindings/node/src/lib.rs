@@ -626,7 +626,9 @@ impl AsyncGenerator for StreamTextGenerator {
 /// Passed as the 3rd argument to `openai()` / `anthropic()` / `deepseek()`.
 /// For backward compatibility a bare string is still accepted (treated as
 /// `baseUrl`). See RFC-0017.
-#[napi(object)]
+#[napi(object, object_from_js = false)]
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ProviderConfig {
     /// Base URL for API calls (e.g. a relay/proxy endpoint).
     pub base_url: Option<String>,
@@ -642,37 +644,66 @@ pub struct ProviderConfig {
     /// name (`provider()` / `createProvider()`). Only parameters the preset
     /// declares are accepted.
     pub params: Option<std::collections::HashMap<String, String>>,
-    /// Rejected with `InvalidArgumentError`: retry is a per-call setting
-    /// (`maxRetries` in the call options). The field exists only so passing it
-    /// is reported instead of ignored.
-    pub max_retries: Option<u32>,
-    /// Rejected with `InvalidArgumentError`: request-body overrides were
-    /// removed. The field exists only so passing it is reported instead of
-    /// ignored.
-    pub body_overrides: Option<String>,
 }
 
-impl ProviderConfig {
-    /// Fail on the two removed keys instead of dropping them silently.
-    fn reject_removed_keys(&self) -> MResult<()> {
-        let removed = if self.max_retries.is_some() {
-            "`max_retries` is a call-level option: pass it in the call options (`maxRetries`), \
-             not in the provider configuration"
-        } else if self.body_overrides.is_some() {
-            "`body_overrides` is no longer supported: request-body overrides were removed from \
-             the provider configuration and the call options"
-        } else {
-            return Ok(());
-        };
-        Err(AiMuxBindingError::from(&AiMuxError::InvalidArgument(
-            removed.into(),
-        )))
+/// Reject keys that belong somewhere else before the generic unknown-field
+/// check, so they get a pointed message.
+fn reject_removed_keys(raw: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    raw.contains_key("maxRetries").then(|| {
+        "`max_retries` is a call-level option: pass it in the call options (`maxRetries`), \
+         not in the provider configuration"
+            .to_string()
+    })
+}
+
+/// The constructors take their config argument as raw JSON (napi skips
+/// `undefined` properties, like absent keys), so converting it never refuses
+/// the call synchronously: every refusal happens here, inside the async body,
+/// and rejects the returned promise with `InvalidArgumentError`. A JS string
+/// is a base URL only where `allow_url` (the `string | ProviderConfig`
+/// constructors). Otherwise the value must be an object, checked by
+/// [`reject_removed_keys`], then deserialized with serde
+/// `deny_unknown_fields`: the struct above is the single list of accepted keys.
+fn parse_config(value: serde_json::Value, allow_url: bool) -> MResult<NativeArg> {
+    let invalid = |message: String| AiMuxBindingError::from(AiMuxError::InvalidArgument(message));
+    match value {
+        serde_json::Value::String(url) if allow_url => Ok(NativeArg::Url(url)),
+        serde_json::Value::Object(raw) => {
+            if let Some(message) = reject_removed_keys(&raw) {
+                return Err(invalid(message));
+            }
+            serde_json::from_value::<ProviderConfig>(serde_json::Value::Object(raw))
+                .map(NativeArg::Config)
+                .map_err(|error| invalid(error.to_string()))
+        }
+        other => Err(invalid(format!(
+            "config must be {}, got {}",
+            if allow_url {
+                "a base URL string or a ProviderConfig object"
+            } else {
+                "a ProviderConfig object"
+            },
+            match other {
+                serde_json::Value::Null => "null",
+                serde_json::Value::Bool(_) => "a boolean",
+                serde_json::Value::Number(_) => "a number",
+                serde_json::Value::String(_) => "a string",
+                serde_json::Value::Array(_) => "an array",
+                serde_json::Value::Object(_) => "an object",
+            }
+        ))),
     }
+}
+
+/// A parsed config argument.
+enum NativeArg {
+    Url(String),
+    Config(ProviderConfig),
 }
 
 /// What the native constructors take from their 3rd argument (a base URL
 /// string, or a [`ProviderConfig`]). Every native constructor goes through
-/// here, so `maxRetries` / `bodyOverrides` are rejected for all of them and
+/// here, so `maxRetries` and unknown keys are rejected for all of them and
 /// none of them drops a key silently.
 struct NativeConfig {
     base_url: Option<String>,
@@ -682,7 +713,11 @@ struct NativeConfig {
     project: Option<String>,
 }
 
-fn native_config(config: Option<Either<String, ProviderConfig>>) -> MResult<NativeConfig> {
+fn native_config(config: Option<serde_json::Value>) -> MResult<NativeConfig> {
+    native_from(config.map(|value| parse_config(value, true)).transpose()?)
+}
+
+fn native_from(config: Option<NativeArg>) -> MResult<NativeConfig> {
     let mut native = NativeConfig {
         base_url: None,
         headers: None,
@@ -691,9 +726,8 @@ fn native_config(config: Option<Either<String, ProviderConfig>>) -> MResult<Nati
     };
     match config {
         None => {}
-        Some(Either::A(url)) => native.base_url = Some(url),
-        Some(Either::B(cfg)) => {
-            cfg.reject_removed_keys()?;
+        Some(NativeArg::Url(url)) => native.base_url = Some(url),
+        Some(NativeArg::Config(cfg)) => {
             native.base_url = cfg.base_url;
             if let Some(json_str) = &cfg.headers {
                 let h: std::collections::HashMap<String, String> =
@@ -988,7 +1022,9 @@ pub fn list_sessions() -> AimuxResult<String> {
 pub async fn openai(
     api_key: String,
     model_id: String,
-    config: Option<Either<String, ProviderConfig>>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<
+        serde_json::Value,
+    >,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1019,7 +1055,9 @@ pub async fn openai(
 pub async fn anthropic(
     api_key: String,
     model_id: String,
-    config: Option<Either<String, ProviderConfig>>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<
+        serde_json::Value,
+    >,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1052,11 +1090,13 @@ pub async fn anthropic(
 pub async fn deepseek(
     api_key: String,
     model_id: String,
-    config: Option<Either<String, ProviderConfig>>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<
+        serde_json::Value,
+    >,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
-            let settings = named_settings(Some(api_key), config)?;
+            let settings = named_settings(Some(api_key), config, true)?;
             let model = create_named_provider("deepseek", settings)
                 .and_then(|p| p.language_model(&model_id))
                 .map_err(|e| AiMuxBindingError::from(&e))?;
@@ -1079,7 +1119,9 @@ pub async fn deepseek(
 pub async fn google(
     api_key: String,
     model_id: String,
-    config: Option<Either<String, ProviderConfig>>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<
+        serde_json::Value,
+    >,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1112,7 +1154,9 @@ pub async fn google(
 pub async fn cohere(
     api_key: String,
     model_id: String,
-    config: Option<Either<String, ProviderConfig>>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<
+        serde_json::Value,
+    >,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1145,7 +1189,9 @@ pub async fn cohere(
 pub async fn mistral(
     api_key: String,
     model_id: String,
-    config: Option<Either<String, ProviderConfig>>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<
+        serde_json::Value,
+    >,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1178,7 +1224,9 @@ pub async fn mistral(
 pub async fn xai(
     api_key: String,
     model_id: String,
-    config: Option<Either<String, ProviderConfig>>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<
+        serde_json::Value,
+    >,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1213,7 +1261,9 @@ pub async fn bedrock(
     secret_access_key: String,
     region: String,
     model_id: String,
-    config: Option<Either<String, ProviderConfig>>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<
+        serde_json::Value,
+    >,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1257,7 +1307,9 @@ pub async fn vertex(
     project: String,
     location: String,
     model_id: String,
-    config: Option<Either<String, ProviderConfig>>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<
+        serde_json::Value,
+    >,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1294,7 +1346,9 @@ pub async fn anthropic_aws(
     api_key: String,
     region: String,
     model_id: String,
-    config: Option<Either<String, ProviderConfig>>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<
+        serde_json::Value,
+    >,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1337,7 +1391,9 @@ pub async fn azure(
     resource_name: String,
     deployment: String,
     api_version: Option<String>,
-    config: Option<Either<String, ProviderConfig>>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<
+        serde_json::Value,
+    >,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1383,11 +1439,11 @@ pub async fn provider(
     name: String,
     api_key: Option<String>,
     model_id: String,
-    config: Option<ProviderConfig>,
+    #[napi(ts_arg_type = "ProviderConfig | undefined | null")] config: Option<serde_json::Value>,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
-            let settings = named_settings(api_key, config.map(Either::B))?;
+            let settings = named_settings(api_key, config, false)?;
             let model = create_named_provider(&name, settings)
                 .and_then(|p| p.language_model(&model_id))
                 .map_err(|e| AiMuxBindingError::from(&e))?;
@@ -1495,11 +1551,11 @@ impl ProviderHandle {
 pub async fn create_provider(
     name: String,
     api_key: Option<String>,
-    config: Option<ProviderConfig>,
+    #[napi(ts_arg_type = "ProviderConfig | undefined | null")] config: Option<serde_json::Value>,
 ) -> AimuxResult<ProviderHandle> {
     AimuxResult({
         let __r: crate::error::MResult<ProviderHandle> = async {
-            let settings = named_settings(api_key, config.map(Either::B))?;
+            let settings = named_settings(api_key, config, false)?;
             let inner =
                 create_named_provider(&name, settings).map_err(|e| AiMuxBindingError::from(&e))?;
             Ok(ProviderHandle { inner })
@@ -1531,13 +1587,17 @@ pub async fn get_model_specs(source_url: Option<String>) -> AimuxResult<String> 
 /// caller's own.
 fn named_settings(
     api_key: Option<String>,
-    config: Option<Either<String, ProviderConfig>>,
+    config: Option<serde_json::Value>,
+    allow_url: bool,
 ) -> MResult<PresetSettings> {
+    let config = config
+        .map(|value| parse_config(value, allow_url))
+        .transpose()?;
     let params = match &config {
-        Some(Either::B(cfg)) => cfg.params.clone().unwrap_or_default(),
+        Some(NativeArg::Config(cfg)) => cfg.params.clone().unwrap_or_default(),
         _ => Default::default(),
     };
-    let native = native_config(config)?;
+    let native = native_from(config)?;
     let mut headers = aimux_provider_utils::HeaderMapOpt::new();
     for (name, value) in [
         ("OpenAI-Organization", native.organization),

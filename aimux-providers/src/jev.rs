@@ -23,8 +23,6 @@ pub struct JevConfig {
     pub endpoint: String,
     pub headers: HashMap<String, String>,
     pub probability_source: DecisionProbabilitySource,
-    /// Retry settings [`decide`] uses.
-    pub retry_config: aimux_core::retry::RetryConfig,
 }
 
 impl JevConfig {
@@ -35,7 +33,6 @@ impl JevConfig {
             endpoint: "https://api.typesafe.ai/v1/systemone".into(),
             headers: HashMap::new(),
             probability_source: DecisionProbabilitySource::Native,
-            retry_config: aimux_core::retry::RetryConfig::default(),
         }
     }
 
@@ -112,9 +109,6 @@ impl DecisionModel for JevDecisionModel {
             serde_json::json!({"headers": self.config.headers}),
         ));
         snapshot
-    }
-    fn retry_config(&self) -> aimux_core::retry::RetryConfig {
-        self.config.retry_config
     }
     fn capabilities(&self) -> DecisionCapabilities {
         DecisionCapabilities {

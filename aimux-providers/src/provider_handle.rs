@@ -12,7 +12,6 @@ use aimux_core::decision_model::{
     DecisionCallOptions, DecisionCapabilities, DecisionModel, DecisionResult,
 };
 use aimux_core::provider::ProviderDiscovery;
-use aimux_core::retry::RetryConfig;
 use aimux_core::{
     AiMuxError, EmbeddingModel, EvaluationModel, Files, ImageModel, LanguageModel, Provider,
     RerankingModel, SearchModel, Skills, SpeechModel, TranscriptionModel, VideoModel,
@@ -20,13 +19,13 @@ use aimux_core::{
 use aimux_provider_utils::HeaderMapOpt;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::openai::OpenAIProviderSettings;
 use crate::openai_compatible::{OpenAICompatibleProviderSettings, create_openai_compatible};
 
 /// Per-handle options of [`provider_handle`] (#226).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderOptions {
     /// Override the default or environment base URL.
     pub base_url: Option<String>,
@@ -36,11 +35,6 @@ pub struct ProviderOptions {
     pub organization: Option<String>,
     /// OpenAI project ID (`OpenAI-Project` header).
     pub project: Option<String>,
-    /// Decision retry-count default; a per-call `max_retries` still wins.
-    pub max_retries: Option<u32>,
-    /// Generation request-body overrides. Native decisions refuse a handle
-    /// that carries them (#226).
-    pub body_overrides: Option<Value>,
 }
 
 /// Official local decision runtimes: name, default base URL, base URL env.
@@ -153,8 +147,6 @@ pub fn provider_handle(
     };
     Ok(Box::new(ProviderHandle {
         inner,
-        max_retries: options.max_retries,
-        has_body_overrides: options.body_overrides.is_some(),
         api_key_source,
     }))
 }
@@ -162,56 +154,29 @@ pub fn provider_handle(
 /// A provider with #226's handle-level decision settings.
 struct ProviderHandle {
     inner: Arc<dyn Provider>,
-    max_retries: Option<u32>,
-    has_body_overrides: bool,
     /// Credential source when the handle resolved the key itself (the
     /// placeholder or an environment variable); `None` keeps the model's own.
     api_key_source: Option<String>,
 }
 
-impl ProviderHandle {
-    fn generation_overrides_unsupported(&self) -> Result<(), AiMuxError> {
-        if self.has_body_overrides {
-            return Err(AiMuxError::UnsupportedFunctionality(
-                "body_overrides are not supported by the package model factories".into(),
-            ));
-        }
-        Ok(())
-    }
-}
-
 impl Provider for ProviderHandle {
     fn decision_model(&self, id: &str) -> Result<Box<dyn DecisionModel>, AiMuxError> {
-        if self.has_body_overrides {
-            return Err(AiMuxError::UnsupportedFunctionality(
-                "native decisions require an official adapter without generation body_overrides"
-                    .into(),
-            ));
-        }
         let model = self.inner.decision_model(id)?;
-        if self.max_retries.is_none() && self.api_key_source.is_none() {
+        if self.api_key_source.is_none() {
             return Ok(model);
         }
-        let retry_config = RetryConfig {
-            max_retries: self.max_retries.unwrap_or(model.retry_config().max_retries),
-            ..model.retry_config()
-        };
         Ok(Box::new(HandleDecisionModel {
             inner: model,
-            retry_config,
             api_key_source: self.api_key_source.clone(),
         }))
     }
     fn language_model(&self, id: &str) -> Result<Arc<dyn LanguageModel>, AiMuxError> {
-        self.generation_overrides_unsupported()?;
         self.inner.language_model(id)
     }
     fn embedding_model(&self, id: &str) -> Result<Arc<dyn EmbeddingModel>, AiMuxError> {
-        self.generation_overrides_unsupported()?;
         self.inner.embedding_model(id)
     }
     fn image_model(&self, id: &str) -> Result<Arc<dyn ImageModel>, AiMuxError> {
-        self.generation_overrides_unsupported()?;
         self.inner.image_model(id)
     }
     fn transcription_model(
@@ -246,10 +211,9 @@ impl Provider for ProviderHandle {
     }
 }
 
-/// A decision model with handle-level retry settings and credential source.
+/// A decision model with the handle's credential source.
 struct HandleDecisionModel {
     inner: Box<dyn DecisionModel>,
-    retry_config: RetryConfig,
     api_key_source: Option<String>,
 }
 
@@ -264,16 +228,10 @@ impl DecisionModel for HandleDecisionModel {
     fn capabilities(&self) -> DecisionCapabilities {
         self.inner.capabilities()
     }
-    fn retry_config(&self) -> RetryConfig {
-        self.retry_config
-    }
     fn config_snapshot(&self) -> aimux_core::recording::ProviderRecord {
         let mut snapshot = self.inner.config_snapshot();
         if let Some(source) = &self.api_key_source {
             snapshot.api_key_source = Some(source.clone());
-        }
-        if let Some(serde_json::Value::Object(options)) = &mut snapshot.provider_options {
-            options.insert("max_retries".into(), self.retry_config.max_retries.into());
         }
         snapshot
     }

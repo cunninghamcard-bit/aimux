@@ -57,28 +57,40 @@ def test_provider_accepts_full_config():
     assert hasattr(model, "generate_text")
 
 
-@pytest.mark.parametrize(
-    "key,value",
-    [("max_retries", 0), ("body_overrides", {"temperature": 0.1})],
-)
-def test_provider_rejects_removed_config_keys(key, value):
-    """max_retries is call-level and body_overrides is gone: neither is silently ignored."""
+def test_provider_rejects_max_retries_config_key():
+    """max_retries is call-level: it is not silently ignored."""
     from aimux import provider
 
-    with pytest.raises(Exception, match=key):
-        provider("groq", "sk-test-fake-key", "llama-3.3-70b", config={key: value})
+    with pytest.raises(Exception, match="max_retries"):
+        provider("groq", "sk-test-fake-key", "llama-3.3-70b", config={"max_retries": 0})
 
 
-@pytest.mark.parametrize(
-    "key,value",
-    [("max_retries", 0), ("body_overrides", {"temperature": 0.1})],
-)
-def test_create_provider_rejects_removed_config_keys(key, value):
-    """create_provider() goes through the same ProviderOptions check."""
+def test_create_provider_rejects_max_retries_config_key():
+    """create_provider() goes through the same config check."""
     from aimux import InvalidArgumentError, create_provider
 
-    with pytest.raises(InvalidArgumentError, match=key):
-        create_provider("groq", "sk-test-fake-key", config={key: value})
+    with pytest.raises(InvalidArgumentError, match="max_retries"):
+        create_provider("groq", "sk-test-fake-key", config={"max_retries": 0})
+
+
+@pytest.mark.parametrize("key", ["body_overrides", "not_a_field"])
+def test_provider_unknown_config_key(key):
+    """body_overrides no longer exists (A6): it fails like any unknown field."""
+    from aimux import InvalidArgumentError, provider
+
+    with pytest.raises(InvalidArgumentError, match=f"unknown field `{key}`") as info:
+        provider("groq", "sk-test-fake-key", "llama-3.3-70b", config={key: {"temperature": 0.1}})
+    assert "no longer supported" not in str(info.value)
+
+
+@pytest.mark.parametrize("key", ["body_overrides", "not_a_field"])
+def test_create_provider_unknown_config_key(key):
+    """create_provider() reports body_overrides through the same unknown-field path."""
+    from aimux import InvalidArgumentError, create_provider
+
+    with pytest.raises(InvalidArgumentError, match=f"unknown field `{key}`") as info:
+        create_provider("groq", "sk-test-fake-key", config={key: {"temperature": 0.1}})
+    assert "no longer supported" not in str(info.value)
 
 
 def test_provider_base_url_param_wins_over_config():

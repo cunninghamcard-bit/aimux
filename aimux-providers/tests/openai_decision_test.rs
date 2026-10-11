@@ -4,7 +4,6 @@ use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
-use std::time::Duration;
 
 use aimux_core::decision_model::*;
 use aimux_core::recording::{self, RingRecorder};
@@ -33,7 +32,6 @@ fn config(server: &MockServer) -> ProviderOptions {
             "X-Client".into(),
             "decision-tests".into(),
         )])),
-        ..Default::default()
     }
 }
 fn model(server: &MockServer) -> Box<dyn DecisionModel> {
@@ -290,11 +288,7 @@ async fn retry_and_standard_provider_errors_use_the_shared_transport() {
         })
         .unwrap()
         .decision("gpt-6-luna")
-        .unwrap()
-        .with_retry_config(aimux_core::retry::RetryConfig {
-            initial_delay: Duration::ZERO,
-            ..Default::default()
-        }),
+        .unwrap(),
     );
     let mut request = options();
     request.max_retries = Some(1);
