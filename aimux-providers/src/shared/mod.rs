@@ -37,6 +37,47 @@ pub(crate) fn is_valid_hostname_part(part: &str) -> bool {
         && bytes[bytes.len() - 1] != b'-'
 }
 
+/// Where a [`Credential::Env`] value is read from, on every request. Outside
+/// this crate's tests it is always the process environment.
+#[derive(Clone, Debug, Default)]
+pub(crate) enum EnvSource {
+    /// The process environment.
+    #[default]
+    Process,
+    /// A plain map injected by this crate's tests, which also logs every
+    /// variable read so a test can assert that nothing was read.
+    #[cfg(test)]
+    Vars(std::sync::Arc<std::sync::Mutex<TestEnv>>),
+}
+
+/// The injected environment of [`EnvSource::Vars`]: plain data.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct TestEnv {
+    pub vars: std::collections::HashMap<String, String>,
+    pub reads: Vec<String>,
+}
+
+impl EnvSource {
+    fn api_key(&self, var: &str, description: &str) -> Result<String, AiMuxError> {
+        match self {
+            Self::Process => load_api_key(None, var, description),
+            #[cfg(test)]
+            Self::Vars(env) => {
+                let mut env = env.lock().expect("test env lock");
+                env.reads.push(var.to_string());
+                env.vars
+                    .get(var)
+                    .cloned()
+                    .ok_or_else(|| AiMuxError::LoadApiKey {
+                        env_var: var.to_string(),
+                        description: description.to_string(),
+                    })
+            }
+        }
+    }
+}
+
 /// Where the credential of a provider comes from.
 #[derive(Clone, Debug)]
 pub(crate) enum Credential {
@@ -49,7 +90,11 @@ pub(crate) enum Credential {
     Explicit(Resolvable<String>),
     /// Read the environment variable on every request; unset fails that
     /// request with `AiMuxError::LoadApiKey`.
-    Env { var: String, description: String },
+    Env {
+        var: String,
+        description: String,
+        source: EnvSource,
+    },
 }
 
 impl Credential {
@@ -64,6 +109,7 @@ impl Credential {
             None => Self::Env {
                 var: var.to_string(),
                 description: description.to_string(),
+                source: EnvSource::Process,
             },
         }
     }
@@ -75,7 +121,11 @@ impl Credential {
         match self {
             Self::None => Ok(None),
             Self::Explicit(key) => Ok(Some(key.resolve().await?)),
-            Self::Env { var, description } => Ok(Some(load_api_key(None, var, description)?)),
+            Self::Env {
+                var,
+                description,
+                source,
+            } => Ok(Some(source.api_key(var, description)?)),
         }
     }
 }
