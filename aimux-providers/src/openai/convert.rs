@@ -1230,6 +1230,7 @@ pub fn parse_finish_reason(s: &str) -> FinishReason {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aimux_core::language_model_message::ToolCallPart;
 
     #[test]
     fn function_call_finish_reason_is_tool_calls() {
@@ -1237,7 +1238,6 @@ mod tests {
         assert!(matches!(reason.unified, FinishReasonUnified::ToolCalls));
         assert_eq!(reason.raw.as_deref(), Some("function_call"));
     }
-    use aimux_core::language_model_message::ToolCallPart;
 
     fn replayed_arguments(input: Value) -> Value {
         let prompt = vec![LanguageModelMessage::Assistant {
