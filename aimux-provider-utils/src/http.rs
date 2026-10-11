@@ -25,6 +25,10 @@ use crate::fetch::{
 use crate::handle_fetch_error::fetch_error_to_ai_mux_error;
 use crate::logging::{body_logging_enabled, redact_body};
 
+/// `@ai-sdk/provider-utils` version aimux mirrors; must equal its pin in
+/// `fixtures/aisdk/VERSIONS.json` (checked by `pin_tests`).
+pub(crate) const PROVIDER_UTILS_VERSION: &str = "5.0.53";
+
 /// Process-wide proxy configuration, fixed before the first HTTP client is built.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProxyConfig {
@@ -545,7 +549,7 @@ fn build_fetch_request(request: &PreparedRequest) -> Result<FetchRequest, AiMuxE
             .map_err(|_| AiMuxError::InvalidArgument(format!("invalid header value for {name}")))?;
         headers.insert(header_name, header_value);
     }
-    let suffix = "ai-sdk-provider-utils/5.0.51";
+    let suffix = format!("ai-sdk-provider-utils/{PROVIDER_UTILS_VERSION}");
     let current = request
         .headers
         .iter()
@@ -555,7 +559,7 @@ fn build_fetch_request(request: &PreparedRequest) -> Result<FetchRequest, AiMuxE
                 .then_some(value.as_str())
         })
         .unwrap_or_default();
-    let user_agent = crate::headers::user_agent_value(current, suffix);
+    let user_agent = crate::headers::user_agent_value(current, &suffix);
     headers.insert(
         http::header::USER_AGENT,
         http::HeaderValue::try_from(user_agent).map_err(|_| {
@@ -933,5 +937,22 @@ pub(crate) fn sanitized_request_url(url: &str) -> String {
             parsed.to_string()
         }
         Err(_) => url.split('?').next().unwrap_or(url).to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod pin_tests {
+    #[test]
+    fn provider_utils_version_is_pinned() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../fixtures/aisdk/VERSIONS.json"
+        );
+        let versions: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(
+            versions["@ai-sdk/provider-utils"].as_str(),
+            Some(super::PROVIDER_UTILS_VERSION)
+        );
     }
 }

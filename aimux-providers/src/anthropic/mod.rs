@@ -201,7 +201,7 @@ pub fn create_anthropic(
             vec![("anthropic-version".to_string(), API_VERSION.to_string())],
             settings.headers,
         )
-        .with_user_agent(options::CANONICAL, "4.0.68"),
+        .with_user_agent(options::CANONICAL, crate::shared::aisdk_pins::ANTHROPIC),
         fetch: settings.fetch,
         supported_urls: supported_urls(),
         generate_id: settings.generate_id,
