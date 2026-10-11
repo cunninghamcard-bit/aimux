@@ -153,11 +153,9 @@ async fn recorded_decision_file_contains_no_raw_credentials() {
     );
 }
 
-/// D15/D24: a keyless local runtime is `auth = none` and sends no
-/// `Authorization` header at all (absent, not empty).
-#[tokio::test]
-#[serial]
-async fn keyless_local_runtime_sends_no_authorization_header() {
+/// One decision against a local runtime with the given key; returns the
+/// `Authorization` header of the single request (None = absent).
+async fn local_runtime_authorization(api_key: Option<&str>) -> Option<String> {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(500).set_body_json(json!({"error": "stop"})))
@@ -165,7 +163,7 @@ async fn keyless_local_runtime_sends_no_authorization_header() {
         .await;
     let model = provider_handle(
         "ollama",
-        None,
+        api_key.map(Into::into),
         Some(ProviderOptions {
             base_url: Some(format!("{}/v1", server.uri())),
             ..Default::default()
@@ -182,18 +180,31 @@ async fn keyless_local_runtime_sends_no_authorization_header() {
         )
         .unwrap();
     options.max_retries = Some(0);
-    let recorder = Arc::new(RingRecorder::new());
-    recording::init_recording(Some(recorder.clone()));
-    let _stop = Stop;
     assert!(decide(model.as_ref(), options).await.is_err());
-    recording::init_recording(None);
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 1);
-    assert!(
-        !requests[0].headers.contains_key("authorization"),
-        "unexpected Authorization header: {:?}",
-        requests[0].headers.get("authorization")
-    );
+    requests[0]
+        .headers
+        .get("authorization")
+        .map(|value| value.to_str().unwrap().to_string())
+}
+
+/// D15/D24: a keyless local runtime is `auth = none` and sends no
+/// `Authorization` header at all (absent, not empty).
+#[tokio::test]
+#[serial]
+async fn keyless_local_runtime_sends_no_authorization_header() {
+    let sent = local_runtime_authorization(None).await;
+    assert_eq!(sent, None, "unexpected Authorization header");
+}
+
+/// An explicit empty key on a local runtime is no credential either: no
+/// `Authorization` header (not `Bearer ` with an empty token).
+#[tokio::test]
+#[serial]
+async fn local_runtime_empty_key_sends_no_authorization_header() {
+    let sent = local_runtime_authorization(Some("")).await;
+    assert_eq!(sent, None, "unexpected Authorization header");
 }
 
 /// Explicit `Authorization` and `x-api-key` request headers reach the wire but
