@@ -86,6 +86,11 @@ pub struct PresetDescriptor {
     /// How chat usage is read (`profile.convert_usage`).
     pub convert_usage: ConvertUsage,
     pub params: &'static [ParamSpec],
+    /// `(package, version)` of the `ai-sdk-{package}/{version}` user-agent
+    /// (`profile.user_agent`). `openai-compatible` by default;
+    /// `amazon-bedrock` (Bedrock Mantle) also appends it a second time in
+    /// the transport, like `@ai-sdk/amazon-bedrock`'s mantle provider.
+    pub user_agent: (&'static str, &'static str),
 }
 
 /// Settings of a preset factory. Every field is optional.
@@ -228,7 +233,7 @@ fn load_registry() -> Vec<PresetEntry> {
         check(
             row.profile
                 .keys()
-                .all(|key| matches!(*key, "max_tokens_key" | "convert_usage")),
+                .all(|key| matches!(*key, "max_tokens_key" | "convert_usage" | "user_agent")),
             "unknown profile key",
         );
         let max_tokens_key = row.profile.get("max_tokens_key").copied();
@@ -244,6 +249,16 @@ fn load_registry() -> Vec<PresetEntry> {
                 "registry row '{}': unknown convert_usage {value:?}",
                 row.name
             ),
+        };
+        // bedrock-mantle-provider.ts:237 (getHeaders) and
+        // inject-fetch-headers.ts:23 (the transport).
+        let user_agent = match row.profile.get("user_agent").copied() {
+            None => (
+                "openai-compatible",
+                crate::shared::aisdk_pins::OPENAI_COMPATIBLE,
+            ),
+            Some("amazon-bedrock") => ("amazon-bedrock", crate::shared::aisdk_pins::AMAZON_BEDROCK),
+            Some(value) => panic!("registry row '{}': unknown user_agent {value:?}", row.name),
         };
         let mut params = Vec::with_capacity(row.params.len());
         for param in row.params {
@@ -294,6 +309,7 @@ fn load_registry() -> Vec<PresetEntry> {
                 max_tokens_key,
                 convert_usage,
                 params: params.leak(),
+                user_agent,
             })),
         });
     }
@@ -390,6 +406,19 @@ fn assemble(
         ..ChatSettings::default()
     };
 
+    let fetch = match descriptor.user_agent {
+        (package @ "amazon-bedrock", version) => {
+            let inner = settings
+                .fetch
+                .unwrap_or_else(aimux_provider_utils::default_fetch);
+            let fetch: FetchFunction = std::sync::Arc::new(crate::shared::UserAgentFetch {
+                inner,
+                suffix: format!("ai-sdk-{package}/{version}"),
+            });
+            Some(fetch)
+        }
+        _ => settings.fetch,
+    };
     OpenAICompatibleProvider::assemble(Assembly {
         name: descriptor.name.to_string(),
         base_url,
@@ -397,8 +426,9 @@ fn assemble(
         fixed_headers: Vec::new(),
         headers: settings.headers,
         query_params: None,
-        fetch: settings.fetch,
+        fetch,
         chat,
+        user_agent: descriptor.user_agent,
     })
 }
 

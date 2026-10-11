@@ -170,3 +170,41 @@ impl ProviderHeaders {
             .collect())
     }
 }
+
+/// A transport decorator that appends `suffix` to the request's `user-agent`
+/// just before forwarding it, after the helper layer has added
+/// `ai-sdk-provider-utils/<v>`. This is the second `ai-sdk-amazon-bedrock/<v>`
+/// of `@ai-sdk/amazon-bedrock@5.0.100` (inject-fetch-headers.ts:23,
+/// amazon-bedrock-sigv4-fetch.ts:46, :133); the runtime fragment those append
+/// is left out, as everywhere in aimux.
+pub(crate) struct UserAgentFetch {
+    pub inner: aimux_provider_utils::FetchFunction,
+    pub suffix: String,
+}
+
+#[async_trait::async_trait]
+impl aimux_provider_utils::Fetch for UserAgentFetch {
+    async fn fetch(
+        &self,
+        mut request: aimux_provider_utils::FetchRequest,
+    ) -> Result<aimux_provider_utils::FetchResponse, aimux_provider_utils::FetchError> {
+        append_user_agent(&mut request.headers, &self.suffix);
+        self.inner.fetch(request).await
+    }
+}
+
+/// Append `suffix` to the `user-agent` of `headers` (creating it if absent).
+pub(crate) fn append_user_agent(headers: &mut reqwest::header::HeaderMap, suffix: &str) {
+    let current = headers
+        .get(reqwest::header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let value = if current.is_empty() {
+        suffix.to_string()
+    } else {
+        format!("{current} {suffix}")
+    };
+    if let Ok(value) = reqwest::header::HeaderValue::try_from(value) {
+        headers.insert(reqwest::header::USER_AGENT, value);
+    }
+}

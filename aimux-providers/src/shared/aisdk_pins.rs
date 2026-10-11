@@ -49,6 +49,6 @@ mod tests {
     #[test]
     fn every_versions_entry_is_object_form() {
         // `all()` panics on any other shape.
-        assert!(pinned_versions::all().len() >= 13);
+        assert_eq!(pinned_versions::all().len(), 15);
     }
 }
