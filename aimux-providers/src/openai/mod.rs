@@ -31,7 +31,7 @@ pub use decision::OpenAIDecisionModel;
 pub use embedding::OpenAIEmbeddingModel;
 pub use files::OpenAIFiles;
 pub use image::OpenAIImageModel;
-pub use model::OpenAIModel;
+pub use model::{EncodedChatRequest, OpenAIModel};
 pub use responses::OpenAIResponsesModel;
 pub use speech::OpenAISpeechModel;
 pub use tools::{OpenAIComputerAction, OpenAIComputerSafetyCheck};
@@ -261,7 +261,7 @@ pub fn create_openai(settings: OpenAIProviderSettings) -> Result<OpenAIProvider,
             .collect(),
             settings.headers,
         )
-        .with_user_agent("openai", "4.0.80"),
+        .with_user_agent("openai", "4.0.83"),
         fetch: settings.fetch,
         #[cfg(feature = "realtime")]
         web_socket: settings.web_socket,

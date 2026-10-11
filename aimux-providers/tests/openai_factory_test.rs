@@ -281,7 +281,7 @@ impl Fixture {
             .collect();
         expected.insert(
             "user-agent".to_string(),
-            "ai-sdk-openai/4.0.80 ai-sdk-provider-utils/5.0.51".to_string(),
+            "ai-sdk-openai/4.0.83 ai-sdk-provider-utils/5.0.51".to_string(),
         );
         assert_eq!(
             expected.get("authorization").map(String::as_str),
@@ -776,4 +776,98 @@ async fn an_explicit_empty_key_is_sent_as_given() {
 fn _assert_provider_is_shareable() {
     fn shareable<T: Send + Sync + 'static>() {}
     shareable::<OpenAIProvider>();
+}
+
+/// W.1: the pure chat encode, compared with every recorded chat request
+/// directly — no transport involved. URL and body must match exactly; every
+/// header encode produces must match the recording (the redacted key is the
+/// test key). `content-type` and the `user-agent` suffix are added later by
+/// the provider-utils helper.
+#[tokio::test]
+async fn chat_encode_matches_recorded_requests_without_fetch() {
+    let versions: Value = serde_json::from_str(
+        &std::fs::read_to_string(fixtures_dir().join("../VERSIONS.json")).unwrap(),
+    )
+    .unwrap();
+    let pinned_ua = format!(
+        "ai-sdk-openai/{}",
+        versions["@ai-sdk/openai"].as_str().unwrap()
+    );
+    let mut provider_layer_uas = 0;
+    let mut checked = 0;
+    for name in FIXTURES.iter().filter(|name| name.starts_with("chat-")) {
+        let fixture = Fixture::load(name);
+        let recorded = &fixture.json["request"];
+        if recorded.is_null() {
+            continue;
+        }
+        let mock = MockFetch::new(vec![]);
+        // The settings each recording was made with (the per-case tests above;
+        // scripts/aisdk-fixtures/cases/openai.mjs).
+        let settings = match *name {
+            "chat-custom-name" => OpenAIProviderSettings {
+                name: Some("proxy".to_string()),
+                ..settings(&mock)
+            },
+            "chat-headers-merge" => OpenAIProviderSettings {
+                headers: Some(
+                    [("x-a", "1"), ("X-B", "2")]
+                        .into_iter()
+                        .map(|(k, v)| (k.to_string(), Some(v.to_string())))
+                        .collect(),
+                ),
+                ..settings(&mock)
+            },
+            _ => settings(&mock),
+        };
+        let model = create_openai(settings).unwrap().chat(fixture.model_id());
+        let stream = recorded["body"]["stream"] == json!(true);
+        let encoded = model
+            .encode_request(&fixture.call_options(), stream)
+            .await
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(mock.seen().is_empty(), "{name}: encode used the transport");
+
+        assert_eq!(
+            encoded.url,
+            recorded["url"].as_str().unwrap(),
+            "{name}: url"
+        );
+        assert_eq!(encoded.body, recorded["body"], "{name}: body");
+
+        let mut expected: BTreeMap<String, String> = recorded["headers"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (k.to_ascii_lowercase(), v.as_str().unwrap().to_string()))
+            .collect();
+        expected.insert("authorization".into(), bearer(KEY));
+        expected.remove("content-type");
+        let recorded_ua = expected.remove("user-agent").expect("recorded user-agent");
+        let mut got: BTreeMap<String, String> = encoded
+            .headers
+            .iter()
+            .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
+            .collect();
+        // Encode carries the package part of the user-agent; the helper
+        // appends the provider-utils suffix when sending (see assert_request).
+        // It names the pinned package; a recording made at the provider layer
+        // (not through `ai`, which puts its own id first) starts with it.
+        let ua = got.remove("user-agent").expect("encoded user-agent");
+        assert_eq!(ua, pinned_ua, "{name}: user-agent");
+        if recorded_ua.starts_with("ai-sdk-openai/") {
+            assert!(
+                recorded_ua.starts_with(&format!("{ua} ")),
+                "{name}: recorded user-agent {recorded_ua:?} does not start with {ua:?}"
+            );
+            provider_layer_uas += 1;
+        }
+        assert_eq!(got, expected, "{name}: headers");
+        checked += 1;
+    }
+    assert_eq!(checked, 7, "chat fixtures checked");
+    assert!(
+        provider_layer_uas > 0,
+        "no provider-layer user-agent recorded"
+    );
 }
