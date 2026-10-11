@@ -35,19 +35,13 @@ fn decision_providers_resolve_by_name() {
     );
 }
 
+/// A6 item 2: retry is call-level only, so the handle has no `max_retries`.
 #[test]
-fn handle_options_reach_decisions() {
-    let handle = provider_handle(
-        "laya",
-        None,
-        Some(ProviderOptions {
-            max_retries: Some(0),
-            ..Default::default()
-        }),
-    )
-    .unwrap();
-    let model = handle.decision_model("served-alias").unwrap();
-    assert_eq!(model.retry_config().max_retries, 0);
+fn handle_has_no_max_retries_option() {
+    let error = serde_json::from_value::<ProviderOptions>(json!({"max_retries": 0}))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("unknown field `max_retries`"), "{error}");
 }
 
 /// `body_overrides` no longer exists (A6 item 3): it is an unknown field like

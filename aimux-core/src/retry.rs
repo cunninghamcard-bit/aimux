@@ -15,31 +15,6 @@ const DEFAULT_INITIAL_DELAY_MS: u64 = 2_000;
 /// Default multiplier applied to the delay after each retry.
 const DEFAULT_BACKOFF_FACTOR: u32 = 2;
 
-/// Retry settings a decision model may carry (#226,
-/// [`DecisionModel::retry_config`](crate::DecisionModel::retry_config)).
-///
-/// A per-call `max_retries` overrides only [`Self::max_retries`]; the
-/// configured delay and backoff factor remain in effect.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RetryConfig {
-    /// Maximum number of retries after the initial attempt.
-    pub max_retries: u32,
-    /// Initial delay between attempts.
-    pub initial_delay: Duration,
-    /// Multiplier applied to the delay after each retry.
-    pub backoff_factor: u32,
-}
-
-impl Default for RetryConfig {
-    fn default() -> Self {
-        Self {
-            max_retries: DEFAULT_MAX_RETRIES,
-            initial_delay: Duration::from_millis(DEFAULT_INITIAL_DELAY_MS),
-            backoff_factor: DEFAULT_BACKOFF_FACTOR,
-        }
-    }
-}
-
 /// A prepared operation retry function and its resolved retry count.
 ///
 /// This is the Rust representation of the AI SDK's
@@ -66,24 +41,6 @@ pub(crate) fn prepare_retries(
         max_retries: max_retries.unwrap_or(DEFAULT_MAX_RETRIES),
         initial_delay_ms: DEFAULT_INITIAL_DELAY_MS,
         backoff_factor: u64::from(DEFAULT_BACKOFF_FACTOR),
-        abort_signal: abort,
-    }
-}
-
-/// Bind a model's retry settings, applying a per-call retry-count override.
-#[must_use]
-pub(crate) fn prepare_retries_with_config(
-    max_retries: Option<u32>,
-    mut config: RetryConfig,
-    abort: Option<AbortSignal>,
-) -> PreparedRetries {
-    if let Some(max_retries) = max_retries {
-        config.max_retries = max_retries;
-    }
-    PreparedRetries {
-        max_retries: config.max_retries,
-        initial_delay_ms: u64::try_from(config.initial_delay.as_millis()).unwrap_or(u64::MAX),
-        backoff_factor: u64::from(config.backoff_factor),
         abort_signal: abort,
     }
 }

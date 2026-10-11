@@ -697,3 +697,42 @@ async fn runtime_errors_preserve_native_message_code_and_status() {
         }
     }
 }
+
+/// A6 item 2: decisions retry only on the core call-level `maxRetries`
+/// (default 2); there is no model- or handle-level retry config. Every
+/// attempt fails retryably, so `max_retries = N` makes exactly `N + 1`
+/// requests (N retries).
+#[tokio::test]
+#[serial]
+async fn call_level_max_retries_sets_the_exact_retry_count() {
+    for (max_retries, expected_requests) in [(Some(0), 1), (Some(1), 2), (Some(3), 4), (None, 3)] {
+        let server = MockServer::start().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let responder = calls.clone();
+        Mock::given(method("POST"))
+            .and(path("/v1/systemone"))
+            .respond_with(move |_: &Request| {
+                responder.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(503)
+                    .insert_header("retry-after", "0")
+                    .set_body_json(json!({"error":{"message":"busy"}}))
+            })
+            .mount(&server)
+            .await;
+        let mut request = options();
+        request.max_retries = max_retries;
+        let error = decide(model("vllm", &server).as_ref(), request)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            expected_requests,
+            "max_retries = {max_retries:?}"
+        );
+        if expected_requests == 1 {
+            assert!(matches!(error, AiMuxError::ApiCall(_)), "{error:?}");
+        } else {
+            assert!(matches!(error, AiMuxError::Retry(_)), "{error:?}");
+        }
+    }
+}

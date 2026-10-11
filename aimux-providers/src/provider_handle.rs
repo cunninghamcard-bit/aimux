@@ -12,7 +12,6 @@ use aimux_core::decision_model::{
     DecisionCallOptions, DecisionCapabilities, DecisionModel, DecisionResult,
 };
 use aimux_core::provider::ProviderDiscovery;
-use aimux_core::retry::RetryConfig;
 use aimux_core::{
     AiMuxError, EmbeddingModel, EvaluationModel, Files, ImageModel, LanguageModel, Provider,
     RerankingModel, SearchModel, Skills, SpeechModel, TranscriptionModel, VideoModel,
@@ -36,8 +35,6 @@ pub struct ProviderOptions {
     pub organization: Option<String>,
     /// OpenAI project ID (`OpenAI-Project` header).
     pub project: Option<String>,
-    /// Decision retry-count default; a per-call `max_retries` still wins.
-    pub max_retries: Option<u32>,
 }
 
 /// Official local decision runtimes: name, default base URL, base URL env.
@@ -150,7 +147,6 @@ pub fn provider_handle(
     };
     Ok(Box::new(ProviderHandle {
         inner,
-        max_retries: options.max_retries,
         api_key_source,
     }))
 }
@@ -158,7 +154,6 @@ pub fn provider_handle(
 /// A provider with #226's handle-level decision settings.
 struct ProviderHandle {
     inner: Arc<dyn Provider>,
-    max_retries: Option<u32>,
     /// Credential source when the handle resolved the key itself (the
     /// placeholder or an environment variable); `None` keeps the model's own.
     api_key_source: Option<String>,
@@ -167,16 +162,11 @@ struct ProviderHandle {
 impl Provider for ProviderHandle {
     fn decision_model(&self, id: &str) -> Result<Box<dyn DecisionModel>, AiMuxError> {
         let model = self.inner.decision_model(id)?;
-        if self.max_retries.is_none() && self.api_key_source.is_none() {
+        if self.api_key_source.is_none() {
             return Ok(model);
         }
-        let retry_config = RetryConfig {
-            max_retries: self.max_retries.unwrap_or(model.retry_config().max_retries),
-            ..model.retry_config()
-        };
         Ok(Box::new(HandleDecisionModel {
             inner: model,
-            retry_config,
             api_key_source: self.api_key_source.clone(),
         }))
     }
@@ -221,10 +211,9 @@ impl Provider for ProviderHandle {
     }
 }
 
-/// A decision model with handle-level retry settings and credential source.
+/// A decision model with the handle's credential source.
 struct HandleDecisionModel {
     inner: Box<dyn DecisionModel>,
-    retry_config: RetryConfig,
     api_key_source: Option<String>,
 }
 
@@ -239,16 +228,10 @@ impl DecisionModel for HandleDecisionModel {
     fn capabilities(&self) -> DecisionCapabilities {
         self.inner.capabilities()
     }
-    fn retry_config(&self) -> RetryConfig {
-        self.retry_config
-    }
     fn config_snapshot(&self) -> aimux_core::recording::ProviderRecord {
         let mut snapshot = self.inner.config_snapshot();
         if let Some(source) = &self.api_key_source {
             snapshot.api_key_source = Some(source.clone());
-        }
-        if let Some(serde_json::Value::Object(options)) = &mut snapshot.provider_options {
-            options.insert("max_retries".into(), self.retry_config.max_retries.into());
         }
         snapshot
     }

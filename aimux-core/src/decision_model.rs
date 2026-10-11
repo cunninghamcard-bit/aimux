@@ -559,11 +559,6 @@ pub trait DecisionModel: Send + Sync {
         snapshot.profile = Some(serde_json::json!({"decision_capabilities": self.capabilities()}));
         snapshot
     }
-    /// Retry settings for [`decide`] (#226). A per-call `max_retries`
-    /// overrides only the retry count.
-    fn retry_config(&self) -> retry::RetryConfig {
-        retry::RetryConfig::default()
-    }
     /// Perform one provider attempt.
     /// # Errors
     /// Returns provider, transport or invalid response errors.
@@ -648,11 +643,7 @@ pub async fn decide(
     }
     let timeout = timeout::OperationTimeout::new(options.timeout.unwrap_or_default())?;
     let abort_signal = options.abort_signal.clone();
-    let retries = retry::prepare_retries_with_config(
-        options.max_retries,
-        model.retry_config(),
-        abort_signal.clone(),
-    );
+    let retries = retry::prepare_retries(options.max_retries, abort_signal.clone());
     let context = crate::recording::recorder().map(|recorder| {
         let ctx =
             crate::recording::RecordingContext::new(crate::recording::new_call_id(), recorder);

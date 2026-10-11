@@ -45,13 +45,12 @@ impl DecisionEndpoint {
     }
 
     /// #226's decision connection snapshot: identity, base URL, credential
-    /// *source* and the connection headers/retries. The credential value is
+    /// *source* and the connection headers. The credential value is
     /// never read; sensitive headers are redacted again when recorded.
     pub(crate) fn snapshot(
         &self,
         provider: &str,
         model_id: &str,
-        retry_config: aimux_core::retry::RetryConfig,
         profile: Value,
     ) -> aimux_core::recording::ProviderRecord {
         use crate::shared::Credential;
@@ -73,10 +72,7 @@ impl DecisionEndpoint {
             }
         }
         record.provider_options = Some(aimux_core::recording::redact_provider_options(
-            serde_json::json!({
-                "headers": wire_headers,
-                "max_retries": retry_config.max_retries,
-            }),
+            serde_json::json!({ "headers": wire_headers }),
         ));
         record.profile = Some(profile);
         record
