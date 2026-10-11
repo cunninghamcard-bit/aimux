@@ -1,0 +1,18 @@
+{"toolCallId":"call_1","toolName":"weather","input":"\"Tokyo\""}
+{"toolCallId":"call_1","toolName":"weather","input":"\"{\\\"x\\\":1}\""}
+{"toolCallId":"call_1","toolName":"weather","input":"123"}
+{"toolCallId":"call_1","toolName":"weather","input":"true"}
+{"toolCallId":"call_1","toolName":"weather","input":"null"}
+{"toolCallId":"call_1","toolName":"weather","input":"{\"a\":1,\"a\":2}"}
+{"toolCallId":"call_1","toolName":"weather","input":" 1e2 "}
+{"toolCallId":"call_1","toolName":"weather","input":"{\"a\":"}
+{"toolCallId":"call_1","toolName":"weather","input":""}
+{"toolCallId":"call_1","toolName":"weather","input":"{}"}
+{"toolCallId":"call_1","toolName":"weather","input":"{}","dynamic":false}
+{"toolCallId":"call_1","toolName":"weather","input":"{}","dynamic":true}
+{"toolCallId":"call_1","toolName":"weather","input":"{}","providerExecuted":true}
+{"toolCallId":"call_1","toolName":"weather","input":"{}","providerExecuted":true,"dynamic":false}
+{"toolCallId":"call_1","toolName":"weather","input":"{}","providerExecuted":true,"dynamic":true}
+{"toolCallId":"call_1","toolName":"weather","input":"{}","providerExecuted":false}
+{"toolCallId":"call_1","toolName":"weather","input":"{}","providerExecuted":false,"dynamic":false}
+{"toolCallId":"call_1","toolName":"weather","input":"{}","providerExecuted":false,"dynamic":true}
