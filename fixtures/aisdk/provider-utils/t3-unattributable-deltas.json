@@ -1,0 +1,210 @@
+{
+  "source": "@ai-sdk/provider-utils@5.0.53 src/streaming-tool-call-tracker.ts (sha256 ecad08bce570fae25715c4a082adf3069d96f96404bcfb6628f4392672ba8f05), typeValidation 'if-present' (openai chat)",
+  "generatedBy": "node scripts/gen-t3-tracker-fixture.mjs <node_modules>",
+  "cases": [
+    {
+      "name": "ambiguous_delta_across_open_calls_is_dropped",
+      "tracker": "streaming-tool-call-tracker.ts:142-144 (resolveToolCall :297-305 -> ambiguous)",
+      "deltas": [
+        {
+          "index": 0,
+          "id": "call_a",
+          "type": "function",
+          "function": {
+            "name": "alpha",
+            "arguments": "{\"a\":"
+          }
+        },
+        {
+          "index": 1,
+          "id": "call_b",
+          "type": "function",
+          "function": {
+            "name": "beta",
+            "arguments": "{\"b\":"
+          }
+        },
+        {
+          "function": {
+            "arguments": "\"LOST\""
+          }
+        },
+        {
+          "index": 0,
+          "function": {
+            "arguments": "1}"
+          }
+        },
+        {
+          "index": 1,
+          "function": {
+            "arguments": "2}"
+          }
+        }
+      ],
+      "aisdk": {
+        "steps": [
+          {
+            "parts": [
+              {
+                "type": "tool-input-start",
+                "id": "call_a",
+                "toolName": "alpha"
+              },
+              {
+                "type": "tool-input-delta",
+                "id": "call_a",
+                "delta": "{\"a\":"
+              }
+            ]
+          },
+          {
+            "parts": [
+              {
+                "type": "tool-input-start",
+                "id": "call_b",
+                "toolName": "beta"
+              },
+              {
+                "type": "tool-input-delta",
+                "id": "call_b",
+                "delta": "{\"b\":"
+              }
+            ]
+          },
+          {
+            "parts": []
+          },
+          {
+            "parts": [
+              {
+                "type": "tool-input-delta",
+                "id": "call_a",
+                "delta": "1}"
+              }
+            ]
+          },
+          {
+            "parts": [
+              {
+                "type": "tool-input-delta",
+                "id": "call_b",
+                "delta": "2}"
+              }
+            ]
+          }
+        ],
+        "error": null,
+        "flush": [
+          {
+            "type": "tool-input-end",
+            "id": "call_a"
+          },
+          {
+            "type": "tool-call",
+            "toolCallId": "call_a",
+            "toolName": "alpha",
+            "input": "{\"a\":1}"
+          },
+          {
+            "type": "tool-input-end",
+            "id": "call_b"
+          },
+          {
+            "type": "tool-call",
+            "toolCallId": "call_b",
+            "toolName": "beta",
+            "input": "{\"b\":2}"
+          }
+        ]
+      }
+    },
+    {
+      "name": "blank_name_matching_no_call_is_dropped",
+      "tracker": "streaming-tool-call-tracker.ts:151-153",
+      "deltas": [
+        {
+          "index": 0,
+          "id": "call_blank",
+          "type": "function",
+          "function": {
+            "name": "",
+            "arguments": "{\"x\":1}"
+          }
+        },
+        {
+          "index": 1,
+          "id": "call_ws",
+          "type": "function",
+          "function": {
+            "name": "   ",
+            "arguments": "{}"
+          }
+        }
+      ],
+      "aisdk": {
+        "steps": [
+          {
+            "parts": []
+          },
+          {
+            "parts": []
+          }
+        ],
+        "error": null,
+        "flush": []
+      }
+    },
+    {
+      "name": "nameless_delta_without_open_call_is_invalid_response_data",
+      "tracker": "streaming-tool-call-tracker.ts:293-305 -> new, then :379-384 throws InvalidResponseDataError",
+      "deltas": [
+        {
+          "index": 0,
+          "function": {
+            "arguments": "{\"orphan\":true}"
+          }
+        }
+      ],
+      "aisdk": {
+        "steps": [
+          {
+            "parts": []
+          }
+        ],
+        "error": {
+          "name": "AI_InvalidResponseDataError",
+          "message": "Expected 'function.name' to be a string."
+        },
+        "flush": null
+      }
+    },
+    {
+      "name": "non_function_type_is_invalid_response_data",
+      "tracker": "streaming-tool-call-tracker.ts:370-376",
+      "deltas": [
+        {
+          "index": 0,
+          "id": "call_c",
+          "type": "custom",
+          "function": {
+            "name": "gamma",
+            "arguments": "{}"
+          }
+        }
+      ],
+      "aisdk": {
+        "steps": [
+          {
+            "parts": []
+          }
+        ],
+        "error": {
+          "name": "AI_InvalidResponseDataError",
+          "message": "Expected 'function' type."
+        },
+        "flush": null
+      }
+    }
+  ]
+}
