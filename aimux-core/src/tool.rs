@@ -114,6 +114,102 @@ impl From<FunctionTool> for Tool {
     }
 }
 
+/// A provider's raw tool-argument text, kept verbatim (RFC-0042:80).
+///
+/// Serializes as the plain JSON string (`serde(transparent)`), so the wire and
+/// the generated TypeScript (`string`) are unchanged. Core parses it into
+/// [`ToolCall::input`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RawArguments(String);
+
+impl RawArguments {
+    /// Wrap provider argument text as-is.
+    #[must_use]
+    pub fn new(text: impl Into<String>) -> Self {
+        Self(text.into())
+    }
+
+    /// The argument text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Append streamed argument text (provider deltas).
+    pub fn push_str(&mut self, delta: &str) {
+        self.0.push_str(delta);
+    }
+
+    /// The argument text, by value.
+    #[must_use]
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl From<String> for RawArguments {
+    fn from(text: String) -> Self {
+        Self(text)
+    }
+}
+
+impl From<&str> for RawArguments {
+    fn from(text: &str) -> Self {
+        Self(text.to_owned())
+    }
+}
+
+impl From<RawArguments> for String {
+    fn from(arguments: RawArguments) -> Self {
+        arguments.0
+    }
+}
+
+impl std::ops::Deref for RawArguments {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for RawArguments {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for RawArguments {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl PartialEq<str> for RawArguments {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for RawArguments {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<String> for RawArguments {
+    fn eq(&self, other: &String) -> bool {
+        &self.0 == other
+    }
+}
+
+/// Same as `String == Value`: equal to a JSON string with the same text.
+impl PartialEq<Value> for RawArguments {
+    fn eq(&self, other: &Value) -> bool {
+        other.as_str() == Some(self.0.as_str())
+    }
+}
+
 /// Provider-facing tool call before Core parses and validates its input.
 ///
 /// The wire shape matches [`ToolCall`] field for field, except that `input`
@@ -124,7 +220,8 @@ impl From<FunctionTool> for Tool {
 pub struct RawToolCall {
     pub tool_call_id: String,
     pub tool_name: String,
-    pub input: String,
+    #[ts(as = "String")]
+    pub input: RawArguments,
     #[ts(optional)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_executed: Option<bool>,

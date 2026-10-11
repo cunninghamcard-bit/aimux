@@ -343,7 +343,7 @@ impl LanguageModel for OpenResponsesModel {
                         content.push(GenerateContent::ToolCall(RawToolCall {
                             tool_call_id: call_id,
                             tool_name: name,
-                            input,
+                            input: input.into(),
                             provider_executed: None,
                             dynamic: None,
                             provider_metadata: None,
@@ -663,7 +663,7 @@ impl Transformer for OpenResponsesStream {
                                     controller.enqueue(StreamPart::ToolCall(RawToolCall {
                                         tool_call_id,
                                         tool_name,
-                                        input,
+                                        input: input.into(),
                                         provider_executed: None,
                                         dynamic: None,
                                         provider_metadata: None,

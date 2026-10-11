@@ -233,7 +233,7 @@ impl StreamingToolCallTracker {
                 tool_call_id: call.id,
                 tool_name: call.name,
                 // Raw argument text; Core parses it.
-                input: call.arguments,
+                input: call.arguments.into(),
                 provider_executed: None,
                 dynamic: None,
                 provider_metadata: call.provider_metadata,

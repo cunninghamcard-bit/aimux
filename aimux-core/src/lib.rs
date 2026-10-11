@@ -143,8 +143,8 @@ pub mod prelude {
     pub use crate::speech_model::{SpeechCallOptions, SpeechModel, SpeechResult, generate_speech};
     pub use crate::stream_part::{StreamPart, TextStreamPart};
     pub use crate::tool::{
-        FunctionTool, FunctionToolInputExample, ProviderTool, RawToolCall, Tool, ToolCall,
-        ToolResult,
+        FunctionTool, FunctionToolInputExample, ProviderTool, RawArguments, RawToolCall, Tool,
+        ToolCall, ToolResult,
     };
     pub use crate::transcription_model::{
         AudioChunk, InputAudioFormat, TranscriptionCallOptions, TranscriptionModel,
