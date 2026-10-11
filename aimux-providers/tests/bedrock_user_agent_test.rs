@@ -1,15 +1,15 @@
 //! The full user-agents the Amazon Bedrock family sends, as literals.
 //!
-//! `@ai-sdk/amazon-bedrock@5.0.100` (with `@ai-sdk/provider-utils@5.0.53`),
+//! `@ai-sdk/amazon-bedrock@5.0.100` (which pins `@ai-sdk/provider-utils@5.0.51`),
 //! run against a capturing mock fetch, sends for Converse (API key and
 //! SigV4), Anthropic-on-Bedrock and Mantle alike:
 //!
-//! `ai-sdk-amazon-bedrock/5.0.100 ai-sdk-provider-utils/5.0.53 node.js/v20.19.2 ai-sdk-amazon-bedrock/5.0.100 node.js/v20.19.2`
+//! `ai-sdk-amazon-bedrock/5.0.100 ai-sdk-provider-utils/5.0.51 node.js/v20.19.2 ai-sdk-amazon-bedrock/5.0.100 node.js/v20.19.2`
 //!
 //! `getHeaders` adds the first part (amazon-bedrock-provider.ts:294,
 //! bedrock-mantle-provider.ts:237), `postToApi` the provider-utils part, and
-//! the transport the second package part (inject-fetch-headers.ts:23 for an
-//! API key, amazon-bedrock-sigv4-fetch.ts:46/:133 for SigV4). aimux leaves
+//! the transport the second package part (amazon-bedrock-sigv4-fetch.ts:133 for an
+//! API key, :46 for SigV4). aimux leaves
 //! out the runtime fragments (`node.js/…`), as for every provider.
 //!
 //! The versions are literals on purpose: a test that reads the pin could not
@@ -34,7 +34,7 @@ use aimux_providers::{
 
 /// What `@ai-sdk/amazon-bedrock@5.0.100` sends, runtime fragments removed.
 const BEDROCK_UA: &str =
-    "ai-sdk-amazon-bedrock/5.0.100 ai-sdk-provider-utils/5.0.53 ai-sdk-amazon-bedrock/5.0.100";
+    "ai-sdk-amazon-bedrock/5.0.100 ai-sdk-provider-utils/5.0.51 ai-sdk-amazon-bedrock/5.0.100";
 
 async fn sent_user_agent(server: &MockServer) -> String {
     let requests = server.received_requests().await.unwrap();
@@ -130,8 +130,14 @@ async fn bedrock_sigv4_user_agent_matches_the_ai_sdk() {
         authorization.starts_with("AWS4-HMAC-SHA256 "),
         "{authorization}"
     );
-    // The user-agent is complete before signing, so it is the one signed.
-    assert!(authorization.contains("user-agent"), "{authorization}");
+    // Like aws4fetch in @ai-sdk/amazon-bedrock@5.0.100 (captured
+    // `SignedHeaders=host;x-amz-date`): the user-agent is sent, not signed.
+    assert!(
+        authorization.contains(" SignedHeaders=host;x-amz-date, "),
+        "{authorization}"
+    );
+    let requests = server.received_requests().await.unwrap();
+    assert!(!requests[0].headers.contains_key("x-amz-content-sha256"));
     assert_eq!(sent_user_agent(&server).await, BEDROCK_UA);
 }
 
@@ -282,4 +288,99 @@ async fn anthropic_aws_sigv4_user_agent() {
         .await;
     assert!(authorization.unwrap().starts_with("AWS4-HMAC-SHA256 "));
     assert_eq!(ua, ANTHROPIC_AWS_UA);
+}
+
+fn bedrock_api_key_provider(
+    server: &MockServer,
+) -> aimux_providers::bedrock::AmazonBedrockProvider {
+    create_amazon_bedrock(AmazonBedrockProviderSettings {
+        base_url: Some(server.uri()),
+        api_key: Some("test-auth".to_string().into()),
+        region: Some("us-east-1".to_string()),
+        ..Default::default()
+    })
+    .unwrap()
+}
+
+#[tokio::test]
+async fn bedrock_chat_user_agent_matches_the_ai_sdk() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/model/amazon.nova-pro-v1%3A0/converse"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "output": { "message": { "role": "assistant", "content": [{ "text": "ok" }] } },
+            "stopReason": "end_turn",
+            "usage": { "inputTokens": 1, "outputTokens": 1, "totalTokens": 2 }
+        })))
+        .mount(&server)
+        .await;
+    bedrock_api_key_provider(&server)
+        .chat("amazon.nova-pro-v1:0")
+        .do_generate(&chat_options())
+        .await
+        .unwrap();
+    assert_eq!(sent_user_agent(&server).await, BEDROCK_UA);
+}
+
+#[tokio::test]
+async fn bedrock_stream_user_agent_matches_the_ai_sdk() {
+    use futures::StreamExt;
+    let server = MockServer::start().await;
+    let body = aimux_providers::bedrock::event_stream::encode_messages(&[
+        ("event", "messageStart", r#"{"role":"assistant"}"#),
+        ("event", "messageStop", r#"{"stopReason":"end_turn"}"#),
+    ]);
+    Mock::given(method("POST"))
+        .and(path("/model/amazon.nova-pro-v1%3A0/converse-stream"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/vnd.amazon.eventstream")
+                .set_body_bytes(body),
+        )
+        .mount(&server)
+        .await;
+    let result = bedrock_api_key_provider(&server)
+        .chat("amazon.nova-pro-v1:0")
+        .do_stream(&chat_options())
+        .await
+        .unwrap();
+    let _parts: Vec<_> = result.stream.collect().await;
+    assert_eq!(sent_user_agent(&server).await, BEDROCK_UA);
+}
+
+#[tokio::test]
+async fn bedrock_mantle_preset_user_agent_follows_a_caller_user_agent() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "c", "object": "chat.completion", "created": 0, "model": "m",
+            "choices": [{ "index": 0, "finish_reason": "stop",
+                "message": { "role": "assistant", "content": "ok" } }],
+        })))
+        .mount(&server)
+        .await;
+    let provider = create_provider(
+        "bedrock_mantle",
+        PresetSettings {
+            api_key: Some(Resolvable::Value("k".to_string())),
+            base_url: Some(server.uri()),
+            headers: Some(HashMap::from([(
+                "User-Agent".to_string(),
+                Some("app/1".to_string()),
+            )])),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    provider
+        .language_model("openai.gpt-oss-120b")
+        .unwrap()
+        .do_generate(&chat_options())
+        .await
+        .unwrap();
+    assert_eq!(
+        sent_user_agent(&server).await,
+        format!("app/1 {BEDROCK_UA}")
+    );
 }

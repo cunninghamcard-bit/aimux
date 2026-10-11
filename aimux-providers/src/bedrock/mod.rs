@@ -363,11 +363,12 @@ struct BedrockAuthFetch {
 impl Fetch for BedrockAuthFetch {
     async fn fetch(&self, mut request: FetchRequest) -> Result<FetchResponse, FetchError> {
         // The transport's `ai-sdk-amazon-bedrock/<v>`, after the helper's
-        // `ai-sdk-provider-utils/<v>` and before signing, like the API-key
-        // fetch (inject-fetch-headers.ts:23) and the SigV4 fetch
-        // (amazon-bedrock-sigv4-fetch.ts:46, :133).
-        crate::shared::append_user_agent(
+        // `ai-sdk-provider-utils/<v>` (the 5.0.51 that amazon-bedrock pins)
+        // and before signing, like amazon-bedrock-sigv4-fetch.ts:46 (SigV4)
+        // and :133 (API key).
+        crate::shared::transport_user_agent(
             &mut request.headers,
+            Some(crate::shared::aisdk_pins::AMAZON_BEDROCK_PROVIDER_UTILS),
             &format!(
                 "ai-sdk-amazon-bedrock/{}",
                 crate::shared::aisdk_pins::AMAZON_BEDROCK
@@ -415,7 +416,9 @@ pub fn create_amazon_bedrock(
                 async move { auth.credentials().await }
             }),
             SIGV4_SERVICE,
-        ),
+        )
+        // aws4fetch (amazon-bedrock-sigv4-fetch.ts:75) signs `host;x-amz-date`.
+        .without_content_sha256(),
         inner,
     });
 
