@@ -2,11 +2,11 @@
 //!
 //! `fixtures/aisdk/provider-utils/t3-unattributable-deltas.json` holds the
 //! deltas for each case plus what `@ai-sdk/provider-utils@5.0.53`
-//! `StreamingToolCallTracker` (typeValidation `'if-present'`, as the openai
-//! chat model uses) emitted for them, recorded by
+//! `StreamingToolCallTracker` emitted for them with the case's
+//! `typeValidation` (`'if-present'`: openai chat; `'required'`: groq;
+//! `'none'`: openai-compatible), recorded by
 //! `scripts/gen-t3-tracker-fixture.mjs`. Each case asserts aimux's tracker,
-//! configured as `openai/model.rs` configures it, matches per delta, on the
-//! error, and on flush.
+//! configured the same way, matches per delta, on the error, and on flush.
 
 use aimux_core::error::AiMuxError;
 use aimux_core::stream_part::StreamPart;
@@ -38,6 +38,18 @@ fn to_aisdk(part: StreamPart) -> Value {
     }
 }
 
+thread_local! {
+    static NEXT_ID: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn generate_id() -> String {
+    NEXT_ID.with(|n| {
+        let id = n.get();
+        n.set(id + 1);
+        format!("gen-{id}")
+    })
+}
+
 fn opt_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(Value::as_str)
 }
@@ -45,10 +57,17 @@ fn opt_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 fn run_case(case: &Value) {
     let name = case["name"].as_str().unwrap();
     let expected = &case["aisdk"];
-    // No case reaches id generation (every started call carries a wire id).
+    // Ids are generated `gen-0`, `gen-1`, ... like the recording script.
+    NEXT_ID.with(|n| n.set(0));
+    let type_validation = match case["typeValidation"].as_str().unwrap() {
+        "if-present" => TypeValidation::IfPresent,
+        "required" => TypeValidation::Required,
+        "none" => TypeValidation::None,
+        other => panic!("{name}: unknown typeValidation {other}"),
+    };
     let mut tracker = StreamingToolCallTracker::new()
-        .with_generate_id(|| "gen-0".to_string())
-        .with_type_validation(TypeValidation::IfPresent);
+        .with_generate_id(generate_id)
+        .with_type_validation(type_validation);
     let mut steps = Vec::new();
     let mut error = Value::Null;
     for d in case["deltas"].as_array().unwrap() {
@@ -95,10 +114,16 @@ fn case(name: &str) -> Value {
         .clone()
 }
 
+/// Every recorded case, including the typeValidation `required` (groq,
+/// groq/model.rs:377) and `none` (openai-compatible) and interleaved ones.
 #[test]
-fn fixture_covers_exactly_the_four_t3_cases() {
+fn every_fixture_case_matches_the_aisdk_tracker() {
     let fixture: Value = serde_json::from_str(FIXTURE).unwrap();
-    assert_eq!(fixture["cases"].as_array().unwrap().len(), 4);
+    let cases = fixture["cases"].as_array().unwrap();
+    assert!(!cases.is_empty());
+    for case in cases {
+        run_case(case);
+    }
 }
 
 /// streaming-tool-call-tracker.ts:142-144.

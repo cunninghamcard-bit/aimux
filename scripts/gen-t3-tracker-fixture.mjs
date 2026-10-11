@@ -1,6 +1,6 @@
 // Regenerates fixtures/aisdk/provider-utils/t3-unattributable-deltas.json by
 // replaying each case's deltas through the pinned @ai-sdk/provider-utils
-// StreamingToolCallTracker (typeValidation 'if-present', as openai chat).
+// StreamingToolCallTracker with each case's typeValidation (default 'if-present').
 // Usage: node scripts/gen-t3-tracker-fixture.mjs <node_modules dir with @ai-sdk/provider-utils@5.0.53>
 import fs from 'node:fs';
 import path from 'node:path';
@@ -17,7 +17,7 @@ for (const c of fx.cases) {
   let parts = [];
   let n = 0;
   const t = new StreamingToolCallTracker({ enqueue: p => parts.push(p) }, {
-    typeValidation: 'if-present', generateId: () => `gen-${n++}`,
+    typeValidation: c.typeValidation ?? 'if-present', generateId: () => `gen-${n++}`,
   });
   let error = null;
   for (const d of c.deltas) {
