@@ -631,19 +631,13 @@ async fn chat_stream_basic() {
     fixture.assert_request(&sent, &bearer(KEY));
 
     // A.2: compare the text parts one by one with the recorded AI SDK
-    // `result.parts`. Parts only the ai layer emits (start, start-step,
-    // finish-step) are dropped; text-start/delta/end are compared by id and
-    // text in order; finish is compared by finishReason and usage.
+    // `result.parts`: only text-start/delta/end are kept (which also drops
+    // the ai-layer-only start, start-step and finish-step), compared by id
+    // and text in order; finish is compared by finishReason and usage.
     let expected = &fixture.json["result"]["parts"];
     let expected = expected.as_array().expect("result.parts");
     let expected_text: Vec<(String, String, Option<String>)> = expected
         .iter()
-        .filter(|part| {
-            !matches!(
-                part["type"].as_str(),
-                Some("start" | "start-step" | "finish-step")
-            )
-        })
         .filter_map(|part| {
             let kind = part["type"].as_str()?;
             kind.starts_with("text-").then(|| {
@@ -698,7 +692,6 @@ async fn chat_stream_basic() {
             _ => None,
         })
         .collect();
-    assert_eq!(core_text.len(), 4, "{core_text:?}");
     assert_eq!(core_text, expected_text);
 
     let expected_finish = expected
