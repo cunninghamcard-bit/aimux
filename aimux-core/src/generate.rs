@@ -1233,6 +1233,10 @@ pub async fn stream_text(
                             }});
                         }
                     }
+                    // ai@7.0.127 stream-text.ts:2881-2891: an empty text delta
+                    // without provider metadata is not forwarded (providers
+                    // emit one, e.g. OpenAI chat's opening `"content":""`).
+                    Ok(StreamPart::TextDelta { delta, provider_metadata: None, .. }) if delta.is_empty() => {}
                     Ok(part) => yield Ok(part.map_payloads(|_| unreachable!("matched above"), |_| unreachable!("matched above"))
                         .map_reasoning_file(|file| ReasoningFileOutput { provider_metadata: file.provider_metadata.clone(), file })
                         .into_text_stream_part().expect("provider lifecycle parts handled above")),

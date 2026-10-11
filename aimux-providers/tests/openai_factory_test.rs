@@ -26,6 +26,7 @@ use serial_test::serial;
 
 use aimux_core::AiMuxError;
 use aimux_core::embedding_model::{EmbeddingCallOptions, EmbeddingModel};
+use aimux_core::generate::{GenerateTextOptions, stream_text};
 use aimux_core::language_model::LanguageModel;
 use aimux_core::language_model_message::{
     AssistantPart, LanguageModelMessage, LanguageModelPrompt, TextPart,
@@ -33,7 +34,7 @@ use aimux_core::language_model_message::{
 use aimux_core::message::Role;
 use aimux_core::options::CallOptions;
 use aimux_core::result::{GenerateContent, GenerateResult};
-use aimux_core::stream_part::StreamPart;
+use aimux_core::stream_part::{StreamPart, TextStreamPart};
 use aimux_core::tool::{FunctionTool, Tool, ToolChoice};
 use aimux_core::types::FinishReasonUnified;
 use aimux_provider_utils::{
@@ -652,27 +653,46 @@ async fn chat_stream_basic() {
         .iter()
         .filter_map(|part| match part {
             StreamPart::TextStart { id, .. } => Some(("text-start".into(), id.clone(), None)),
-            // The ai layer drops empty deltas without provider metadata
-            // (ai@7.0.127 stream-text.ts:2881-2891); the provider layer emits
-            // them (openai@4.0.83 openai-chat-language-model.ts:623-633), and
-            // so does aimux for the first `"content":""` chunk.
-            StreamPart::TextDelta {
-                id,
-                delta,
-                provider_metadata,
-            } if !delta.is_empty() || provider_metadata.is_some() => {
+            StreamPart::TextDelta { id, delta, .. } => {
                 Some(("text-delta".into(), id.clone(), Some(delta.clone())))
             }
             StreamPart::TextEnd { id, .. } => Some(("text-end".into(), id.clone(), None)),
             _ => None,
         })
         .collect();
-    assert!(
-        parts
-            .iter()
-            .any(|part| matches!(part, StreamPart::TextDelta { delta, .. } if delta.is_empty()))
-    );
-    assert_eq!(actual_text, expected_text);
+    // The provider layer emits the empty first delta for the opening
+    // `"content":""` chunk, like openai@4.0.83
+    // openai-chat-language-model.ts:623-633; the recorded ai-layer parts do
+    // not have it (ai@7.0.127 stream-text.ts:2881-2891).
+    let mut provider_expected = expected_text.clone();
+    provider_expected.insert(1, ("text-delta".into(), "0".into(), Some(String::new())));
+    assert_eq!(actual_text, provider_expected);
+
+    // A.6: core `stream_text` drops it like the ai layer, so its text parts
+    // equal the recorded ones with no filtering.
+    let core_mock = fixture.mock();
+    let core_model = create_openai(settings(&core_mock)).unwrap().chat("gpt-4o");
+    let prompt = fixture.sdk_input()["prompt"].as_str().unwrap().to_string();
+    let core_parts: Vec<TextStreamPart> =
+        stream_text(&core_model, prompt, GenerateTextOptions::default())
+            .await
+            .unwrap()
+            .stream
+            .map(|part| part.expect("no stream error"))
+            .collect()
+            .await;
+    let core_text: Vec<(String, String, Option<String>)> = core_parts
+        .iter()
+        .filter_map(|part| match part {
+            TextStreamPart::TextStart { id, .. } => Some(("text-start".into(), id.clone(), None)),
+            TextStreamPart::TextDelta { id, delta, .. } => {
+                Some(("text-delta".into(), id.clone(), Some(delta.clone())))
+            }
+            TextStreamPart::TextEnd { id, .. } => Some(("text-end".into(), id.clone(), None)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(core_text, expected_text);
 
     let expected_finish = expected
         .iter()
