@@ -4,9 +4,8 @@
 //!
 //! Provides the pluggable [`Fetch`] transport, one-exchange HTTP helpers,
 //! response handlers, API key and setting loading, [`Resolvable`] values and
-//! layered header management, URL utilities and the streamed tool-call
-//! tracker for the OpenAI chat-completions wire format — the Rust equivalents
-//! of `@ai-sdk/provider-utils`. Operation retry and timeout live in
+//! layered header management and URL utilities — the Rust equivalents of
+//! `@ai-sdk/provider-utils`. Operation retry and timeout live in
 //! `aimux-core`.
 
 pub mod api_key;
@@ -28,8 +27,8 @@ pub mod read_response_with_size_limit;
 pub mod resolvable;
 pub mod response_handler;
 pub mod sigv4_fetch;
-pub mod streaming_tool_call_argument_state;
-pub mod streaming_tool_call_tracker;
+mod streaming_tool_call_argument_state;
+mod streaming_tool_call_tracker;
 pub mod transform_stream;
 pub mod url;
 /// WebSocket client for realtime provider APIs (RFC-0028). Empty unless the
@@ -66,9 +65,13 @@ pub use response_handler::{
     invalid_response_api_call, stream_error_api_call,
 };
 pub use sigv4_fetch::{AwsCredentials, SigV4Fetch};
+// Protocol-internal streaming tool-call accumulator (T2, A8): the modules are
+// private; only these names are exported, for the provider implementations.
+#[doc(hidden)]
 pub use streaming_tool_call_argument_state::{
     StreamingToolCallArgumentState, starts_with_structured_value,
 };
+#[doc(hidden)]
 pub use streaming_tool_call_tracker::{
     StreamingToolCallDelta, StreamingToolCallTracker, TrackerError, TypeValidation,
 };
