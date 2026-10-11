@@ -290,13 +290,6 @@ pub struct OpenAIProvider {
 }
 
 impl OpenAIProvider {
-    /// The same provider without a credential: no key is resolved and no
-    /// `Authorization` header is sent (`auth = none`).
-    pub(crate) fn without_credential(mut self) -> Self {
-        self.headers.credential = Credential::None;
-        self
-    }
-
     /// The same provider reading its default env key from `env` (tests).
     #[cfg(test)]
     pub(crate) fn with_env_source(mut self, env: crate::shared::EnvSource) -> Self {
