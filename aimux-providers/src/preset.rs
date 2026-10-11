@@ -377,6 +377,7 @@ fn assemble(
         (AuthMode::ApiKey, None) => Credential::Env {
             var: descriptor.env_var.to_string(),
             description: descriptor.display.to_string(),
+            source: crate::shared::EnvSource::Process,
         },
         (AuthMode::None, None) => Credential::None,
     };

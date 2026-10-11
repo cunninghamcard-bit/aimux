@@ -7,7 +7,9 @@ import test from 'ava'
 import { createServer, type Server } from 'node:http'
 import {
   openai,
+  anthropic,
   provider,
+  createProvider,
   mockReplay,
   streamText,
   AimuxError,
@@ -280,4 +282,98 @@ test.serial('a missing provider setting is a LoadSettingError at call time', asy
   } finally {
     if (saved !== undefined) process.env.AZURE_RESOURCE_NAME = saved
   }
+})
+
+// A6 item 3: `bodyOverrides` no longer exists, so it fails like any other
+// unknown config key (not with a dedicated "no longer supported" message).
+for (const key of ['bodyOverrides', 'body_overrides', 'notAField']) {
+  test(`provider() rejects config key ${key} as an unknown field`, async (t) => {
+    const config = { [key]: '{"temperature":0}' } as any
+    for (const make of [
+      () => provider('groq', 'sk-test-fake-key', 'llama-3.3-70b', config),
+      () => createProvider('groq', 'sk-test-fake-key', config),
+      () => openai('sk-test-fake-key', 'gpt-4o', config),
+    ]) {
+      // A refused config rejects the returned promise; it never throws
+      // synchronously.
+      const p = make()
+      t.true(p instanceof Promise)
+      const err = (await t.throwsAsync(p)) as AimuxError
+      t.true(err instanceof InvalidArgumentError)
+      t.regex(err.message, new RegExp(`unknown field \`${key}\``))
+      t.notRegex(err.message, /no longer supported/)
+    }
+  })
+}
+
+test('provider() still accepts the known config keys', async (t) => {
+  const model = await provider('groq', 'sk-test-fake-key', 'llama-3.3-70b', {
+    baseUrl: 'http://127.0.0.1:1',
+    headers: '{"X-Test":"1"}',
+  })
+  t.truthy(model)
+})
+
+test('provider config maxRetries points to the call options, not a generic unknown field', async (t) => {
+  const config = { maxRetries: 0 } as any
+  for (const make of [
+    () => provider('groq', 'sk-test-fake-key', 'llama-3.3-70b', config),
+    () => createProvider('groq', 'sk-test-fake-key', config),
+    () => openai('sk-test-fake-key', 'gpt-4o', config),
+  ]) {
+    const p = make()
+    t.true(p instanceof Promise)
+    const err = (await t.throwsAsync(p)) as AimuxError
+    t.true(err instanceof InvalidArgumentError)
+    t.regex(err.message, /call-level option: pass it in the call options \(`maxRetries`\)/)
+    t.notRegex(err.message, /unknown field/)
+  }
+})
+
+test('a config of the wrong type rejects the promise, never throws synchronously', async (t) => {
+  for (const [make, pattern] of [
+    // provider / createProvider take a ProviderConfig only: a string is wrong.
+    [() => provider('groq', 'sk-test-fake-key', 'llama-3.3-70b', 'oops' as any), /a ProviderConfig object, got a string/],
+    [() => createProvider('groq', 'sk-test-fake-key', 'oops' as any), /a ProviderConfig object, got a string/],
+    // `string | ProviderConfig` constructors: a string is a base URL, so use
+    // a number and an array.
+    [() => openai('sk-test-fake-key', 'gpt-4o', 42 as any), /base URL string or a ProviderConfig object, got a number/],
+    [() => openai('sk-test-fake-key', 'gpt-4o', [] as any), /base URL string or a ProviderConfig object, got an array/],
+    [() => anthropic('sk-test-fake-key', 'claude', 42 as any), /got a number/],
+  ] as const) {
+    const p = make()
+    t.true(p instanceof Promise)
+    const err = (await t.throwsAsync(p)) as AimuxError
+    t.true(err instanceof InvalidArgumentError, String(err))
+    t.regex(err.message, pattern)
+  }
+})
+
+test('provider config keys set to undefined are treated as absent', async (t) => {
+  const model = await provider('groq', 'sk-test-fake-key', 'llama-3.3-70b', {
+    baseUrl: undefined,
+    headers: undefined,
+  })
+  t.truthy(model)
+})
+
+test('a boolean config rejects the promise', async (t) => {
+  for (const make of [
+    () => provider('groq', 'sk-test-fake-key', 'llama-3.3-70b', true as any),
+    () => createProvider('groq', 'sk-test-fake-key', true as any),
+    () => openai('sk-test-fake-key', 'gpt-4o', true as any),
+  ]) {
+    const p = make()
+    t.true(p instanceof Promise)
+    const err = (await t.throwsAsync(p)) as AimuxError
+    t.true(err instanceof InvalidArgumentError, String(err))
+    t.regex(err.message, /got a boolean/)
+  }
+})
+
+// TS types allow `| null` for the optional config: null means absent.
+test('a null config resolves as if absent', async (t) => {
+  t.truthy(await provider('groq', 'sk-test-fake-key', 'llama-3.3-70b', null as any))
+  t.truthy(await createProvider('groq', 'sk-test-fake-key', null as any))
+  t.truthy(await openai('sk-test-fake-key', 'gpt-4o', null as any))
 })

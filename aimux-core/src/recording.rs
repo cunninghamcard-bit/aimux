@@ -210,22 +210,6 @@ pub struct ProviderRecord {
     pub provider: String,
     /// `model.model_id()`,如 "gpt-4o"。
     pub model_id: String,
-    /// Decision connection snapshot (#226, RFC-0038 录制): the provider base
-    /// URL. Informational only: replay takes the endpoint from the caller's
-    /// registry. Absent for every other operation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base_url: Option<String>,
-    /// Where the credential came from, never its value: `"env:VAR"`,
-    /// `"explicit"` or `"none"` (#226).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_key_source: Option<String>,
-    /// Decision capabilities and default protocol (#226).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile: Option<serde_json::Value>,
-    /// Connection options (headers, retries); sensitive headers are redacted
-    /// when recorded (#226).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_options: Option<serde_json::Value>,
 }
 
 impl ProviderRecord {
@@ -236,10 +220,6 @@ impl ProviderRecord {
             provider_id: provider_id.to_string(),
             provider: provider.to_string(),
             model_id: model_id.to_string(),
-            base_url: None,
-            api_key_source: None,
-            profile: None,
-            provider_options: None,
         }
     }
 
@@ -250,14 +230,6 @@ impl ProviderRecord {
     pub fn from_model(provider: &str, model_id: &str) -> Self {
         let provider_id = provider.split('.').next().unwrap_or_default();
         Self::new(provider_id, provider, model_id)
-    }
-
-    /// The same record with sensitive keys in `provider_options` redacted:
-    /// what a recorder may write.
-    #[must_use]
-    pub fn redacted(mut self) -> Self {
-        self.provider_options = self.provider_options.map(redact_json);
-        self
     }
 }
 
@@ -662,13 +634,6 @@ pub fn is_sensitive_key(name: &str) -> bool {
         || squashed.ends_with("token")
         || n.contains("authorization")
         || squashed.contains("apikey")
-}
-
-/// Redact sensitive keys of a provider-options snapshot (#226): what
-/// [`ProviderRecord::redacted`] applies, for providers building one.
-#[must_use]
-pub fn redact_provider_options(value: serde_json::Value) -> serde_json::Value {
-    redact_json(value)
 }
 
 /// 递归脱敏(JSON 中含敏感键的项值替换为 `[REDACTED]`)。
@@ -1999,6 +1964,29 @@ mod tests {
             )
             .unwrap(),
         )
+    }
+
+    /// Recordings written before R.4 carried #226's `baseUrl` / `profile` /
+    /// `providerOptions` in the provider record. `ProviderRecord` is not
+    /// `deny_unknown_fields`, so they still load (and replay) as identity.
+    #[test]
+    fn provider_record_ignores_removed_snapshot_fields() {
+        let old = serde_json::json!({
+            "providerId": "openai",
+            "provider": "openai",
+            "modelId": "gpt-6-luna",
+            "baseUrl": "https://api.openai.com/v1",
+            "apiKeySource": "env:OPENAI_API_KEY",
+            "profile": {"decision_capabilities": {}},
+            "providerOptions": {"headers": {"x-api-key": "[REDACTED]"}}
+        });
+        let record: ProviderRecord = serde_json::from_value(old).unwrap();
+        assert_eq!(record.provider_id, "openai");
+        assert_eq!(record.model_id, "gpt-6-luna");
+        assert_eq!(
+            serde_json::to_value(&record).unwrap(),
+            serde_json::json!({"providerId": "openai", "provider": "openai", "modelId": "gpt-6-luna"})
+        );
     }
 
     #[test]
