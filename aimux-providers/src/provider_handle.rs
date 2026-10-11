@@ -58,8 +58,9 @@ fn non_empty_env(name: &str) -> Option<String> {
 ///
 /// - `openai`: `api_key = None` reads the package default `OPENAI_API_KEY` at
 ///   request time (#200:538); `Some("")` is used as given and never falls
-///   back (RFC-0040:67). With `options.base_url` set and no key, no env is
-///   read and no credential is sent.
+///   back (RFC-0040:67). A changed `options.base_url` changes only the
+///   request URL: without a key, `OPENAI_API_KEY` is still read at request
+///   time (D27; AI SDK `openai-provider.ts:219-232`).
 /// - local runtimes: `api_key = None` is `auth = none`: no `Authorization`
 ///   header is sent (RFC-0040:155, D24);
 ///   no `{NAME}_API_KEY` is read. The base URL is `options.base_url`, else
@@ -107,7 +108,6 @@ fn provider_handle_with(
         .map(|(name, value)| (name, Some(value)))
         .collect();
     let inner: Arc<dyn Provider> = if name == "openai" {
-        let auth_none = api_key.is_none() && options.base_url.is_some();
         let provider = crate::create_openai(OpenAIProviderSettings {
             base_url: options.base_url.clone(),
             api_key,
@@ -120,11 +120,7 @@ fn provider_handle_with(
         })?;
         #[cfg(test)]
         let provider = provider.with_env_source(handles.env);
-        Arc::new(if auth_none {
-            provider.without_credential()
-        } else {
-            provider
-        })
+        Arc::new(provider)
     } else {
         if let Some(organization) = &options.organization {
             headers.insert("OpenAI-Organization".into(), Some(organization.clone()));
@@ -416,12 +412,13 @@ mod env_tests {
         assert!(reads(&env).is_empty(), "{:?}", reads(&env));
     }
 
-    /// (4a) A changed base URL without a key reads no env and sends no
-    /// credential.
+    /// (4a) D27: a changed base URL only changes the URL. Without a key the
+    /// default `OPENAI_API_KEY` is still read, at request time: the key is
+    /// put into the env after the handle and the model exist.
     #[tokio::test]
-    async fn changed_base_url_does_not_read_env() {
+    async fn changed_base_url_reads_env_at_request_time() {
         let server = mock("/v1/decisions", "openai").await;
-        let env = env(&[("OPENAI_API_KEY", "sk-from-env")]);
+        let env = env(&[]);
         let handle = openai(
             None,
             Some(ProviderOptions {
@@ -431,14 +428,39 @@ mod env_tests {
             &env,
             &server,
         );
-        decide(
-            handle.decision_model("gpt-6-luna").unwrap().as_ref(),
-            options("openai"),
-        )
-        .await
-        .unwrap();
-        assert_eq!(authorization(&server).await, vec![None]);
-        assert!(reads(&env).is_empty(), "{:?}", reads(&env));
+        let model = handle.decision_model("gpt-6-luna").unwrap();
+        assert!(reads(&env).is_empty(), "read at construction");
+        env.lock()
+            .unwrap()
+            .vars
+            .insert("OPENAI_API_KEY".into(), "sk-from-env".into());
+        decide(model.as_ref(), options("openai")).await.unwrap();
+        assert_eq!(
+            authorization(&server).await,
+            vec![Some("Bearer sk-from-env".into())]
+        );
+        assert_eq!(reads(&env), vec!["OPENAI_API_KEY".to_string()]);
+    }
+
+    /// D27: a changed base URL with no key and no env fails the request with
+    /// `LoadApiKey`, and nothing is sent.
+    #[tokio::test]
+    async fn changed_base_url_without_env_fails_the_request() {
+        let server = mock("/v1/decisions", "openai").await;
+        let env = env(&[]);
+        let handle = openai(
+            None,
+            Some(ProviderOptions {
+                base_url: Some(format!("{}/v1", server.uri())),
+                ..Default::default()
+            }),
+            &env,
+            &server,
+        );
+        let model = handle.decision_model("gpt-6-luna").unwrap();
+        let error = decide(model.as_ref(), options("openai")).await.unwrap_err();
+        assert!(matches!(error, AiMuxError::LoadApiKey { .. }), "{error:?}");
+        assert!(authorization(&server).await.is_empty());
     }
 
     /// (4b) `auth = none` (a keyless local runtime) reads no env.
