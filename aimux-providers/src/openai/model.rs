@@ -807,3 +807,62 @@ pub(crate) async fn list_models_once(
         })
         .collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    /// `encode_chat` is pure: its URL and headers are passed through as given
+    /// and the body is built from the model id, options and stream flag.
+    #[test]
+    fn encode_chat_is_plain_data_from_its_inputs() {
+        let options = CallOptions {
+            prompt: serde_json::from_value(json!([
+                { "role": "user", "content": [{ "type": "text", "text": "hi" }] }
+            ]))
+            .unwrap(),
+            max_output_tokens: Some(5),
+            ..CallOptions::default()
+        };
+        let headers = vec![("authorization".to_string(), "Bearer k".to_string())];
+        let url = "https://example.test/v1/chat/completions".to_string();
+
+        let encoded = encode_chat(
+            url.clone(),
+            headers.clone(),
+            "gpt-4o",
+            &options,
+            false,
+            super::super::options::parse_chat_options,
+        )
+        .unwrap();
+        assert_eq!(encoded.url, url);
+        assert_eq!(encoded.headers, headers);
+        assert!(encoded.warnings.is_empty(), "{:?}", encoded.warnings);
+        assert_eq!(
+            encoded.body,
+            json!({
+                "model": "gpt-4o",
+                "max_tokens": 5,
+                "messages": [{ "role": "user", "content": "hi" }],
+            })
+        );
+
+        let streamed = encode_chat(
+            url,
+            headers,
+            "gpt-4o",
+            &options,
+            true,
+            super::super::options::parse_chat_options,
+        )
+        .unwrap();
+        assert_eq!(streamed.body["stream"], json!(true));
+        assert_eq!(
+            streamed.body["stream_options"],
+            json!({ "include_usage": true })
+        );
+    }
+}

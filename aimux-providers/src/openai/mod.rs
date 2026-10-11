@@ -261,7 +261,7 @@ pub fn create_openai(settings: OpenAIProviderSettings) -> Result<OpenAIProvider,
             .collect(),
             settings.headers,
         )
-        .with_user_agent("openai", "4.0.80"),
+        .with_user_agent("openai", "4.0.83"),
         fetch: settings.fetch,
         #[cfg(feature = "realtime")]
         web_socket: settings.web_socket,
