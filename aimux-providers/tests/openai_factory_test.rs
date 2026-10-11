@@ -629,14 +629,55 @@ async fn chat_stream_basic() {
     let sent = seen.remove(0);
     fixture.assert_request(&sent, &bearer(KEY));
 
-    let text: String = parts
+    // A.2: compare the text parts one by one with the recorded AI SDK
+    // `result.parts`: only text-start/delta/end are kept (which also drops
+    // the ai-layer-only start, start-step and finish-step), compared by id
+    // and text in order; finish is compared by finishReason and usage.
+    let expected = &fixture.json["result"]["parts"];
+    let expected = expected.as_array().expect("result.parts");
+    let expected_text: Vec<(String, String, Option<String>)> = expected
+        .iter()
+        .filter_map(|part| {
+            let kind = part["type"].as_str()?;
+            kind.starts_with("text-").then(|| {
+                (
+                    kind.to_string(),
+                    part["id"].as_str().unwrap().to_string(),
+                    part["text"].as_str().map(str::to_string),
+                )
+            })
+        })
+        .collect();
+    let actual_text: Vec<(String, String, Option<String>)> = parts
         .iter()
         .filter_map(|part| match part {
-            StreamPart::TextDelta { delta, .. } => Some(delta.as_str()),
+            StreamPart::TextStart { id, .. } => Some(("text-start".into(), id.clone(), None)),
+            // The ai layer drops empty deltas without provider metadata
+            // (ai@7.0.127 stream-text.ts:2881-2891); the provider layer emits
+            // them (openai@4.0.83 openai-chat-language-model.ts:623-633), and
+            // so does aimux for the first `"content":""` chunk.
+            StreamPart::TextDelta {
+                id,
+                delta,
+                provider_metadata,
+            } if !delta.is_empty() || provider_metadata.is_some() => {
+                Some(("text-delta".into(), id.clone(), Some(delta.clone())))
+            }
+            StreamPart::TextEnd { id, .. } => Some(("text-end".into(), id.clone(), None)),
             _ => None,
         })
         .collect();
-    assert_eq!(text, "Hello world");
+    assert!(
+        parts
+            .iter()
+            .any(|part| matches!(part, StreamPart::TextDelta { delta, .. } if delta.is_empty()))
+    );
+    assert_eq!(actual_text, expected_text);
+
+    let expected_finish = expected
+        .iter()
+        .find(|part| part["type"] == "finish")
+        .expect("a recorded finish part");
     let finish = parts.iter().find_map(|part| match part {
         StreamPart::Finish {
             finish_reason,
@@ -647,8 +688,35 @@ async fn chat_stream_basic() {
     });
     let (reason, usage) = finish.expect("a finish part");
     assert_eq!(reason.unified, FinishReasonUnified::Stop);
-    assert_eq!(usage.input_tokens.total, Some(12));
-    assert_eq!(usage.output_tokens.total, Some(2));
+    assert_eq!(json!(reason.unified), expected_finish["finishReason"]);
+    assert_eq!(
+        reason.raw.as_deref(),
+        expected_finish["rawFinishReason"].as_str()
+    );
+    let total = &expected_finish["totalUsage"];
+    let n = |v: &Value| v.as_u64().map(|n| n as u32);
+    assert_eq!(usage.input_tokens.total, n(&total["inputTokens"]));
+    assert_eq!(
+        usage.input_tokens.no_cache,
+        n(&total["inputTokenDetails"]["noCacheTokens"])
+    );
+    assert_eq!(
+        usage.input_tokens.cache_read,
+        n(&total["inputTokenDetails"]["cacheReadTokens"])
+    );
+    assert_eq!(usage.output_tokens.total, n(&total["outputTokens"]));
+    assert_eq!(
+        usage.output_tokens.text,
+        n(&total["outputTokenDetails"]["textTokens"])
+    );
+    assert_eq!(
+        usage.output_tokens.reasoning,
+        n(&total["outputTokenDetails"]["reasoningTokens"])
+    );
+    assert_eq!(
+        usage.input_tokens.total.unwrap() + usage.output_tokens.total.unwrap(),
+        n(&total["totalTokens"]).unwrap()
+    );
 }
 
 #[tokio::test]
