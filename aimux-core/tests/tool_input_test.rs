@@ -30,10 +30,10 @@ async fn parses_and_validates_exact_json() {
     tool_call.dynamic = Some(true);
     let call = parse_tool_call(tool_call, Some(&[weather_tool()]), None, &[], None).await;
 
-    assert_eq!(call.input, json!({ "city": "Singapore", "days": 3 }));
-    assert_eq!(call.dynamic, None);
-    assert_eq!(call.invalid, None);
-    assert!(call.error.is_none());
+    assert_eq!(*call.input(), json!({ "city": "Singapore", "days": 3 }));
+    assert!(!call.is_dynamic());
+    assert!(!call.is_invalid());
+    assert!(call.error().is_none());
 }
 
 /// TS: should successfully process empty tool calls for tools that have no inputSchema
@@ -52,8 +52,8 @@ async fn validates_empty_input_as_an_empty_object() {
     )
     .await;
 
-    assert_eq!(call.input, json!({}));
-    assert_eq!(call.invalid, None);
+    assert_eq!(*call.input(), json!({}));
+    assert!(!call.is_invalid());
 }
 
 /// TS: should throw InvalidToolInputError when args are invalid
@@ -69,10 +69,10 @@ async fn preserves_parsed_input_when_schema_validation_fails() {
     )
     .await;
 
-    assert_eq!(call.input, json!({ "city": 7 }));
-    assert_eq!(call.invalid, Some(true));
+    assert_eq!(*call.input(), json!({ "city": 7 }));
+    assert!(call.is_invalid());
     assert!(matches!(
-        call.error,
+        call.error(),
         Some(AiMuxError::InvalidToolInput { .. })
     ));
 }
@@ -92,13 +92,13 @@ async fn unknown_tool_is_an_invalid_dynamic_call_with_available_tools() {
     // The arguments still parse: `response_messages` drops a non-structured
     // input from the next turn's transcript, so an unknown tool called with
     // perfectly good arguments must not arrive here as raw text.
-    assert_eq!(call.input, json!({ "city": "Tokyo" }));
-    assert_eq!(call.dynamic, Some(true));
-    assert_eq!(call.invalid, Some(true));
+    assert_eq!(*call.input(), json!({ "city": "Tokyo" }));
+    assert!(call.is_dynamic());
+    assert!(call.is_invalid());
     assert!(matches!(
-        call.error,
+        call.error(),
         Some(AiMuxError::NoSuchTool { available_tools, .. })
-            if available_tools == Some(vec!["weather".to_string()])
+            if *available_tools == Some(vec!["weather".to_string()])
     ));
 }
 
@@ -131,8 +131,8 @@ async fn repair_runs_once_and_the_replacement_is_fully_revalidated() {
     .await;
 
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert_eq!(call.input, json!({ "city": "Singapore", "days": 3 }));
-    assert_eq!(call.invalid, None);
+    assert_eq!(*call.input(), json!({ "city": "Singapore", "days": 3 }));
+    assert!(!call.is_invalid());
 }
 
 /// TS: should throw NoSuchToolError when tools is null
@@ -149,7 +149,7 @@ async fn missing_tools_bypasses_repair_like_ai_sdk() {
 
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert!(matches!(
-        call.error,
+        call.error(),
         Some(AiMuxError::NoSuchTool {
             available_tools: None,
             ..
@@ -171,9 +171,9 @@ async fn repair_returning_none_keeps_the_original_failure() {
     )
     .await;
 
-    assert_eq!(call.input, json!(original_input));
+    assert_eq!(*call.input(), json!(original_input));
     assert!(matches!(
-        call.error,
+        call.error(),
         Some(AiMuxError::InvalidToolInput { tool_input, .. })
             if tool_input == original_input
     ));
@@ -197,10 +197,10 @@ async fn repair_failure_keeps_both_typed_errors() {
     .await;
 
     assert!(matches!(
-        call.error,
+        call.error(),
         Some(AiMuxError::ToolCallRepair { original_error, cause })
-            if matches!(*original_error, AiMuxError::InvalidToolInput { .. })
-                && matches!(*cause, AiMuxError::Other(_))
+            if matches!(**original_error, AiMuxError::InvalidToolInput { .. })
+                && matches!(**cause, AiMuxError::Other(_))
     ));
 }
 
@@ -213,8 +213,8 @@ async fn provider_executed_dynamic_calls_do_not_require_a_local_tool() {
 
     let call = parse_tool_call(tool_call, None, None, &[], None).await;
 
-    assert_eq!(call.input, json!({ "query": "rust" }));
-    assert_eq!(call.invalid, None);
+    assert_eq!(*call.input(), json!({ "query": "rust" }));
+    assert!(!call.is_invalid());
 }
 
 fn weather_tool_schema() -> serde_json::Value {

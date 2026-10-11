@@ -72,7 +72,7 @@ fn project(part: StreamPart) -> Part {
         }) => Part::ToolCall {
             tool_call_id,
             tool_name,
-            input,
+            input: input.to_string(),
             provider_metadata,
         },
         other => panic!("tracker emitted an unexpected part: {other:?}"),

@@ -638,7 +638,7 @@ fn rebuild_generate_result(rec: &Recording) -> Result<GenerateResult, AiMuxError
             content.push(GenerateContent::ToolCall(RawToolCall {
                 tool_call_id,
                 tool_name,
-                input,
+                input: input.into(),
                 provider_executed: None,
                 dynamic: None,
                 provider_metadata: None,
@@ -822,7 +822,7 @@ fn rebuild_stream_result(rec: &Recording) -> Result<StreamResult, AiMuxError> {
                                 RawToolCall {
                                     tool_call_id: id.clone(),
                                     tool_name: name.clone(),
-                                    input: String::new(),
+                                    input: crate::tool::RawArguments::default(),
                                     provider_executed: None,
                                     dynamic: None,
                                     provider_metadata: None,

@@ -1,0 +1,8 @@
+{"toolCallId":"call_1","toolName":"web_search","result":{"hits":3}}
+{"toolCallId":"call_1","toolName":"web_search","result":{"hits":3},"dynamic":false}
+{"toolCallId":"call_1","toolName":"web_search","result":{"hits":3},"dynamic":true}
+{"toolCallId":"call_1","toolName":"web_search","result":{"hits":3},"isError":true}
+{"toolCallId":"call_1","toolName":"web_search","result":{"hits":3},"isError":false}
+{"toolCallId":"call_1","toolName":"web_search","result":{"hits":3},"preliminary":true,"dynamic":false}
+{"toolCallId":"call_1","toolName":"web_search","result":{"hits":3},"preliminary":false}
+{"toolCallId":"call_1","toolName":"web_search","result":{"hits":3},"providerMetadata":{"xai":{"id":"fs_1"}}}

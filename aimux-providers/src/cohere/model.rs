@@ -202,7 +202,7 @@ impl LanguageModel for CohereModel {
                 content.push(GenerateContent::ToolCall(RawToolCall {
                     tool_call_id: tc.id.clone(),
                     tool_name: tc.function.name.clone(),
-                    input,
+                    input: input.into(),
                     provider_executed: None,
                     dynamic: None,
                     provider_metadata: None,
@@ -475,7 +475,7 @@ impl Transformer for CohereChatStream {
                     controller.enqueue(StreamPart::ToolCall(RawToolCall {
                         tool_call_id: tool.id,
                         tool_name: tool.name,
-                        input,
+                        input: input.into(),
                         provider_executed: None,
                         dynamic: None,
                         provider_metadata: None,

@@ -243,7 +243,7 @@ impl LanguageModel for OpenAICompatibleChatModel {
                     .filter(|id| !id.is_empty())
                     .unwrap_or_else(generate_id),
                 tool_name: call.function.name,
-                input: call.function.arguments.unwrap_or_default(),
+                input: call.function.arguments.unwrap_or_default().into(),
                 provider_executed: None,
                 dynamic: None,
                 provider_metadata: signature.as_ref().map(|signature| {

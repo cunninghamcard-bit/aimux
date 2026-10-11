@@ -228,8 +228,8 @@ fn tool_calls(content: &[GenerateContent]) -> Vec<ToolCallView<'_>> {
                 // Provider results intentionally carry the exact wire string;
                 // parse only in this assertion helper so nested data-loss
                 // checks remain readable without weakening that boundary.
-                let parsed_input =
-                    serde_json::from_str(input).unwrap_or_else(|_| Value::String(input.clone()));
+                let parsed_input = serde_json::from_str(input)
+                    .unwrap_or_else(|_| Value::String(input.to_string()));
                 Some((
                     tool_call_id.as_str(),
                     tool_name.as_str(),
