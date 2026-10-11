@@ -91,3 +91,31 @@ ToolResult 按来源分 enum：
 - 客户端执行：分 Static 和 Dynamic 两个变体，`dynamic` 规范化输出为布尔（`execute-tool-call.ts:169,199`）。
 - 服务商执行：单独一个变体，`dynamic` 在里面作为透传数据 `Option<bool>` 保存，原样往返（`stream-language-model-call.ts:774,789`）。
 E.3 验收追加一条：服务商执行且不写 `dynamic` 的样例，往返逐字节不变。
+
+## E.6 核对结论（行号按 E.4 head `a498558a`；V4 DTO 按 u1.6 `b837aac3`）
+
+| 类型 | file:line | 结论 |
+|---|---|---|
+| `ToolCall` | aimux-core/src/tool.rs:311 | 已满足（E.2）：`Static/Dynamic` enum，Dynamic 里带 validity；Wire 走 try_from/into |
+| `ToolResult` | tool.rs:570 | 已满足（E.3）：`source: ToolResultSource`（Client/Provider）；Wire 保持 JSON/TS |
+| `RawToolCall` | tool.rs:220 | 已满足（E.1）：不做 enum，`input: RawArguments`；`dynamic`/`provider_executed` 是 V4 层三态数据 |
+| `ToolKind` | tool.rs:240 | 已满足（E.4）：`StreamPart` 用 `Option<ToolKind>` 三态透传；`TextStreamPart` 用 `ToolKind`，总是写布尔 |
+| `StreamPart<C,A,R>` | aimux-core/src/stream_part.rs:29 | 已满足（E.4）。D25 表"StreamPart/TextStreamPart 总是写"一行按 Trey 2026-10-11 决定改为只对 core `TextStreamPart`；provider 层 `StreamPart` 透传（stream-part.ts:58） |
+| `TextStreamPart` | stream_part.rs:183 | 已满足（E.4） |
+| `ContentPart` | aimux-core/src/content.rs:20 | 已经是 `type` enum，不改 |
+| `LanguageModelMessage` / `UserPart` / `AssistantPart` / `ToolPart` | aimux-core/src/language_model_message.rs:33、:233、:242、:256 | 已经是 enum，不改 |
+| `ToolCallPart` | language_model_message.rs:102 | `provider_executed` 是独立数据，不改 |
+| `ToolApprovalResponsePart` | language_model_message.rs:218 | `approved: bool` 是数据，保留，不改 |
+| `ToolResultOutput` / `ToolResultContent` | language_model_message.rs:135、:181 | 已经是 `type` enum，不改 |
+| `MessageContent` / `ModelPrompt` | aimux-core/src/message.rs:28、:82 | `#[serde(untagged)]`，**无法满足、不改**（改就要改 JSON） |
+| `GenerateContent<C,A,R>` | aimux-core/src/result.rs:24 | 已经是 `type` enum，不改；`ToolCall(C)`/`ToolResult` 随 E.2/E.3 |
+| `RawToolApprovalRequest` | result.rs:72 | 无状态型 Option，不改 |
+| `ToolApprovalRequestOutput` | result.rs:84 | `is_automatic` 独立数据，不改；`tool_call` 随 E.2 |
+| `Source` | result.rs:108 | 已经是 enum，不改 |
+| `GenerateTextResult` | aimux-core/src/generate.rs:216 | 不改（`tool_calls` 随 E.2） |
+| `parsed_tool_call_arguments` | aimux-core/src/openai_output.rs:1025 | 已满足（E.2）：收 `&ToolCall`，用访问器 |
+| `response_tool_call_input` | aimux-core/src/response_messages.rs:25 | 已满足（E.2）：收 `&ToolCall`，用访问器 |
+| `LanguageModelV4ToolCall` | （u1.6）aimux-provider/src/content.rs:84（:89、:91） | V4 DTO，不做 enum，不改 |
+| `LanguageModelV4ToolResult` | （u1.6）aimux-provider/src/content.rs:99（:105、:107、:109） | V4 DTO，不做 enum，不改 |
+
+E.5（消费方迁移）核对：`rg -n '\.dynamic\b|\.invalid\b' aimux-* tools` 在 E.4 head 只剩 Wire 转换（tool.rs:369-370、:686、:690）、V4 层 `RawToolCall` 字段（parse_tool_call.rs:107、:192；tool_input_test.rs:30、:212；mistral_upstream_e2e_test.rs:203）和访问器方法调用（`ToolResult::dynamic()`：provider_executed_marking_test.rs:88、data_loss_regression_test.rs:275），外加两处 URL 里的 `test.invalid`。源码里没有通过 `["dynamic"]`/`get("invalid")` 读 wire 的地方。E.2–E.4 换类型时编译器已经强制所有消费方改用访问器或 match，所以 E.5 没有剩余改动。
