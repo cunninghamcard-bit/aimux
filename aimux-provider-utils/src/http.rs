@@ -545,7 +545,7 @@ fn build_fetch_request(request: &PreparedRequest) -> Result<FetchRequest, AiMuxE
             .map_err(|_| AiMuxError::InvalidArgument(format!("invalid header value for {name}")))?;
         headers.insert(header_name, header_value);
     }
-    let suffix = "ai-sdk-provider-utils/5.0.51";
+    let suffix = "ai-sdk-provider-utils/5.0.53";
     let current = request
         .headers
         .iter()

@@ -145,6 +145,13 @@ const FIXTURES: [&str; 5] = [
     "messages-system-tools",
 ];
 
+/// The version `fixtures/aisdk/VERSIONS.json` pins for `package`.
+fn pinned(package: &str) -> String {
+    let path = fixtures_dir().join("../VERSIONS.json");
+    let versions: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    versions[package].as_str().unwrap().to_string()
+}
+
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/aisdk/anthropic")
 }
@@ -217,7 +224,10 @@ impl Fixture {
             .collect();
         expected.insert(
             "user-agent".to_string(),
-            "ai-sdk-anthropic/4.0.68 ai-sdk-provider-utils/5.0.51".to_string(),
+            format!(
+                "ai-sdk-anthropic/4.0.68 ai-sdk-provider-utils/{}",
+                pinned("@ai-sdk/provider-utils")
+            ),
         );
         assert_eq!(
             expected.get("x-api-key").map(String::as_str),
