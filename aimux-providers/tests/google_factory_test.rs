@@ -136,7 +136,8 @@ impl Fixture {
         expected.insert(
             "user-agent".to_string(),
             format!(
-                "ai-sdk-google/4.0.85 ai-sdk-provider-utils/{}",
+                "ai-sdk-google/{} ai-sdk-provider-utils/{}",
+                pinned("@ai-sdk/google"),
                 pinned("@ai-sdk/provider-utils")
             ),
         );

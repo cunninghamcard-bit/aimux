@@ -253,7 +253,7 @@ pub fn create_google(settings: GoogleProviderSettings) -> Result<GoogleProvider,
             Vec::new(),
             settings.headers,
         )
-        .with_user_agent(options::GOOGLE, "4.0.85"),
+        .with_user_agent(options::GOOGLE, crate::shared::aisdk_pins::GOOGLE),
         fetch: settings.fetch,
         generate_id: settings.generate_id,
         #[cfg(feature = "realtime")]

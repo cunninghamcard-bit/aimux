@@ -5,6 +5,7 @@
 //! vendors whose endpoint is decided by more than a URL and a credential
 //! (Vertex, Bedrock, Polly) keep that logic in their own modules.
 
+pub(crate) mod aisdk_pins;
 mod discovery;
 mod exchange;
 mod poll;

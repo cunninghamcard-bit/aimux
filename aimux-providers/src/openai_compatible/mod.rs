@@ -187,7 +187,10 @@ impl OpenAICompatibleProvider {
                 scheme: AuthScheme::Bearer,
                 fixed: assembly.fixed_headers,
                 user: assembly.headers,
-                user_agent: Some(("openai-compatible", "3.0.59")),
+                user_agent: Some((
+                    "openai-compatible",
+                    crate::shared::aisdk_pins::OPENAI_COMPATIBLE,
+                )),
             },
             fetch: assembly.fetch,
             chat: assembly.chat,

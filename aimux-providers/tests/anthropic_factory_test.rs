@@ -225,7 +225,8 @@ impl Fixture {
         expected.insert(
             "user-agent".to_string(),
             format!(
-                "ai-sdk-anthropic/4.0.68 ai-sdk-provider-utils/{}",
+                "ai-sdk-anthropic/{} ai-sdk-provider-utils/{}",
+                pinned("@ai-sdk/anthropic"),
                 pinned("@ai-sdk/provider-utils")
             ),
         );

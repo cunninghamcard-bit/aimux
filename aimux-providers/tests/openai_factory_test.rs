@@ -289,7 +289,8 @@ impl Fixture {
         expected.insert(
             "user-agent".to_string(),
             format!(
-                "ai-sdk-openai/4.0.83 ai-sdk-provider-utils/{}",
+                "ai-sdk-openai/{} ai-sdk-provider-utils/{}",
+                pinned("@ai-sdk/openai"),
                 pinned("@ai-sdk/provider-utils")
             ),
         );
