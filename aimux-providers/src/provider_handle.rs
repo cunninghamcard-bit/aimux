@@ -1,7 +1,9 @@
 //! #226's by-name provider handle for native OpenAI and the official local
-//! decision runtimes, kept with #226's resolution rules (explicit argument,
-//! then the runtime's `*_BASE_URL` / `*_API_KEY` environment variables, then
-//! the default local endpoint) on top of the package factories.
+//! decision runtimes on top of the package factories. A key is only the
+//! explicit argument or a package's own default env (`OPENAI_API_KEY`, read
+//! at request time); there is no generic `<NAME>_API_KEY` lookup (A6 item 4).
+//! A local runtime's base URL is the argument, then `*_BASE_URL`, then the
+//! default local endpoint.
 //!
 //! Other names resolve through [`create_provider`](crate::create_provider).
 
@@ -12,7 +14,6 @@ use aimux_core::decision_model::{
     DecisionCallOptions, DecisionCapabilities, DecisionModel, DecisionResult,
 };
 use aimux_core::provider::ProviderDiscovery;
-use aimux_core::retry::RetryConfig;
 use aimux_core::{
     AiMuxError, EmbeddingModel, EvaluationModel, Files, ImageModel, LanguageModel, Provider,
     RerankingModel, SearchModel, Skills, SpeechModel, TranscriptionModel, VideoModel,
@@ -20,13 +21,13 @@ use aimux_core::{
 use aimux_provider_utils::HeaderMapOpt;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::openai::OpenAIProviderSettings;
 use crate::openai_compatible::{OpenAICompatibleProviderSettings, create_openai_compatible};
 
 /// Per-handle options of [`provider_handle`] (#226).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderOptions {
     /// Override the default or environment base URL.
     pub base_url: Option<String>,
@@ -36,11 +37,6 @@ pub struct ProviderOptions {
     pub organization: Option<String>,
     /// OpenAI project ID (`OpenAI-Project` header).
     pub project: Option<String>,
-    /// Decision retry-count default; a per-call `max_retries` still wins.
-    pub max_retries: Option<u32>,
-    /// Generation request-body overrides. Native decisions refuse a handle
-    /// that carries them (#226).
-    pub body_overrides: Option<Value>,
 }
 
 /// Official local decision runtimes: name, default base URL, base URL env.
@@ -66,19 +62,46 @@ fn non_empty_env(name: &str) -> Option<String> {
 /// (`ollama`, `llamacpp`, `localai`, `vllm`, `sglang`, `laya`) or any other
 /// built-in package / registry preset.
 ///
-/// - `openai`: `api_key = None` reads `OPENAI_API_KEY` now.
-/// - local runtimes: `api_key = None` reads `{NAME}_API_KEY` if set, otherwise
-///   sends the placeholder key `not-needed`; the base URL is `options.base_url`, else `{NAME}_BASE_URL`,
-///   else the runtime's default local endpoint.
+/// - `openai`: `api_key = None` reads the package default `OPENAI_API_KEY` at
+///   request time (#200:538); `Some("")` is used as given and never falls
+///   back (RFC-0040:67). With `options.base_url` set and no key, no env is
+///   read and no credential is sent.
+/// - local runtimes: `api_key = None` sends the placeholder key `not-needed`;
+///   no `{NAME}_API_KEY` is read. The base URL is `options.base_url`, else
+///   `{NAME}_BASE_URL`, else the runtime's default local endpoint.
 ///
 /// # Errors
 ///
-/// `LoadApiKey` for a missing OpenAI key, `NoSuchProvider` for an unknown
-/// name, and the factory's settings errors.
+/// `NoSuchProvider` for an unknown name, and the factory's settings errors.
+/// A missing OpenAI key fails the request with `LoadApiKey`.
 pub fn provider_handle(
     name: &str,
     api_key: Option<String>,
     options: Option<ProviderOptions>,
+) -> Result<Box<dyn Provider>, AiMuxError> {
+    provider_handle_with(
+        name,
+        api_key,
+        options,
+        #[cfg(test)]
+        Handles::default(),
+    )
+}
+
+/// Test-only injection for [`provider_handle_with`]: the env source of a
+/// package-default key and the transport. Not compiled into the library.
+#[cfg(test)]
+#[derive(Default)]
+struct Handles {
+    env: crate::shared::EnvSource,
+    fetch: Option<aimux_provider_utils::FetchFunction>,
+}
+
+fn provider_handle_with(
+    name: &str,
+    api_key: Option<String>,
+    options: Option<ProviderOptions>,
+    #[cfg(test)] handles: Handles,
 ) -> Result<Box<dyn Provider>, AiMuxError> {
     let options = options.unwrap_or_default();
     let mut headers: HeaderMapOpt = options
@@ -90,16 +113,24 @@ pub fn provider_handle(
         .collect();
     let mut api_key_source = None;
     let inner: Arc<dyn Provider> = if name == "openai" {
-        let api_key =
-            aimux_provider_utils::load_api_key(api_key.as_deref(), "OPENAI_API_KEY", "OpenAI")?;
-        Arc::new(crate::create_openai(OpenAIProviderSettings {
+        let auth_none = api_key.is_none() && options.base_url.is_some();
+        let provider = crate::create_openai(OpenAIProviderSettings {
             base_url: options.base_url.clone(),
-            api_key: Some(api_key),
+            api_key,
             organization: options.organization.clone(),
             project: options.project.clone(),
             headers: Some(headers),
+            #[cfg(test)]
+            fetch: handles.fetch,
             ..Default::default()
-        })?)
+        })?;
+        #[cfg(test)]
+        let provider = provider.with_env_source(handles.env);
+        Arc::new(if auth_none {
+            provider.without_credential()
+        } else {
+            provider
+        })
     } else {
         if let Some(organization) = &options.organization {
             headers.insert("OpenAI-Organization".into(), Some(organization.clone()));
@@ -115,21 +146,13 @@ pub fn provider_handle(
                 .clone()
                 .or_else(|| non_empty_env(url_env))
                 .unwrap_or_else(|| (*default_url).into());
-            // #226: explicit key, else `{NAME}_API_KEY`, else the placeholder
-            // `not-needed` (sent as `Authorization: Bearer not-needed`),
-            // recorded with source `none`.
-            let key_env = format!("{}_API_KEY", name.to_uppercase());
-            let api_key = match (api_key, non_empty_env(&key_env)) {
-                (Some(key), _) => key,
-                (None, Some(key)) => {
-                    api_key_source = Some(format!("env:{key_env}"));
-                    key
-                }
-                (None, None) => {
-                    api_key_source = Some("none".into());
-                    PLACEHOLDER_API_KEY.into()
-                }
-            };
+            // Explicit key, else the placeholder `not-needed` (sent as
+            // `Authorization: Bearer not-needed`), recorded with source
+            // `none`. No `{NAME}_API_KEY` is read.
+            let api_key = api_key.unwrap_or_else(|| {
+                api_key_source = Some("none".into());
+                PLACEHOLDER_API_KEY.into()
+            });
             Arc::new(create_openai_compatible(
                 OpenAICompatibleProviderSettings {
                     name: name.into(),
@@ -153,8 +176,6 @@ pub fn provider_handle(
     };
     Ok(Box::new(ProviderHandle {
         inner,
-        max_retries: options.max_retries,
-        has_body_overrides: options.body_overrides.is_some(),
         api_key_source,
     }))
 }
@@ -162,56 +183,29 @@ pub fn provider_handle(
 /// A provider with #226's handle-level decision settings.
 struct ProviderHandle {
     inner: Arc<dyn Provider>,
-    max_retries: Option<u32>,
-    has_body_overrides: bool,
     /// Credential source when the handle resolved the key itself (the
     /// placeholder or an environment variable); `None` keeps the model's own.
     api_key_source: Option<String>,
 }
 
-impl ProviderHandle {
-    fn generation_overrides_unsupported(&self) -> Result<(), AiMuxError> {
-        if self.has_body_overrides {
-            return Err(AiMuxError::UnsupportedFunctionality(
-                "body_overrides are not supported by the package model factories".into(),
-            ));
-        }
-        Ok(())
-    }
-}
-
 impl Provider for ProviderHandle {
     fn decision_model(&self, id: &str) -> Result<Box<dyn DecisionModel>, AiMuxError> {
-        if self.has_body_overrides {
-            return Err(AiMuxError::UnsupportedFunctionality(
-                "native decisions require an official adapter without generation body_overrides"
-                    .into(),
-            ));
-        }
         let model = self.inner.decision_model(id)?;
-        if self.max_retries.is_none() && self.api_key_source.is_none() {
+        if self.api_key_source.is_none() {
             return Ok(model);
         }
-        let retry_config = RetryConfig {
-            max_retries: self.max_retries.unwrap_or(model.retry_config().max_retries),
-            ..model.retry_config()
-        };
         Ok(Box::new(HandleDecisionModel {
             inner: model,
-            retry_config,
             api_key_source: self.api_key_source.clone(),
         }))
     }
     fn language_model(&self, id: &str) -> Result<Arc<dyn LanguageModel>, AiMuxError> {
-        self.generation_overrides_unsupported()?;
         self.inner.language_model(id)
     }
     fn embedding_model(&self, id: &str) -> Result<Arc<dyn EmbeddingModel>, AiMuxError> {
-        self.generation_overrides_unsupported()?;
         self.inner.embedding_model(id)
     }
     fn image_model(&self, id: &str) -> Result<Arc<dyn ImageModel>, AiMuxError> {
-        self.generation_overrides_unsupported()?;
         self.inner.image_model(id)
     }
     fn transcription_model(
@@ -246,10 +240,9 @@ impl Provider for ProviderHandle {
     }
 }
 
-/// A decision model with handle-level retry settings and credential source.
+/// A decision model with the handle's credential source.
 struct HandleDecisionModel {
     inner: Box<dyn DecisionModel>,
-    retry_config: RetryConfig,
     api_key_source: Option<String>,
 }
 
@@ -264,20 +257,306 @@ impl DecisionModel for HandleDecisionModel {
     fn capabilities(&self) -> DecisionCapabilities {
         self.inner.capabilities()
     }
-    fn retry_config(&self) -> RetryConfig {
-        self.retry_config
-    }
     fn config_snapshot(&self) -> aimux_core::recording::ProviderRecord {
         let mut snapshot = self.inner.config_snapshot();
         if let Some(source) = &self.api_key_source {
             snapshot.api_key_source = Some(source.clone());
         }
-        if let Some(serde_json::Value::Object(options)) = &mut snapshot.provider_options {
-            options.insert("max_retries".into(), self.retry_config.max_retries.into());
-        }
         snapshot
     }
     async fn do_decide(&self, options: &DecisionCallOptions) -> Result<DecisionResult, AiMuxError> {
         self.inner.do_decide(options).await
+    }
+}
+
+#[cfg(test)]
+mod env_tests {
+    //! A6 item 4 / D23. The env a key could come from is an injected plain
+    //! map ([`EnvSource::Vars`]) that logs every read, never the process
+    //! environment and never `std::env::set_var`.
+    use std::sync::{Arc, Mutex};
+
+    use aimux_core::decision_model::decide;
+    use aimux_core::recording::{self, RingRecorder};
+    use aimux_core::replay::MockDecisionReplayModel;
+    use aimux_provider_utils::{
+        Fetch, FetchError, FetchFunction, FetchRequest, FetchResponse, ReqwestFetch,
+    };
+    use serde_json::Value;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+    use crate::shared::{EnvSource, TestEnv};
+
+    fn env(vars: &[(&str, &str)]) -> Arc<Mutex<TestEnv>> {
+        Arc::new(Mutex::new(TestEnv {
+            vars: vars
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+            reads: Vec::new(),
+        }))
+    }
+
+    fn reads(env: &Arc<Mutex<TestEnv>>) -> Vec<String> {
+        env.lock().unwrap().reads.clone()
+    }
+
+    /// Sends every request to `target`'s origin, keeping path and headers, so
+    /// the OpenAI handle keeps its default base URL.
+    struct Redirect(String);
+
+    #[async_trait]
+    impl Fetch for Redirect {
+        async fn fetch(&self, mut request: FetchRequest) -> Result<FetchResponse, FetchError> {
+            let target = url::Url::parse(&self.0).unwrap();
+            request.url.set_scheme(target.scheme()).unwrap();
+            request.url.set_host(target.host_str()).unwrap();
+            request.url.set_port(target.port()).unwrap();
+            ReqwestFetch.fetch(request).await
+        }
+    }
+
+    fn fixture(name: &str) -> Value {
+        let text = match name {
+            "openai" => include_str!("../tests/fixtures/openai_decisions.json"),
+            _ => include_str!("../tests/fixtures/runtime_decisions.json"),
+        };
+        serde_json::from_str(text).unwrap()
+    }
+
+    fn options(name: &str) -> DecisionCallOptions {
+        let mut options: DecisionCallOptions =
+            serde_json::from_value(fixture(name)["options"].clone()).unwrap();
+        options.max_retries = Some(0);
+        options
+    }
+
+    async fn mock(route: &str, name: &str) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&fixture(name)["response"]))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn authorization(server: &MockServer) -> Vec<Option<String>> {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|request| {
+                request
+                    .headers
+                    .get("authorization")
+                    .map(|v| v.to_str().unwrap().to_string())
+            })
+            .collect()
+    }
+
+    fn openai(
+        api_key: Option<&str>,
+        options: Option<ProviderOptions>,
+        env: &Arc<Mutex<TestEnv>>,
+        server: &MockServer,
+    ) -> Box<dyn Provider> {
+        let fetch: FetchFunction = Arc::new(Redirect(server.uri()));
+        provider_handle_with(
+            "openai",
+            api_key.map(Into::into),
+            options,
+            Handles {
+                env: EnvSource::Vars(env.clone()),
+                fetch: Some(fetch),
+            },
+        )
+        .unwrap()
+    }
+
+    /// (1) The generic `<NAME>_API_KEY` is gone: a local runtime without a key
+    /// never looks one up, so `OLLAMA_API_KEY` / `VLLM_API_KEY` never reach
+    /// the wire.
+    #[tokio::test]
+    async fn generic_provider_api_key_env_is_not_read() {
+        for name in ["ollama", "vllm"] {
+            let server = mock("/v1/systemone", "runtime").await;
+            let env = env(&[("OLLAMA_API_KEY", "x-ollama"), ("VLLM_API_KEY", "x-vllm")]);
+            let handle = provider_handle_with(
+                name,
+                None,
+                Some(ProviderOptions {
+                    base_url: Some(format!("{}/v1", server.uri())),
+                    ..Default::default()
+                }),
+                Handles {
+                    env: EnvSource::Vars(env.clone()),
+                    fetch: None,
+                },
+            )
+            .unwrap();
+            decide(
+                handle.decision_model("served").unwrap().as_ref(),
+                options("runtime"),
+            )
+            .await
+            .unwrap();
+            let sent = authorization(&server).await;
+            assert_eq!(sent.len(), 1);
+            let sent = sent[0].clone().unwrap_or_default();
+            assert!(
+                !sent.contains("x-ollama") && !sent.contains("x-vllm"),
+                "{sent}"
+            );
+            assert!(reads(&env).is_empty(), "{name}: {:?}", reads(&env));
+        }
+    }
+
+    /// (2) The OpenAI package default env is read at request time: the key is
+    /// put into the env only after the handle and the model exist.
+    #[tokio::test]
+    async fn openai_default_env_is_read_at_request_time() {
+        let server = mock("/v1/decisions", "openai").await;
+        let env = env(&[]);
+        let handle = openai(None, None, &env, &server);
+        let model = handle.decision_model("gpt-6-luna").unwrap();
+        assert!(reads(&env).is_empty(), "read at construction");
+        env.lock()
+            .unwrap()
+            .vars
+            .insert("OPENAI_API_KEY".into(), "sk-set-after-construction".into());
+        decide(model.as_ref(), options("openai")).await.unwrap();
+        assert_eq!(
+            authorization(&server).await,
+            vec![Some("Bearer sk-set-after-construction".into())]
+        );
+        assert_eq!(reads(&env), vec!["OPENAI_API_KEY".to_string()]);
+    }
+
+    /// Unset default env fails the request (not the construction) with
+    /// `LoadApiKey`, and nothing is sent.
+    #[tokio::test]
+    async fn openai_missing_default_env_fails_the_request() {
+        let server = mock("/v1/decisions", "openai").await;
+        let env = env(&[]);
+        let handle = openai(None, None, &env, &server);
+        let model = handle.decision_model("gpt-6-luna").unwrap();
+        let error = decide(model.as_ref(), options("openai")).await.unwrap_err();
+        assert!(matches!(error, AiMuxError::LoadApiKey { .. }), "{error:?}");
+        assert!(authorization(&server).await.is_empty());
+    }
+
+    /// (3) `Some("")` is used as given and never falls back to the env.
+    #[tokio::test]
+    async fn explicit_empty_key_does_not_fall_back_to_env() {
+        let server = mock("/v1/decisions", "openai").await;
+        let env = env(&[("OPENAI_API_KEY", "sk-from-env")]);
+        let handle = openai(Some(""), None, &env, &server);
+        decide(
+            handle.decision_model("gpt-6-luna").unwrap().as_ref(),
+            options("openai"),
+        )
+        .await
+        .unwrap();
+        let sent = authorization(&server).await;
+        assert_eq!(sent.len(), 1);
+        assert!(
+            !sent[0].clone().unwrap_or_default().contains("sk-from-env"),
+            "{sent:?}"
+        );
+        assert!(reads(&env).is_empty(), "{:?}", reads(&env));
+    }
+
+    /// (4a) A changed base URL without a key reads no env and sends no
+    /// credential.
+    #[tokio::test]
+    async fn changed_base_url_does_not_read_env() {
+        let server = mock("/v1/decisions", "openai").await;
+        let env = env(&[("OPENAI_API_KEY", "sk-from-env")]);
+        let handle = openai(
+            None,
+            Some(ProviderOptions {
+                base_url: Some(format!("{}/v1", server.uri())),
+                ..Default::default()
+            }),
+            &env,
+            &server,
+        );
+        decide(
+            handle.decision_model("gpt-6-luna").unwrap().as_ref(),
+            options("openai"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(authorization(&server).await, vec![None]);
+        assert!(reads(&env).is_empty(), "{:?}", reads(&env));
+    }
+
+    /// (4b) `auth = none` (a keyless local runtime) reads no env.
+    #[tokio::test]
+    async fn auth_none_does_not_read_env() {
+        let server = mock("/v1/systemone", "runtime").await;
+        let env = env(&[("OPENAI_API_KEY", "sk-from-env"), ("LAYA_API_KEY", "x")]);
+        let handle = provider_handle_with(
+            "laya",
+            None,
+            Some(ProviderOptions {
+                base_url: Some(format!("{}/v1", server.uri())),
+                ..Default::default()
+            }),
+            Handles {
+                env: EnvSource::Vars(env.clone()),
+                fetch: None,
+            },
+        )
+        .unwrap();
+        decide(
+            handle.decision_model("served").unwrap().as_ref(),
+            options("runtime"),
+        )
+        .await
+        .unwrap();
+        assert!(reads(&env).is_empty(), "{:?}", reads(&env));
+    }
+
+    /// (4c) Offline replay of a recorded decision reads no env and makes no
+    /// request, even though the live handle reads its key from the env.
+    #[tokio::test]
+    async fn offline_replay_does_not_read_env() {
+        let server = mock("/v1/decisions", "openai").await;
+        let env = env(&[("OPENAI_API_KEY", "sk-from-env")]);
+        let handle = openai(None, None, &env, &server);
+        // The recorder is process-global and the other tests here run in
+        // parallel, so this test keeps only the recording of its own call,
+        // told apart by a unique `state`.
+        let mut request = options("openai");
+        request.state = serde_json::json!({ "test": "offline_replay_does_not_read_env" });
+        let recorder = Arc::new(RingRecorder::new());
+        recording::init_recording(Some(recorder.clone()));
+        let live = decide(
+            handle.decision_model("gpt-6-luna").unwrap().as_ref(),
+            request.clone(),
+        )
+        .await;
+        recording::init_recording(None);
+        live.unwrap();
+        let records: Vec<_> = recorder
+            .completed()
+            .into_iter()
+            .filter(|record| {
+                serde_json::to_string(&record.input)
+                    .unwrap()
+                    .contains("offline_replay_does_not_read_env")
+            })
+            .collect();
+        assert_eq!(records.len(), 1);
+        env.lock().unwrap().reads.clear();
+        let replay = MockDecisionReplayModel::new("openai", "gpt-6-luna", records).unwrap();
+        decide(&replay, request).await.unwrap();
+        assert!(reads(&env).is_empty(), "{:?}", reads(&env));
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 }
