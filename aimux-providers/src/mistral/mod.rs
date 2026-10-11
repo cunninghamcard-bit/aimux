@@ -170,7 +170,7 @@ pub fn create_mistral(settings: MistralProviderSettings) -> Result<MistralProvid
         Vec::new(),
         settings.headers,
     )
-    .with_user_agent(options::NAMESPACE, "4.0.54");
+    .with_user_agent(options::NAMESPACE, crate::shared::aisdk_pins::MISTRAL);
     Ok(MistralProvider {
         base_url,
         headers,

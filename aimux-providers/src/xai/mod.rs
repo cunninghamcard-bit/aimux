@@ -332,7 +332,7 @@ pub fn create_xai(settings: XAIProviderSettings) -> Result<XAIProvider, AiMuxErr
             Vec::new(),
             settings.headers,
         )
-        .with_user_agent(options::NAMESPACE, "5.0.12"),
+        .with_user_agent(options::NAMESPACE, crate::shared::aisdk_pins::XAI),
         fetch: settings.fetch,
         #[cfg(feature = "realtime")]
         web_socket: settings.web_socket,

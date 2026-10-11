@@ -469,11 +469,16 @@ impl BedrockEndpoint {
 
     async fn headers(&self) -> Result<HeaderMapOpt, AiMuxError> {
         let mut user = combine_headers(&[&self.user.clone().unwrap_or_default()]);
-        let suffix = concat!("ai-sdk-amazon-bedrock/", env!("CARGO_PKG_VERSION"));
+        // amazon-bedrock-provider.ts:294 (getHeaders); the transport adds the
+        // second occurrence below, like amazon-bedrock-sigv4-fetch.ts:44/:131.
+        let suffix = format!(
+            "ai-sdk-amazon-bedrock/{}",
+            crate::shared::aisdk_pins::AMAZON_BEDROCK
+        );
         let agent = user
             .get("user-agent")
             .and_then(|value| value.as_deref())
-            .map_or_else(|| suffix.to_string(), |value| format!("{value} {suffix}"));
+            .map_or_else(|| suffix.clone(), |value| format!("{value} {suffix}"));
         user.insert("user-agent".into(), Some(agent));
         let headers = match self.auth.bearer().await? {
             Some(key) => {
@@ -487,7 +492,13 @@ impl BedrockEndpoint {
             }
         };
         let mut headers = normalize_headers(headers).into_iter().collect();
-        with_user_agent_suffix(&mut headers, "ai-sdk-amazon-bedrock/5.0.100");
+        with_user_agent_suffix(
+            &mut headers,
+            &format!(
+                "ai-sdk-amazon-bedrock/{}",
+                crate::shared::aisdk_pins::AMAZON_BEDROCK
+            ),
+        );
         Ok(headers
             .into_iter()
             .map(|(name, value)| (name, Some(value)))

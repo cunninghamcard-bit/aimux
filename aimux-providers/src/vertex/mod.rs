@@ -301,7 +301,13 @@ impl Resolver {
         let base_url = self.base_url(express_key.is_some(), publisher)?;
         let headers = self.headers(express_key.as_deref()).await?;
         let mut headers = normalize_headers(headers).into_iter().collect();
-        with_user_agent_suffix(&mut headers, "ai-sdk-google-vertex/5.0.98");
+        with_user_agent_suffix(
+            &mut headers,
+            &format!(
+                "ai-sdk-google-vertex/{}",
+                crate::shared::aisdk_pins::GOOGLE_VERTEX
+            ),
+        );
         let headers = headers
             .into_iter()
             .map(|(name, value)| (name, Some(value)))

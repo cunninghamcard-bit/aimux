@@ -25,10 +25,6 @@ use crate::fetch::{
 use crate::handle_fetch_error::fetch_error_to_ai_mux_error;
 use crate::logging::{body_logging_enabled, redact_body};
 
-/// `@ai-sdk/provider-utils` version aimux mirrors; must equal its pin in
-/// `fixtures/aisdk/VERSIONS.json` (checked by `pin_tests`).
-pub(crate) const PROVIDER_UTILS_VERSION: &str = "5.0.53";
-
 /// Process-wide proxy configuration, fixed before the first HTTP client is built.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProxyConfig {
@@ -549,7 +545,10 @@ fn build_fetch_request(request: &PreparedRequest) -> Result<FetchRequest, AiMuxE
             .map_err(|_| AiMuxError::InvalidArgument(format!("invalid header value for {name}")))?;
         headers.insert(header_name, header_value);
     }
-    let suffix = format!("ai-sdk-provider-utils/{PROVIDER_UTILS_VERSION}");
+    let suffix = format!(
+        "ai-sdk-provider-utils/{}",
+        crate::aisdk_pins::PROVIDER_UTILS
+    );
     let current = request
         .headers
         .iter()
@@ -937,22 +936,5 @@ pub(crate) fn sanitized_request_url(url: &str) -> String {
             parsed.to_string()
         }
         Err(_) => url.split('?').next().unwrap_or(url).to_owned(),
-    }
-}
-
-#[cfg(test)]
-mod pin_tests {
-    #[test]
-    fn provider_utils_version_is_pinned() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../fixtures/aisdk/VERSIONS.json"
-        );
-        let versions: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-        assert_eq!(
-            versions["@ai-sdk/provider-utils"].as_str(),
-            Some(super::PROVIDER_UTILS_VERSION)
-        );
     }
 }
