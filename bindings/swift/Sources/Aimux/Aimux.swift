@@ -11,7 +11,7 @@ import Foundation
 //
 // Every fallible C function returns `aimux_error_t *` (`OpaquePointer?`):
 // NULL = success (result in the trailing out-param), non-NULL = failure. The
-// unified code is AiMuxError (1...17), RecordingError (100...105), or a C ABI
+// unified code is AiMuxError (1...20), RecordingError (100...105), or a C ABI
 // failure (200...206). The three `expect*` decoders copy the relevant fields, release
 // it with `aimux_error_free` (exactly once) and return the Swift error
 // to throw. Errors are not handles: never `aimux_drop_handle` one.
@@ -44,7 +44,7 @@ func expectFfiError(_ e: OpaquePointer, context: String) -> any Error {
     return invariant("aimux ffi: \(context): \(message)")
 }
 
-/// Decode a returned error from an `[AiMuxError]` call: 1...17 becomes
+/// Decode a returned error from an `[AiMuxError]` call: 1...20 becomes
 /// `AimuxError`; 200...206 is decoded by `expectFfiError`. Frees `e` once.
 func expectAimuxError(_ e: OpaquePointer, context: String) -> any Error {
     let code = aimux_error_code(e)
@@ -141,6 +141,7 @@ public enum RetryErrorReason: String, Equatable, Sendable {
 /// }
 /// ```
 public enum AimuxError: Error, LocalizedError, CustomStringConvertible, Equatable, Sendable {
+    case noOutputGenerated(message: String, status: Int, retryMs: Int64, retryable: Bool)
     case jsonParse(message: String, status: Int, retryMs: Int64, retryable: Bool)
     case invalidResponseData(message: String, status: Int, retryMs: Int64, retryable: Bool)
     case invalidArgument(message: String, status: Int, retryMs: Int64, retryable: Bool)
@@ -175,9 +176,16 @@ public enum AimuxError: Error, LocalizedError, CustomStringConvertible, Equatabl
     /// The model produced tool arguments that fail to parse or validate.
     case invalidToolInput(message: String, status: Int, retryMs: Int64, retryable: Bool, toolName: String, toolInput: String)
     /// A `repairToolCall` hook itself failed; `originalError` is the error it
-    /// was repairing, as externally-tagged wire JSON (the same encoding as
+    /// was repairing, as `AiMuxError` JSON tagged by `name` (the same encoding as
     /// `ToolCall.error`).
     case toolCallRepair(message: String, status: Int, retryMs: Int64, retryable: Bool, originalError: String)
+    /// No API key was passed and the fallback environment variable is unset
+    /// (`AIMUX_E_LOAD_API_KEY`, the AI SDK's `LoadAPIKeyError`). No request
+    /// was made; `envVar` names the variable that was consulted.
+    case loadApiKey(message: String, status: Int, retryMs: Int64, retryable: Bool, envVar: String)
+    /// A required provider setting was not passed and its fallback environment
+    /// variable is unset (`AIMUX_E_LOAD_SETTING`, `LoadSettingError`).
+    case loadSetting(message: String, status: Int, retryMs: Int64, retryable: Bool, envVar: String)
     case other(message: String, status: Int, retryMs: Int64, retryable: Bool)
 
     // MARK: Accessors
@@ -185,7 +193,8 @@ public enum AimuxError: Error, LocalizedError, CustomStringConvertible, Equatabl
     /// The C-derived payload.
     private var payload: (message: String, status: Int, retryMs: Int64, retryable: Bool) {
         switch self {
-        case .jsonParse(let m, let s, let r, let t),
+        case .noOutputGenerated(let m, let s, let r, let t),
+             .jsonParse(let m, let s, let r, let t),
              .invalidResponseData(let m, let s, let r, let t),
              .invalidArgument(let m, let s, let r, let t),
              .invalidPrompt(let m, let s, let r, let t),
@@ -199,6 +208,8 @@ public enum AimuxError: Error, LocalizedError, CustomStringConvertible, Equatabl
              .noSuchTool(let m, let s, let r, let t, _, _),
              .invalidToolInput(let m, let s, let r, let t, _, _),
              .toolCallRepair(let m, let s, let r, let t, _),
+             .loadApiKey(let m, let s, let r, let t, _),
+             .loadSetting(let m, let s, let r, let t, _),
              .other(let m, let s, let r, let t):
             return (m, s, r, t)
         case .retry(let m, _, _):
@@ -212,6 +223,7 @@ public enum AimuxError: Error, LocalizedError, CustomStringConvertible, Equatabl
     public var code: Int32 {
         let c: aimux_error_code_t
         switch self {
+        case .noOutputGenerated: c = AIMUX_E_NO_OUTPUT_GENERATED
         case .jsonParse: c = AIMUX_E_JSON_PARSE
         case .invalidResponseData: c = AIMUX_E_INVALID_RESPONSE_DATA
         case .invalidArgument: c = AIMUX_E_INVALID_ARGUMENT
@@ -227,6 +239,8 @@ public enum AimuxError: Error, LocalizedError, CustomStringConvertible, Equatabl
         case .noSuchTool: c = AIMUX_E_NO_SUCH_TOOL
         case .invalidToolInput: c = AIMUX_E_INVALID_TOOL_INPUT
         case .toolCallRepair: c = AIMUX_E_TOOL_CALL_REPAIR
+        case .loadApiKey: c = AIMUX_E_LOAD_API_KEY
+        case .loadSetting: c = AIMUX_E_LOAD_SETTING
         case .other: c = AIMUX_E_OTHER
         }
         return Int32(bitPattern: c.rawValue)
@@ -353,10 +367,21 @@ public enum AimuxError: Error, LocalizedError, CustomStringConvertible, Equatabl
     }
 
     /// `.toolCallRepair` only: the original lookup/parse/validation error as
-    /// externally-tagged wire JSON (the same encoding as `ToolCall.error`).
+    /// `AiMuxError` JSON tagged by `name` (the same encoding as `ToolCall.error`).
     public var originalError: String? {
         if case .toolCallRepair(_, _, _, _, let v) = self { return v }
         return nil
+    }
+
+    /// `.loadApiKey` / `.loadSetting` only: the environment variable that was
+    /// consulted (e.g. `"OPENAI_API_KEY"`).
+    public var envVar: String? {
+        switch self {
+        case .loadApiKey(_, _, _, _, let v), .loadSetting(_, _, _, _, let v):
+            return v
+        default:
+            return nil
+        }
     }
 
     public var description: String { message }
@@ -385,6 +410,8 @@ public enum AimuxError: Error, LocalizedError, CustomStringConvertible, Equatabl
         let message = rawMsg.isEmpty ? "aimux: operation failed" : rawMsg
 
         switch code {
+        case AIMUX_E_NO_OUTPUT_GENERATED:
+            return .noOutputGenerated(message: message, status: status, retryMs: retryMs, retryable: retryable)
         case AIMUX_E_JSON_PARSE:
             return .jsonParse(message: message, status: status, retryMs: retryMs, retryable: retryable)
         case AIMUX_E_INVALID_RESPONSE_DATA:
@@ -446,6 +473,13 @@ public enum AimuxError: Error, LocalizedError, CustomStringConvertible, Equatabl
         case AIMUX_E_TOOL_CALL_REPAIR:
             return .toolCallRepair(message: message, status: status, retryMs: retryMs, retryable: retryable,
                                    originalError: takeCString(aimux_error_original_error(h)) ?? "")
+        case AIMUX_E_LOAD_API_KEY:
+            // The consulted environment variable rides the provider-code getter.
+            return .loadApiKey(message: message, status: status, retryMs: retryMs, retryable: retryable,
+                               envVar: takeCString(aimux_error_provider_code(h)) ?? "")
+        case AIMUX_E_LOAD_SETTING:
+            return .loadSetting(message: message, status: status, retryMs: retryMs, retryable: retryable,
+                                envVar: takeCString(aimux_error_provider_code(h)) ?? "")
         case AIMUX_E_OTHER:
             return .other(message: message, status: status, retryMs: retryMs, retryable: retryable)
         default:
@@ -718,8 +752,10 @@ public final class Model: @unchecked Sendable {
     ///     registry entry.
     ///   - modelId: Model id.
     ///   - configJson: Optional JSON object of `ProviderOptions`
-    ///     (`{"base_url": "...", "headers": {...}, "max_retries": 0,
-    ///     "body_overrides": {...}}`); `nil` for defaults.
+    ///     (`{"baseUrl": "...", "headers": {...}, "organization": "...",
+    ///     "project": "...", "params": {...}}`); `nil` for defaults. Any
+    ///     other key (`maxRetries` is a per-call option) is rejected as
+    ///     `.invalidArgument`.
     public static func provider(
         name: String, apiKey: String? = nil, modelId: String, configJson: String? = nil
     ) throws -> Model {
@@ -814,8 +850,8 @@ public final class Model: @unchecked Sendable {
     ///     it does not trap: the array is as likely to come from a `.filter`
     ///     as from a literal, so C's zero-children failure surfaces instead).
     ///   - configJson: optional config: `{"router": "rule"|"weighted",
-    ///     "weights": [...], "fallback": "on_error"|"none", "provider_name",
-    ///     "model_id"}`.
+    ///     "weights": [...], "fallback": "on_error"|"none", "providerName",
+    ///     "modelId"}`.
     /// - Returns: a new RouterModel wrapping the children.
     public static func router(
         _ models: [Model],
@@ -862,21 +898,6 @@ public final class Model: @unchecked Sendable {
             }
         }
         return Model(handle: handle)
-    }
-
-    /// Register external OpenAI-compatible providers from a JSON config string
-    /// (RFC-0020).
-    ///
-    /// `configJSON` is `{ "providers": [ { "name", "base_url", ... } ] }`.
-    /// Entries override same-named built-ins or add new ones. Like
-    /// `initRecording`, this mutates process-global registry state.
-    ///
-    /// - Parameter configJSON: Provider registry config JSON.
-    /// - Throws: `AimuxError` (`.invalidArgument`) when the registry rejects
-    ///   the document.
-    public static func registerProviders(_ configJSON: String) throws {
-        try validateJson(configJSON, parameter: "configJSON")
-        if let e = aimux_register_providers(configJSON) { throw expectAimuxError(e, context: "registerProviders") }
     }
 
     /// Set the global proxy configuration (M6, RFC-0016). Must be called before
@@ -927,7 +948,7 @@ public final class Model: @unchecked Sendable {
     /// Generate a structured JSON object (M12, RFC-0016).
     ///
     /// Same signature as `generateText`; returns a JSON-serialized
-    /// `GenerateObjectResult`. Pass `response_format: { "Json": { ... } }`
+    /// `GenerateObjectResult`. Pass `responseFormat: { "type": "json", ... }`
     /// via `options` for schema control; aimux-core applies JSON repair
     /// before parsing.
     ///
@@ -992,7 +1013,7 @@ public final class Model: @unchecked Sendable {
     /// - Parameters:
     ///   - prompt: A prompt string (serialized as JSON).
     ///   - options: Optional GenerateTextOptions (serialized as JSON).
-    ///   - onPart: Called for each StreamPart (JSON string).
+    ///   - onPart: Called for each TextStreamPart (JSON string).
     ///   - onDone: Called when the stream completes normally.
     ///   - onError: Called on stream failure with the decoded error unchanged
     ///     (`AimuxError`, or `DecodingError.dataCorrupted` for unparseable
@@ -1063,7 +1084,7 @@ public final class Model: @unchecked Sendable {
         }
     }
 
-    /// Stream text as an AsyncSequence of StreamPart JSON strings.
+    /// Stream text as an AsyncSequence of TextStreamPart JSON strings.
     ///
     /// Usage:
     /// ```swift

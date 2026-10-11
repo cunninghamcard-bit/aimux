@@ -1,6 +1,6 @@
 # aimux · Java API
 
-> Unified LLM service access layer — one API to access 325 AI providers
+> Unified LLM service access layer — one API to access AI providers
 
 The Java binding goes through the `aimux-ffi` C ABI via JNA — no native
 toolchain is needed at build time. Artifact: `ai.arcships:aimux-java:0.3.0`,
@@ -33,32 +33,30 @@ try (Model model = Model.openaiWithBase("sk-...", "gpt-4o", "http://localhost:30
 
 ## Providers
 
-All 251 registry-backed OpenAI-compatible providers are reachable by name;
-`ProviderName` holds the constants:
+The vendor packages and 281 registry-backed OpenAI-compatible providers are reachable by string name:
 
-> **Scope:** `provider(name)` covers only the 251 registry OpenAI-compatible
-> providers; Anthropic/Google/multimodal/local → typed factories
-> (`Model.anthropic(apiKey, modelId)`); custom endpoints → base-URL variant.
+> **Scope:** `provider(name)` reaches vendor packages and the 281 preset rows;
+> typed factories remain available. Custom endpoints use the base-URL variant.
 > Full list: [providers.md](providers.md).
 
 ```java
 import ai.arcships.aimux.Model;
-import ai.arcships.aimux.ProviderName;
 
-// 推荐:ProviderName.GROQ 常量(类型检查 + 补全)
-try (Model model = Model.providerFromEnv(ProviderName.GROQ, "llama-3.3-70b")) {
+try (Model model = Model.providerFromEnv("groq", "llama-3.3-70b")) {
     String result = model.generateText("\"Hello\"");
 }
 
-// 字符串形式同样可用 + 可选 config JSON ({"base_url": "..."}):
+// Optional config JSON ({"baseUrl": "..."}); an unknown key is InvalidArgumentError:
 try (Model model = Model.provider("groq", "sk-...", "llama-3.3-70b", null)) {
     String result = model.generateText("\"Hello\"");
 }
 ```
 
-`deepseek(apiKey, modelId)` remains as a shortcut (registry-backed).
-Unknown names throw `NoSuchProviderError` naming the requested provider
-(valid names come from the generated `ProviderName` constants).
+`deepseek(apiKey, modelId)` remains as a by-name shortcut to the vendor package.
+Unknown names throw `NoSuchProviderError` naming the requested provider.
+There is no provider-registration API: the provider set is the built-in
+registry, and a custom endpoint is a `baseUrl` in the `configJson` above (or a
+`...WithBase` factory).
 
 ## Errors
 
@@ -79,6 +77,9 @@ RuntimeException
       ├── NoSuchToolError            // code 15: the tool the model called is not in the tool set
       ├── InvalidToolInputError      // code 16: the tool arguments failed to parse or validate
       ├── ToolCallRepairError        // code 17: tool-call repair itself failed
+      ├── LoadAPIKeyError            // code 18: no API key, fallback env var unset (getEnvVar())
+      ├── LoadSettingError           // code 19: a required setting is missing (getEnvVar())
+      ├── NoOutputGeneratedError     // code 20: the call produced no output
       └── OtherError
 ```
 
@@ -87,7 +88,7 @@ Every instance has:
 | Field | Meaning |
 |-------|---------|
 | `getMessage()` | human-readable text from C |
-| `getCode()` | `aimux_error_code_t` value 1–17 (4 retired, 14 = `Retry`; matches `aimux-error.h`) |
+| `getCode()` | `aimux_error_code_t` value 1–20 (4 retired, 14 = `Retry`; matches `aimux-error.h`) |
 | `getStatusCode()` | HTTP status, or `-1` |
 | `getRetryMs()` | rate-limit hint, or `-1` (`0` = retry now) |
 | `isRetryable()` | the `AiMuxError` retry verdict (not derivable from status) |
@@ -153,7 +154,7 @@ types and share no base beyond `RuntimeException`.
 Transport: every fallible C call returns an opaque `aimux_error_t *`
 (JNA `Pointer`) — `null` on success with the result in a trailing out-parameter
 (`LongByReference` handle / `PointerByReference` JSON), non-null on failure.
-`AimuxResult` reads one unified code: 1–17 restores the matching
+`AimuxResult` reads one unified code: 1–19 restores the matching
 `AimuxException` subclass, 100–105 restores `RecordingException`, and 200–206
 becomes `IllegalStateException("aimux ffi: …")`. Payload getters are read only
 under their owning AiMuxError code; a `RetryError`'s attempt errors are new
@@ -346,7 +347,7 @@ try (SpeechModel model = SpeechModel.openai("sk-...", "tts-1")) {
     String opts = new JSONObject()
         .put("text", "Hello")
         .put("voice", "alloy")
-        .put("output_format", "mp3")
+        .put("outputFormat", "mp3")
         .toString();
     String result = model.generate(opts);
 }
@@ -391,7 +392,7 @@ Factories: `VideoModel.google` / `googleWithBase`.
 
 ```java
 try (RerankingModel model = RerankingModel.cohere("sk-...", "rerank-v3.0")) {
-    String result = model.rerank("{\"query\":\"...\",\"documents\":{...},\"top_n\":2}");
+    String result = model.rerank("{\"query\":\"...\",\"documents\":{\"type\":\"text\",\"values\":[...]},\"topN\":2}");
 }
 ```
 
@@ -401,7 +402,7 @@ Factories: `RerankingModel.cohere` / `cohereWithBase`.
 
 ```java
 try (SearchModel model = SearchModel.tavily("sk-...")) {
-    String result = model.search("{\"query\":\"What is Rust?\",\"max_results\":5}");
+    String result = model.search("{\"query\":\"What is Rust?\",\"maxResults\":5}");
 }
 // result: {"results":[{"title":"Rust",...}],"answer":"Rust is a systems language."}
 ```
@@ -414,7 +415,7 @@ Factories: `SearchModel.tavily` / `tavilyWithBase`.
 try (Files files = Files.openai("sk-...")) {
     String result = files.uploadFile(base64Data, "application/pdf");
 }
-// result: {"provider_reference":{"openai":"file-abc"}, ...}
+// result: {"providerReference":{"openai":"file-abc"}, ...}
 ```
 
 Factories: `Files.openai` / `openaiWithBase`.
@@ -429,8 +430,24 @@ Factories: `Files.openai` / `openaiWithBase`.
 custom serializer for the scalar-or-object wire form), `ContentPart` (sealed),
 `MessageContent` (sealed), `ModelMessage`, `GenerateTextOptions`,
 `FileBytes` / `FileData`, `GenerateContent`, `GenerateResult`,
-`GenerateTextResult`, `StreamPart` (sealed). All sealed hierarchies serialize
-in the wrapper-object wire form (e.g. `{"TextDelta":{...}}`).
+`GenerateTextResult`, `StreamPart` (sealed), `ToolResultOutput`. Field names
+are the AI SDK's camelCase (`toolCallId`, `providerOptions`, `finishReason`, ...)
+and optional fields are absent, never `null`. Sealed hierarchies are tagged on
+`type` with the upstream kebab-case names (e.g. `{"type":"text-delta",...}`,
+`{"type":"tool-call",...}`); `FileBytes` is untagged (an int array or a base64
+string).
+
+A `ContentPart.ToolResult` (`type: "tool-result"`) carries `toolCallId`,
+`toolName`, `output` and `providerOptions`; `output` is a `ToolResultOutput`
+built with `text` / `json` / `executionDenied` / `errorText` / `errorJson` /
+`content`. The stream-side `StreamPart.ToolResult` and
+`GenerateContent.ToolResult` are the executed-result shape and keep `result`,
+`isError`, `preliminary` and `dynamic`.
+
+`GenerateTextOptions.responseFormat` is a JSON node: `{"type":"text"}` or
+`{"type":"json","schema":{...},"name":"...","description":"..."}`.
+`ImageCallOptions` / `VideoCallOptions` take `size` / `resolution` as `"WxH"`
+strings (e.g. `"1024x1024"`) and `aspectRatio` as `"W:H"` (e.g. `"16:9"`).
 
 `RawToolCall` and `ToolCallRepairContext` serve
 [tool-call repair](#tool-call-repair); `ToolCallRepair` (the hook itself) is a
@@ -447,8 +464,9 @@ validation fails, even after repair) and `getError()` (the serialized
 `TranscriptionResult`, `RerankingCallOptions` / `RerankingResult`,
 `VideoCallOptions` / `VideoPollOptions` / `VideoResult`, `SearchCallOptions` / `SearchResult`,
 `UploadFileCallOptions` / `UploadFileResult`. Sealed unions (`AudioData`,
-`ImageOutputs`, `VideoData`) use custom Jackson serializers with the
-externally-tagged wire form. Response types (`EmbeddingResponse`, etc.) match
+`ImageOutputs`, `VideoFileData`) are untagged (a base64 string or an int array)
+and `VideoData` / `VideoFile` are tagged on `type`, all with custom Jackson
+serializers. Response types (`EmbeddingResponse`, etc.) match
 the `aimux-core` `.ts` wire definitions exactly (`{headers, body, ...}`).
 
 ## Error Handling
@@ -477,5 +495,7 @@ cargo build -p aimux-ffi --release
 cd bindings/java
 export JAVA_HOME=...   # JDK 9+ (bytecode targets Java 8 via --release 8)
 export LD_LIBRARY_PATH="$(pwd)/../../target/release:${LD_LIBRARY_PATH}"
+# or point the tests at another build (e.g. a debug build in a shared target dir):
+# export AIMUX_FFI_LIB_DIR=/path/to/target/debug
 gradle test
 ```

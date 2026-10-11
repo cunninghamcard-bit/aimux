@@ -3,29 +3,40 @@ import type { JsonValue } from "./serde_json/JsonValue";
 
 /**
  * ② 配置侧:provider 身份(请求回放重建用)。
+ *
+ * 只记身份,不记配置:回放时按 `provider_id` + `model_id` 重新构建 model,
+ * 凭证与 base URL 只来自环境/registry(RFC-0036 §3.3)。
  */
 export type ProviderRecord = { 
 /**
- * `model.provider()`,如 "openai"。
+ * provider 名(registry 名),回放重建的查找键,如 "openai"、"deepseek"。
+ */
+providerId: string, 
+/**
+ * `model.provider()`,如 "openai.chat"。
  */
 provider: string, 
 /**
  * `model.model_id()`,如 "gpt-4o"。
  */
-model_id: string, 
+modelId: string, 
 /**
- * provider 的 base_url。
+ * Decision connection snapshot (#226, RFC-0038 录制): the provider base
+ * URL. Informational only: replay takes the endpoint from the caller's
+ * registry. Absent for every other operation.
  */
-base_url: string | null, 
+baseUrl?: string | null, 
 /**
- * api_key 来源(不存明文):"env:OPENAI_API_KEY" / "explicit" / "none" / "unknown"。
+ * Where the credential came from, never its value: `"env:VAR"`,
+ * `"explicit"` or `"none"` (#226).
  */
-api_key_source: string, 
+apiKeySource?: string | null, 
 /**
- * OpenAICompatProfile(能力差异)。
+ * Decision capabilities and default protocol (#226).
  */
-profile: JsonValue | null, 
+profile?: JsonValue | null, 
 /**
- * ProviderOptions(headers/org/project/...;已脱敏)。
+ * Connection options (headers, retries); sensitive headers are redacted
+ * when recorded (#226).
  */
-provider_options: JsonValue | null, };
+providerOptions?: JsonValue | null, };

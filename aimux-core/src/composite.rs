@@ -8,9 +8,9 @@
 //!
 //! This module holds the pieces both share:
 //! - [`ChildModel`] — the child-handle shape (`Arc<dyn LanguageModel>`).
-//! - [`add_usage`] — per-field `Usage` accumulation.
-//! - [`extract_text`] — pull text out of a `GenerateContent` list.
-//! - [`build_aggregator_prompt`] — assemble the MoA aggregator prompt.
+//! - `add_usage` — per-field `Usage` accumulation.
+//! - `extract_text` — pull text out of a `GenerateContent` list.
+//! - `build_aggregator_prompt` — assemble the MoA aggregator prompt.
 //!
 //! See [`crate::trace::layer::TraceLayer`] for the established decorator pattern
 //! (`inner: Arc<dyn LanguageModel>` implementing `LanguageModel`); composite
@@ -19,9 +19,9 @@
 use std::sync::Arc;
 
 use crate::language_model::LanguageModel;
-use crate::language_model_message::{LanguageModelPrompt, LanguageModelPromptMessage};
+use crate::language_model_message::{LanguageModelMessage, LanguageModelPrompt};
 use crate::result::GenerateContent;
-use crate::types::{TokenUsage, Usage};
+use crate::types::{InputTokenUsage, OutputTokenUsage, Usage};
 
 /// Composite-model child handle. `Arc` (not `Box`) so children are `Clone`,
 /// match the FFI/Node registry shape, and stay alive after a child handle is
@@ -31,25 +31,23 @@ pub type ChildModel = Arc<dyn LanguageModel>;
 /// Add two `Usage` values field-by-field. `Usage::raw` (provider-opaque) is
 /// dropped — summing raw maps across providers is meaningless.
 ///
-/// Each `TokenUsage` field is `Option<u32>`; `None` is treated as zero so a
+/// Each usage detail field is `Option<u32>`; `None` is treated as zero so a
 /// child that doesn't report a breakdown doesn't erase the other child's data.
 #[must_use]
-pub fn add_usage(a: Usage, b: &Usage) -> Usage {
+pub(crate) fn add_usage(a: Usage, b: &Usage) -> Usage {
     Usage {
-        input_tokens: add_token_usage(a.input_tokens, &b.input_tokens),
-        output_tokens: add_token_usage(a.output_tokens, &b.output_tokens),
+        input_tokens: InputTokenUsage {
+            total: opt_add(a.input_tokens.total, b.input_tokens.total),
+            no_cache: opt_add(a.input_tokens.no_cache, b.input_tokens.no_cache),
+            cache_read: opt_add(a.input_tokens.cache_read, b.input_tokens.cache_read),
+            cache_write: opt_add(a.input_tokens.cache_write, b.input_tokens.cache_write),
+        },
+        output_tokens: OutputTokenUsage {
+            total: opt_add(a.output_tokens.total, b.output_tokens.total),
+            text: opt_add(a.output_tokens.text, b.output_tokens.text),
+            reasoning: opt_add(a.output_tokens.reasoning, b.output_tokens.reasoning),
+        },
         raw: None,
-    }
-}
-
-fn add_token_usage(a: TokenUsage, b: &TokenUsage) -> TokenUsage {
-    TokenUsage {
-        total: opt_add(a.total, b.total),
-        no_cache: opt_add(a.no_cache, b.no_cache),
-        cache_read: opt_add(a.cache_read, b.cache_read),
-        cache_write: opt_add(a.cache_write, b.cache_write),
-        text: opt_add(a.text, b.text),
-        reasoning: opt_add(a.reasoning, b.reasoning),
     }
 }
 
@@ -66,7 +64,7 @@ fn opt_add(a: Option<u32>, b: Option<u32>) -> Option<u32> {
 /// are kept; `Reasoning` / `ToolCall` / `Source` / `File` are dropped (MoA
 /// thin version — references contribute analysis text, not tool calls).
 #[must_use]
-pub fn extract_text(content: &[GenerateContent]) -> String {
+pub(crate) fn extract_text(content: &[GenerateContent]) -> String {
     let mut out = String::new();
     for c in content {
         if let GenerateContent::Text { text, .. } = c {
@@ -85,7 +83,7 @@ pub fn extract_text(content: &[GenerateContent]) -> String {
 /// The reference list may be empty — in that case the aggregator just runs the
 /// original prompt (degenerates to a single-model call).
 #[must_use]
-pub fn build_aggregator_prompt(
+pub(crate) fn build_aggregator_prompt(
     prompt: &LanguageModelPrompt,
     instructions: Option<&str>,
     references: &[(String, String)],
@@ -119,10 +117,6 @@ pub fn build_aggregator_prompt(
         body.push('\n');
     }
 
-    out.push(LanguageModelPromptMessage {
-        role: crate::message::Role::User,
-        content: vec![crate::content::ContentPart::text(body)],
-        provider_options: None,
-    });
+    out.push(LanguageModelMessage::user_text(body));
     out
 }

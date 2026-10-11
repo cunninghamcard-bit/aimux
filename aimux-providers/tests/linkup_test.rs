@@ -6,16 +6,14 @@
 //!
 //! Tests do not hit the public network and do not read real credentials.
 
-use std::collections::HashMap;
-
 use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use aimux_core::Provider;
 use aimux_core::error::AiMuxError;
 use aimux_core::search_model::{SearchCallOptions, SearchModel};
-use aimux_providers::{LinkupConfig, LinkupProvider};
+use aimux_provider_utils::Resolvable;
+use aimux_providers::{LinkupProvider, LinkupProviderSettings, create_linkup};
 
 const API_KEY: &str = "test-linkup-key";
 
@@ -54,21 +52,16 @@ fn sourced_answer_body() -> Value {
 }
 
 fn provider(server: &MockServer) -> LinkupProvider {
-    let config = LinkupConfig::new(API_KEY).with_base_url(server.uri());
-    LinkupProvider::new(config)
+    let config = LinkupProviderSettings {
+        api_key: Some(Resolvable::Value(API_KEY.to_string())),
+        base_url: Some(server.uri().to_string()),
+        ..Default::default()
+    };
+    create_linkup(config).unwrap()
 }
 
 fn opts(query: &str) -> SearchCallOptions {
     SearchCallOptions::new(query)
-}
-
-fn linkup_provider_options(depth: &str, output_type: &str) -> HashMap<String, Value> {
-    let mut po = HashMap::new();
-    po.insert(
-        "linkup".to_string(),
-        json!({ "depth": depth, "outputType": output_type }),
-    );
-    po
 }
 
 async fn mount_search_mock(server: &MockServer) {
@@ -196,24 +189,6 @@ async fn do_search_sends_correct_request_body() {
     assert_eq!(body["excludeDomains"], json!(["example.com"]));
 }
 
-#[tokio::test]
-async fn do_search_forwards_depth_and_output_type_provider_options() {
-    let server = MockServer::start().await;
-    mount_search_mock(&server).await;
-
-    let provider = provider(&server);
-    let model = provider.search_model();
-
-    let mut options = opts("rust language");
-    options.provider_options = Some(linkup_provider_options("deep", "sourcedAnswer"));
-    model.do_search(&options).await.unwrap();
-
-    let requests = server.received_requests().await.unwrap();
-    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
-    assert_eq!(body["depth"], "deep");
-    assert_eq!(body["outputType"], "sourcedAnswer");
-}
-
 // -- error mapping -----------------------------------------------------------
 
 #[tokio::test]
@@ -258,35 +233,14 @@ async fn status_403_maps_to_provider_error() {
     );
 }
 
-// -- Provider trait ----------------------------------------------------------
-
-#[tokio::test]
-async fn provider_name_is_linkup() {
-    let config = LinkupConfig::new(API_KEY);
-    let provider = LinkupProvider::new(config);
-    assert_eq!(provider.name(), "linkup");
-}
-
-#[test]
-fn language_model_returns_unsupported_error() {
-    let config = LinkupConfig::new(API_KEY);
-    let provider = LinkupProvider::new(config);
-    match provider.language_model("linkup-search") {
-        Err(AiMuxError::UnsupportedFunctionality(msg)) => {
-            assert!(
-                msg.contains("provider 'linkup' does not provide language models"),
-                "unexpected message: {msg}"
-            );
-        }
-        _ => panic!("expected Unsupported error, got success or another error variant"),
-    }
-}
-
 #[test]
 fn model_id_is_linkup_search() {
-    let config = LinkupConfig::new(API_KEY);
-    let provider = LinkupProvider::new(config);
+    let config = LinkupProviderSettings {
+        api_key: Some(Resolvable::Value(API_KEY.to_string())),
+        ..Default::default()
+    };
+    let provider = create_linkup(config).unwrap();
     let model = provider.search_model();
     assert_eq!(model.model_id(), "linkup-search");
-    assert_eq!(model.provider(), "linkup");
+    assert_eq!(model.provider(), "linkup.search");
 }

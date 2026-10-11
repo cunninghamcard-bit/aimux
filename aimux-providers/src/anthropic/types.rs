@@ -15,11 +15,26 @@ pub struct AnthropicResponse {
     pub content: Vec<ContentBlock>,
     pub stop_reason: Option<String>,
     pub usage: AnthropicUsage,
+    /// The matched custom stop sequence, when generation ended on one
+    /// (`providerMetadata.anthropic.stopSequence`).
+    #[serde(default)]
+    pub stop_sequence: Option<String>,
+    /// The code-execution container of the turn, if any
+    /// (`providerMetadata.anthropic.container`). Left opaque; the model layer
+    /// maps it into the result-level provider metadata.
+    #[serde(default)]
+    pub container: Option<Value>,
     /// Optional `context_management` object echoed by the API, carrying
     /// `applied_edits`. Left opaque here; the model layer maps it into
     /// `providerMetadata.anthropic.contextManagement`.
     #[serde(default)]
     pub context_management: Option<Value>,
+    #[serde(default)]
+    pub stop_details: Option<Value>,
+    #[serde(default)]
+    pub input_transformations: Option<Value>,
+    #[serde(default)]
+    pub safeguard_results: Option<Value>,
 }
 
 /// Origin of an Anthropic programmatic tool call.
@@ -38,12 +53,27 @@ pub enum ToolCallCaller {
 #[serde(tag = "type")]
 pub enum ContentBlock {
     #[serde(rename = "text")]
-    Text { text: String },
+    Text {
+        text: String,
+        #[serde(default)]
+        citations: Vec<Value>,
+    },
+    #[serde(rename = "container_upload")]
+    ContainerUpload { file_id: String },
+    #[serde(rename = "compaction")]
+    Compaction {
+        #[serde(default)]
+        content: Option<String>,
+        #[serde(default)]
+        signature: Option<String>,
+    },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
         name: String,
         input: Value,
+        #[serde(default)]
+        toolset_name: Option<String>,
         #[serde(default)]
         caller: Option<ToolCallCaller>,
     },
@@ -72,6 +102,8 @@ pub enum ContentBlock {
         name: String,
         #[serde(default)]
         input: Value,
+        #[serde(default)]
+        caller: Option<ToolCallCaller>,
     },
     /// Result of a server-side web search. `content` is either an array of
     /// `web_search_result` objects or a `web_search_tool_result_error` object.
@@ -81,6 +113,8 @@ pub enum ContentBlock {
         tool_use_id: String,
         #[serde(default)]
         content: Value,
+        #[serde(default)]
+        caller: Option<ToolCallCaller>,
     },
     /// Result of a server-side web fetch.
     #[serde(rename = "web_fetch_tool_result")]
@@ -89,6 +123,8 @@ pub enum ContentBlock {
         tool_use_id: String,
         #[serde(default)]
         content: Value,
+        #[serde(default)]
+        caller: Option<ToolCallCaller>,
     },
     /// Result of server-side code execution (20250522).
     #[serde(rename = "code_execution_tool_result")]
@@ -165,27 +201,11 @@ pub enum ContentBlock {
     Other,
 }
 
-/// `output_tokens_details` nested inside an Anthropic usage object, carrying
-/// the count of thinking/reasoning tokens.
+/// Preserve the provider usage object verbatim, including explicit nulls and
+/// unknown fields. Token accounting uses the separate typed view in `usage`.
 #[derive(Debug, Default, Serialize, Deserialize)]
-pub struct OutputTokenDetails {
-    #[serde(default)]
-    pub thinking_tokens: Option<u32>,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct AnthropicUsage {
-    #[serde(default)]
-    pub input_tokens: Option<u32>,
-    #[serde(default)]
-    pub output_tokens: Option<u32>,
-    #[serde(default)]
-    pub output_tokens_details: Option<OutputTokenDetails>,
-    #[serde(default)]
-    pub cache_creation_input_tokens: Option<u32>,
-    #[serde(default)]
-    pub cache_read_input_tokens: Option<u32>,
-}
+#[serde(transparent)]
+pub struct AnthropicUsage(pub Value);
 
 // ── Streaming events ──
 
@@ -208,6 +228,10 @@ pub enum StreamEvent {
         delta: MessageDeltaBody,
         #[serde(default)]
         usage: Option<AnthropicUsage>,
+        #[serde(default)]
+        context_management: Option<Value>,
+        #[serde(default)]
+        input_transformations: Option<Value>,
     },
     #[serde(rename = "message_stop")]
     MessageStop,
@@ -235,6 +259,12 @@ pub struct MessageStartData {
     pub model: String,
     #[serde(default)]
     pub usage: Option<AnthropicUsage>,
+    #[serde(default)]
+    pub input_transformations: Option<Value>,
+    #[serde(default)]
+    pub container: Option<Value>,
+    #[serde(default)]
+    pub stop_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -249,10 +279,22 @@ pub struct DeltaBlock {
     /// `signature_delta` payload — incremental signature text.
     #[serde(default)]
     pub signature: Option<String>,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub citation: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct MessageDeltaBody {
     #[serde(default)]
     pub stop_reason: Option<String>,
+    #[serde(default)]
+    pub stop_sequence: Option<String>,
+    #[serde(default)]
+    pub container: Option<Value>,
+    #[serde(default)]
+    pub stop_details: Option<Value>,
+    #[serde(default)]
+    pub safeguard_results: Option<Value>,
 }

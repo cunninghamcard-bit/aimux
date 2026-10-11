@@ -6,7 +6,7 @@ use aimux_core::error::AiMuxError;
 use aimux_core::language_model::LanguageModel;
 use aimux_core::options::CallOptions;
 use aimux_core::stream_part::StreamPart;
-use aimux_providers::{OpenAIConfig, OpenAIProvider};
+use aimux_providers::{OpenAIProviderSettings, create_openai};
 use futures::StreamExt;
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
@@ -29,9 +29,14 @@ async fn corrupted_stream(prefix: Value) -> Vec<Result<StreamPart, AiMuxError>> 
         )
         .mount(&server)
         .await;
-    let provider = OpenAIProvider::new(OpenAIConfig::new("test-key").with_base_url(server.uri()));
+    let provider = create_openai(OpenAIProviderSettings {
+        api_key: Some("test-key".into()),
+        base_url: Some(server.uri()),
+        ..Default::default()
+    })
+    .unwrap();
     provider
-        .model("gpt-4o")
+        .chat("gpt-4o")
         .do_stream(&CallOptions::new(vec![]))
         .await
         .expect("the first event is valid")
@@ -43,13 +48,17 @@ async fn corrupted_stream(prefix: Value) -> Vec<Result<StreamPart, AiMuxError>> 
 fn assert_terminal_decode_error(parts: &[Result<StreamPart, AiMuxError>]) {
     let errors: Vec<_> = parts
         .iter()
-        .filter_map(|part| part.as_ref().err())
+        .filter_map(|part| match part {
+            Ok(StreamPart::Error { error }) => Some(error),
+            _ => None,
+        })
         .collect();
     assert_eq!(errors.len(), 1);
     assert!(matches!(errors[0], AiMuxError::ApiCall(_)));
     assert!(!errors[0].is_recoverable_stream_error());
     assert!(!errors[0].is_retryable());
-    assert!(parts.last().is_some_and(Result::is_err));
+    assert!(matches!(parts.last(), Some(Ok(StreamPart::Error { .. }))));
+    assert!(parts.iter().all(Result::is_ok));
     assert!(
         !parts
             .iter()

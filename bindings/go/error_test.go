@@ -160,7 +160,7 @@ func TestRetryableIsNotDerivedFromStatus(t *testing.T) {
 // Malformed raw JSON is caught by the binding before the C call: a plain
 // error naming the parameter, not an *Error.
 func TestInvalidJSONNamesParameter(t *testing.T) {
-	err := RegisterProviders("{not json")
+	err := InitProxy("{not json")
 	if err == nil {
 		t.Fatal("expected error for malformed config")
 	}
@@ -406,12 +406,6 @@ func TestMarshalledOptionsRejectRawPassThrough(t *testing.T) {
 			_, e := requiredOptsJSON("ImageModel.Generate", &ImageCallOptions{ProviderOptions: loneSurrogate})
 			return e
 		}, "opts: invalid JSON"},
-		{"provider config lone surrogate", func() error {
-			_, e := ProviderWithConfig("groq", "k", "m", &ProviderConfig{
-				BodyOverrides: map[string]any{"x": json.RawMessage(`"\udc00"`)},
-			})
-			return e
-		}, "config_json: invalid JSON: lone low surrogate \\uDC00"},
 		{"transcription session opts lone surrogate", func() error {
 			b, e := marshalJSON("opts", &TranscriptionSessionOpts{
 				ProviderOptions: map[string]json.RawMessage{"x": json.RawMessage(`"\ud800"`)},
@@ -423,7 +417,7 @@ func TestMarshalledOptionsRejectRawPassThrough(t *testing.T) {
 		// invalid UTF-8 becomes U+FFFD, NUL becomes a \u0000 escape. No error here.
 		{"plain string field is sanitized, not rejected", func() error {
 			s, e := marshalJSON("opts", &SpeechCallOptions{Text: "hi\xffthere\x00"})
-			if e == nil && !strings.Contains(s, `"hi\ufffdthere\u0000"`) {
+			if e == nil && !(strings.Contains(s, `"hi\ufffdthere\u0000"`) || strings.Contains(s, "\"hi\uFFFDthere\\u0000\"")) {
 				t.Errorf("expected U+FFFD / \\u0000 coercion, got %s", s)
 			}
 			return e
@@ -466,13 +460,13 @@ func TestEmbedRejectsRawPassThroughOpts(t *testing.T) {
 	if _, err := m.Embed([]string{"hi"}, &EmbeddingCallOptions{
 		ProviderOptions: jsonObj(`{"a":"\ud800"}`),
 	}); err == nil || !strings.Contains(err.Error(), "opts: invalid JSON") {
-		t.Fatalf("Embed with a lone surrogate in provider_options: %v", err)
+		t.Fatalf("Embed with a lone surrogate in providerOptions: %v", err)
 	}
 }
 
 func TestCodeFromCRejectsOutOfRange(t *testing.T) {
-	// 4 is retired; 14 is Retry; 15..17 are tool-call errors.
-	for _, bad := range []int{0, 4, 18, 999} {
+	// 4 is retired; 14 is Retry; 15..17 are tool-call errors; 20 is the last.
+	for _, bad := range []int{0, 4, 21, 999} {
 		if _, ok := codeFromC(bad); ok {
 			t.Fatalf("%d is not an AiMuxError variant", bad)
 		}
@@ -486,6 +480,13 @@ func TestCodeFromCRejectsOutOfRange(t *testing.T) {
 	}
 	if c, ok := codeFromC(14); !ok || c != CodeRetry {
 		t.Fatalf("14 → %v, %v; want CodeRetry", c, ok)
+	}
+	// 18 / 19 are the missing-key / missing-setting codes.
+	if c, ok := codeFromC(18); !ok || c != CodeLoadAPIKey || c.String() != "LoadApiKey" {
+		t.Fatalf("18 → %v, %v; want CodeLoadAPIKey", c, ok)
+	}
+	if c, ok := codeFromC(19); !ok || c != CodeLoadSetting || c.String() != "LoadSetting" {
+		t.Fatalf("19 → %v, %v; want CodeLoadSetting", c, ok)
 	}
 }
 

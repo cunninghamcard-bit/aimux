@@ -47,22 +47,6 @@ class ErrorsTest {
             .hasMessageContaining("api_key")
     }
 
-    /** Malformed JSON text that reaches C → invariant (the public API rejects it before C). */
-    @Test
-    fun `malformed wire JSON is a C ABI failure naming the parameter`() {
-        val e = FFI.lib.aimux_register_providers("{not json")
-        assertThat(e).isNotNull
-        assertThat(FFI.lib.aimux_error_code(e)).isEqualTo(202)
-        assertThatThrownBy { throw expectAimuxError(e!!) }
-            .isInstanceOf(IllegalStateException::class.java)
-            .isNotInstanceOf(AimuxException::class.java)
-            .hasMessageContaining("config_json")
-        // The public API never lets it reach C.
-        assertThatThrownBy { Model.registerProviders("{not json") }
-            .isInstanceOf(IllegalArgumentException::class.java)
-            .hasMessageContaining("configJson")
-    }
-
     /** A C-ABI-only utility decodes through expectFfiError. */
     @Test
     fun `expectFfiError reads the message and frees`() {
@@ -215,13 +199,30 @@ class ErrorsTest {
         assertThat(noKey.retryable).isFalse()
     }
 
+    /** 18 / 19: a missing API key / provider setting carry the consulted environment variable. */
+    @Test
+    fun `createByCode maps the missing key and setting codes`() {
+        assertThat(AIMUX_E_LOAD_API_KEY).isEqualTo(18)
+        assertThat(AIMUX_E_LOAD_SETTING).isEqualTo(19)
+        assertThat(AimuxException.codeName(18)).isEqualTo("LoadApiKey")
+        assertThat(AimuxException.codeName(19)).isEqualTo("LoadSetting")
+        val key = AimuxException.createByCode(AIMUX_E_LOAD_API_KEY, "no key", envVar = "OPENAI_API_KEY")
+        assertThat(key).isInstanceOf(LoadAPIKeyError::class.java)
+        assertThat(key.code).isEqualTo(18)
+        assertThat((key as LoadAPIKeyError).envVar).isEqualTo("OPENAI_API_KEY")
+        val setting = AimuxException.createByCode(AIMUX_E_LOAD_SETTING, "no region", envVar = "AWS_REGION")
+        assertThat(setting).isInstanceOf(LoadSettingError::class.java)
+        assertThat(setting.code).isEqualTo(19)
+        assertThat((setting as LoadSettingError).envVar).isEqualTo("AWS_REGION")
+    }
+
     /** A code outside the enum is a header/library mismatch, not an error type. */
     @Test
     fun `createByCode rejects codes outside the enum`() {
         assertThatThrownBy { AimuxException.createByCode(999, "?") }
             .isInstanceOf(IllegalStateException::class.java)
-        // 18 is the first unassigned value and is rejected.
-        assertThatThrownBy { AimuxException.createByCode(18, "?") }
+        // 21 is the first unassigned value and is rejected.
+        assertThatThrownBy { AimuxException.createByCode(21, "?") }
             .isInstanceOf(IllegalStateException::class.java)
         assertThatThrownBy { AimuxException.createByCode(AIMUX_OK, "?") }
             .isInstanceOf(IllegalStateException::class.java)

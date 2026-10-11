@@ -6,20 +6,22 @@
 //! - `map-xai-responses-finish-reason.ts`
 //! - `xai-responses-prepare-tools.ts`
 
-use aimux_core::content::ContentPart;
 use aimux_core::error::AiMuxError;
-use aimux_core::language_model_message::LanguageModelPrompt;
-use aimux_core::message::Role;
+use aimux_core::language_model_message::{
+    AssistantPart, FilePart, LanguageModelMessage, LanguageModelPrompt, ReasoningPart, TextPart,
+    ToolCallPart, ToolPart, ToolResultContent, ToolResultOutput, ToolResultPart, UserPart,
+};
 use aimux_core::options::{CallOptions, ResponseFormat, ToolChoice};
+use aimux_core::shared::{FileBytes, FileData, SharedProviderOptions};
 use aimux_core::tool::Tool;
 use aimux_core::types::{FinishReasonUnified, ReasoningEffort, Warning};
 
+use aimux_provider_utils::get_top_level_media_type;
 use serde_json::{Value, json};
 
 use super::types::XaiResponsesUsage;
 use crate::xai::convert::{
-    remove_additional_properties_false, resolve_full_media_type, resolve_provider_reference,
-    supports_reasoning_effort,
+    resolve_full_media_type, resolve_provider_reference, supports_reasoning_effort,
 };
 
 // ── Finish reason ────────────────────────────────────────────────────────────
@@ -31,7 +33,6 @@ pub fn map_xai_responses_finish_reason(s: &str) -> FinishReasonUnified {
         "length" | "max_output_tokens" => FinishReasonUnified::Length,
         "tool_calls" | "function_call" => FinishReasonUnified::ToolCalls,
         "content_filter" => FinishReasonUnified::ContentFilter,
-        "error" => FinishReasonUnified::Error,
         _ => FinishReasonUnified::Other,
     }
 }
@@ -64,21 +65,21 @@ pub fn convert_xai_responses_usage(usage: &XaiResponsesUsage) -> aimux_core::typ
     };
 
     aimux_core::types::Usage {
-        input_tokens: aimux_core::types::TokenUsage {
+        input_tokens: aimux_core::types::InputTokenUsage {
             total: Some(input_total as u32),
             no_cache: Some(input_no_cache as u32),
             cache_read: Some(cache_read as u32),
             cache_write: None,
-            ..Default::default()
         },
-        output_tokens: aimux_core::types::TokenUsage {
+        output_tokens: aimux_core::types::OutputTokenUsage {
             total: Some(usage.output_tokens as u32),
             text: Some((usage.output_tokens - reasoning) as u32),
             reasoning: Some(reasoning as u32),
-            ..Default::default()
         },
         // RFC-0015 P0-3: keep the raw provider usage payload.
-        raw: Some(serde_json::to_value(usage).unwrap_or(serde_json::Value::Null)),
+        raw: serde_json::to_value(usage)
+            .ok()
+            .and_then(|value| value.as_object().cloned()),
     }
 }
 
@@ -93,12 +94,18 @@ pub struct PreparedResponsesTools {
     pub provider_tool_names: std::collections::HashMap<String, String>,
 }
 
-#[must_use]
+/// # Errors
+/// Rejects provider-tool arguments that do not match the upstream schemas.
 pub fn prepare_responses_tools(
     tools: &Option<Vec<Tool>>,
     tool_choice: Option<&ToolChoice>,
-) -> PreparedResponsesTools {
+) -> Result<PreparedResponsesTools, AiMuxError> {
     let non_empty = tools.as_ref().filter(|t| !t.is_empty());
+    for tool in non_empty.into_iter().flatten() {
+        if let Tool::Provider(tool) = tool {
+            validate_provider_tool(tool)?;
+        }
+    }
     let mut tool_warnings: Vec<Warning> = Vec::new();
     let mut provider_tool_names: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
@@ -113,7 +120,7 @@ pub fn prepare_responses_tools(
                         let mut func = json!({
                             "type": "function",
                             "name": ft.name,
-                            "parameters": remove_additional_properties_false(&ft.input_schema),
+                            "parameters": ft.input_schema,
                         });
                         if let Some(ref desc) = ft.description {
                             func["description"] = json!(desc);
@@ -129,11 +136,7 @@ pub fn prepare_responses_tools(
                     }
                 })
                 .collect();
-            if xai_tools.is_empty() {
-                None
-            } else {
-                Some(xai_tools)
-            }
+            Some(xai_tools)
         }
     };
 
@@ -148,7 +151,7 @@ pub fn prepare_responses_tools(
                 ToolChoice::None => Some(json!("none")),
                 ToolChoice::Required => Some(json!("required")),
                 ToolChoice::Tool { tool_name } => {
-                    let selected = non_empty_tools.iter().find(|t| match t {
+                    let selected = non_empty_tools.iter().rev().find(|t| match t {
                         Tool::Function(ft) => ft.name == *tool_name,
                         Tool::Provider(pt) => pt.name == *tool_name,
                     });
@@ -172,12 +175,12 @@ pub fn prepare_responses_tools(
         }
     };
 
-    PreparedResponsesTools {
+    Ok(PreparedResponsesTools {
         tools: tools_opt,
         tool_choice: tool_choice_opt,
         tool_warnings,
         provider_tool_names,
-    }
+    })
 }
 
 fn prepare_provider_tool(
@@ -227,6 +230,13 @@ fn prepare_provider_tool(
         "xai.code_execution" => Some(json!({ "type": "code_interpreter" })),
         "xai.view_image" => Some(json!({ "type": "view_image" })),
         "xai.view_x_video" => Some(json!({ "type": "view_x_video" })),
+        "xai.image_generation" => {
+            let mut tool = json!({ "type": "image_generation" });
+            if let Some(action) = args.get("action") {
+                tool["action"] = action.clone();
+            }
+            Some(tool)
+        }
         "xai.file_search" => {
             let mut tool = json!({ "type": "file_search" });
             if let Some(v) = args.get("vectorStoreIds") {
@@ -271,15 +281,137 @@ fn prepare_provider_tool(
 
 // ── Provider options helpers ─────────────────────────────────────────────────
 
-fn xai_option(
-    options: &Option<std::collections::HashMap<String, Value>>,
-    key: &str,
-) -> Option<Value> {
+fn xai_option(options: &Option<SharedProviderOptions>, key: &str) -> Option<Value> {
     options
         .as_ref()
-        .and_then(|m| m.get("xai"))
+        .and_then(|m| crate::xai::options::xai_options(Some(m)))
         .and_then(|o| o.get(key))
         .cloned()
+}
+
+fn validate_value(
+    key: &str,
+    value: &Value,
+    valid: impl FnOnce(&Value) -> bool,
+) -> Result<(), AiMuxError> {
+    if valid(value) {
+        Ok(())
+    } else {
+        Err(AiMuxError::InvalidArgument(format!(
+            "Invalid xai option {key}: {value}"
+        )))
+    }
+}
+
+fn string_array(value: &Value, maximum: usize) -> bool {
+    value
+        .as_array()
+        .is_some_and(|items| items.len() <= maximum && items.iter().all(Value::is_string))
+}
+
+fn validate_response_options(options: &Option<SharedProviderOptions>) -> Result<(), AiMuxError> {
+    for (key, value) in options
+        .as_ref()
+        .and_then(|options| crate::xai::options::xai_options(Some(options)))
+        .into_iter()
+        .flatten()
+    {
+        validate_value(key, value, |value| match key.as_str() {
+            "reasoningEffort" => value
+                .as_str()
+                .is_some_and(|v| ["none", "low", "medium", "high", "xhigh"].contains(&v)),
+            "reasoningSummary" => value
+                .as_str()
+                .is_some_and(|v| ["auto", "concise", "detailed"].contains(&v)),
+            "serviceTier" => value
+                .as_str()
+                .is_some_and(|v| ["default", "priority"].contains(&v)),
+            "topLogprobs" => value
+                .as_f64()
+                .is_some_and(|v| v.fract() == 0.0 && (0.0..=8.0).contains(&v)),
+            "minP" => value.as_f64().is_some_and(|v| (0.0..=1.0).contains(&v)),
+            "maxTurns" => value
+                .as_f64()
+                .is_some_and(|v| v.fract() == 0.0 && v.abs() <= 9_007_199_254_740_991.0),
+            "logprobs" | "store" | "parallelToolCalls" => value.is_boolean(),
+            "promptCacheKey" | "safetyIdentifier" | "user" | "previousResponseId" => {
+                value.is_string()
+            }
+            "include" => {
+                value.is_null()
+                    || value.as_array().is_some_and(|items| {
+                        items.iter().all(|item| {
+                            item.as_str().is_some_and(|v| {
+                                [
+                                    "file_search_call.results",
+                                    "web_search_call.action.sources",
+                                    "code_interpreter_call.outputs",
+                                    "reasoning.encrypted_content",
+                                    "no_inline_citations",
+                                ]
+                                .contains(&v)
+                            })
+                        })
+                    })
+            }
+            _ => true,
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_provider_tool(tool: &aimux_core::tool::ProviderTool) -> Result<(), AiMuxError> {
+    let id = tool.id.as_str();
+    if ![
+        "xai.web_search",
+        "xai.x_search",
+        "xai.image_generation",
+        "xai.file_search",
+        "xai.mcp",
+    ]
+    .contains(&id)
+    {
+        return Ok(());
+    }
+    let args = &tool.args;
+    for (key, value) in args {
+        validate_value(key, value, |value| match (id, key.as_str()) {
+            ("xai.web_search", "allowedDomains" | "excludedDomains") => string_array(value, 5),
+            ("xai.x_search", "allowedXHandles" | "excludedXHandles") => string_array(value, 10),
+            ("xai.web_search", "enableImageSearch" | "enableImageUnderstanding")
+            | ("xai.x_search", "enableImageUnderstanding" | "enableVideoUnderstanding") => {
+                value.is_boolean()
+            }
+            ("xai.x_search", "fromDate" | "toDate") => value.is_string(),
+            ("xai.image_generation", "action") => value
+                .as_str()
+                .is_some_and(|v| ["auto", "generate", "edit"].contains(&v)),
+            ("xai.file_search", "vectorStoreIds") | ("xai.mcp", "allowedTools") => {
+                string_array(value, usize::MAX)
+            }
+            ("xai.file_search", "maxNumResults") => value.is_number(),
+            ("xai.mcp", "serverUrl" | "serverLabel" | "serverDescription" | "authorization") => {
+                value.is_string()
+            }
+            ("xai.mcp", "headers") => value
+                .as_object()
+                .is_some_and(|headers| headers.values().all(Value::is_string)),
+            _ => true,
+        })?;
+    }
+    for key in match id {
+        "xai.file_search" => &["vectorStoreIds"][..],
+        "xai.mcp" => &["serverUrl"][..],
+        _ => &[],
+    } {
+        if !args.contains_key(*key) {
+            return Err(AiMuxError::InvalidArgument(format!(
+                "Missing {key} for {}",
+                tool.name
+            )));
+        }
+    }
+    Ok(())
 }
 
 // ── Input conversion ─────────────────────────────────────────────────────────
@@ -297,117 +429,75 @@ pub fn convert_to_xai_responses_input(
     let mut warnings: Vec<Warning> = Vec::new();
 
     for msg in prompt {
-        match msg.role {
-            Role::System => {
-                let content: String = msg
-                    .content
-                    .iter()
-                    .filter_map(|p| match p {
-                        ContentPart::Text { text, .. } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("");
+        match msg {
+            LanguageModelMessage::System { content, .. } => {
                 input.push(json!({ "role": "system", "content": content }));
             }
-            Role::User => {
+            LanguageModelMessage::User { content, .. } => {
                 let mut content_parts = Vec::new();
-                for part in &msg.content {
+                for part in content {
                     match part {
-                        ContentPart::Text { text, .. } => {
+                        UserPart::Text(TextPart { text, .. }) => {
                             content_parts.push(json!({ "type": "input_text", "text": text }));
                         }
-                        ContentPart::Image {
-                            image,
-                            media_type,
-                            provider_options,
-                        } => {
-                            use base64::Engine;
-                            let b64 = base64::engine::general_purpose::STANDARD.encode(image);
-                            content_parts.push(convert_image_part(
-                                media_type,
-                                Some(&b64),
-                                None,
-                                provider_options,
-                            ));
-                        }
-                        ContentPart::File {
-                            data,
-                            media_type,
-                            provider_options,
-                            ..
-                        } => {
-                            use base64::Engine;
-                            let b64 = base64::engine::general_purpose::STANDARD.encode(data);
-                            content_parts.push(convert_image_part(
-                                media_type,
-                                Some(&b64),
-                                None,
-                                provider_options,
-                            ));
-                        }
-                        ContentPart::FileBase64 {
-                            data,
-                            media_type,
-                            provider_options,
-                            ..
-                        } => {
-                            content_parts.push(convert_image_part(
-                                media_type,
-                                Some(data),
-                                None,
-                                provider_options,
-                            ));
-                        }
-                        ContentPart::FileUrl {
-                            url,
-                            media_type,
-                            provider_options,
-                        } => {
-                            let top_level = media_type.split('/').next().unwrap_or("");
-                            if top_level == "image" {
-                                content_parts.push(convert_image_part(
-                                    media_type,
-                                    None,
-                                    Some(url),
-                                    provider_options,
-                                ));
-                            } else {
-                                content_parts
-                                    .push(json!({ "type": "input_file", "file_url": url }));
+                        UserPart::File(file) => {
+                            if matches!(file.data, FileData::Data { .. })
+                                && file.media_type.split('/').next() != Some("image")
+                            {
+                                return Err(AiMuxError::UnsupportedFunctionality(format!(
+                                    "file part media type {} as inline data (xAI Responses requires a URL or a Files API reference for non-image files)",
+                                    file.media_type
+                                )));
                             }
-                        }
-                        ContentPart::FileReference {
-                            media_type,
-                            reference,
-                            provider_options,
-                            ..
-                        } => {
-                            let _ = (media_type, provider_options);
-                            let file_id = resolve_provider_reference(reference, "xai")
-                                .map_err(AiMuxError::InvalidArgument)?;
-                            content_parts.push(json!({ "type": "input_file", "file_id": file_id }));
-                        }
-                        _ => {
-                            warnings.push(Warning::Other {
-                                message: "xAI Responses API does not support this content type in user messages".to_string(),
+                            content_parts.push(match &file.data {
+                                FileData::Data {
+                                    data: FileBytes::Binary(bytes),
+                                } => {
+                                    use base64::Engine;
+                                    let b64 =
+                                        base64::engine::general_purpose::STANDARD.encode(bytes);
+                                    convert_image_part(file, Some(&b64), None)?
+                                }
+                                FileData::Data {
+                                    data: FileBytes::Base64(data),
+                                } => convert_image_part(file, Some(data), None)?,
+                                FileData::Url { url, .. }
+                                    if get_top_level_media_type(&file.media_type) == "image" =>
+                                {
+                                    convert_image_part(file, None, Some(url))?
+                                }
+                                FileData::Url { url, .. } => {
+                                    json!({ "type": "input_file", "file_url": url })
+                                }
+                                FileData::Reference { reference } => {
+                                    let file_id = resolve_provider_reference(
+                                        reference,
+                                        crate::xai::options::NAMESPACE,
+                                    )
+                                    .map_err(AiMuxError::InvalidArgument)?;
+                                    json!({ "type": "input_file", "file_id": file_id })
+                                }
+                                FileData::Text { .. } => {
+                                    return Err(AiMuxError::UnsupportedFunctionality(
+                                        "text file parts".into(),
+                                    ));
+                                }
                             });
                         }
                     }
                 }
                 input.push(json!({ "role": "user", "content": content_parts }));
             }
-            Role::Assistant => {
-                for part in &msg.content {
+            LanguageModelMessage::Assistant { content, .. } => {
+                for part in content {
                     match part {
-                        ContentPart::Text {
+                        AssistantPart::Text(TextPart {
                             text,
                             provider_options,
-                            ..
-                        } => {
+                        }) => {
                             let id = provider_options
                                 .as_ref()
-                                .and_then(|po| po.get("xai"))
+                                .and_then(|po| crate::xai::options::xai_options(Some(po)))
                                 .and_then(|x| x.get("itemId"))
                                 .and_then(|v| v.as_str())
                                 .map(std::string::ToString::to_string);
@@ -417,40 +507,27 @@ pub fn convert_to_xai_responses_input(
                             }
                             input.push(msg_obj);
                         }
-                        ContentPart::ToolCall {
+                        AssistantPart::ToolCall(ToolCallPart {
                             tool_call_id,
                             tool_name,
                             input: tool_input,
                             provider_executed,
                             provider_options,
                             ..
-                        } => {
+                        }) => {
                             // Skip provider-executed tool calls.
-                            // The standardized field is authoritative. Fall back
-                            // to the legacy provider option only when it is absent.
-                            let is_provider_executed = provider_executed.unwrap_or_else(|| {
-                                provider_options
-                                    .as_ref()
-                                    .and_then(|po| po.get("xai"))
-                                    .and_then(|x| x.get("providerExecuted"))
-                                    .and_then(serde_json::Value::as_bool)
-                                    .unwrap_or(false)
-                            });
+                            let is_provider_executed = provider_executed.unwrap_or(false);
                             if is_provider_executed {
                                 continue;
                             }
                             let id = provider_options
                                 .as_ref()
-                                .and_then(|po| po.get("xai"))
+                                .and_then(|po| crate::xai::options::xai_options(Some(po)))
                                 .and_then(|x| x.get("itemId"))
                                 .and_then(|v| v.as_str())
                                 .map(std::string::ToString::to_string);
                             let item_id = id.unwrap_or_else(|| tool_call_id.clone());
-                            let arguments = if tool_input.is_null() {
-                                "{}".to_string()
-                            } else {
-                                tool_input.to_string()
-                            };
+                            let arguments = tool_input.to_string();
                             input.push(json!({
                                 "type": "function_call",
                                 "id": item_id,
@@ -460,21 +537,21 @@ pub fn convert_to_xai_responses_input(
                                 "status": "completed"
                             }));
                         }
-                        ContentPart::ToolResult { .. } => {}
-                        ContentPart::Reasoning {
+                        AssistantPart::ToolResult(_) => {}
+                        AssistantPart::Reasoning(ReasoningPart {
                             text,
                             provider_options,
                             ..
-                        } => {
+                        }) => {
                             let item_id = provider_options
                                 .as_ref()
-                                .and_then(|po| po.get("xai"))
+                                .and_then(|po| crate::xai::options::xai_options(Some(po)))
                                 .and_then(|x| x.get("itemId"))
                                 .and_then(|v| v.as_str())
                                 .map(std::string::ToString::to_string);
                             let encrypted_content = provider_options
                                 .as_ref()
-                                .and_then(|po| po.get("xai"))
+                                .and_then(|po| crate::xai::options::xai_options(Some(po)))
                                 .and_then(|x| x.get("reasoningEncryptedContent"))
                                 .and_then(|v| v.as_str())
                                 .map(std::string::ToString::to_string);
@@ -500,32 +577,37 @@ pub fn convert_to_xai_responses_input(
                                 });
                             }
                         }
-                        _ => {
+                        AssistantPart::File(_)
+                        | AssistantPart::ReasoningFile(_)
+                        | AssistantPart::Custom(_) => {
+                            let kind = match part {
+                                AssistantPart::File(_) => "file",
+                                AssistantPart::ReasoningFile(_) => "reasoning-file",
+                                _ => "custom",
+                            };
                             warnings.push(Warning::Other {
-                                message: "xAI Responses API does not support this content type in assistant messages".to_string(),
+                                message: format!("xAI Responses API does not support {kind} in assistant messages"),
                             });
                         }
                     }
                 }
             }
-            Role::Tool => {
-                for part in &msg.content {
-                    if let ContentPart::ToolResult {
+            LanguageModelMessage::Tool { content, .. } => {
+                for part in content {
+                    let ToolPart::ToolResult(ToolResultPart {
                         tool_call_id,
-                        result,
+                        output,
                         ..
-                    } = part
-                    {
-                        let output_value = match result {
-                            Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        };
-                        input.push(json!({
-                            "type": "function_call_output",
-                            "call_id": tool_call_id,
-                            "output": output_value
-                        }));
-                    }
+                    }) = part
+                    else {
+                        continue;
+                    };
+                    let output_value = convert_tool_output(output)?;
+                    input.push(json!({
+                        "type": "function_call_output",
+                        "call_id": tool_call_id,
+                        "output": output_value
+                    }));
                 }
             }
         }
@@ -534,16 +616,61 @@ pub fn convert_to_xai_responses_input(
     Ok((input, warnings))
 }
 
+fn convert_tool_output(output: &ToolResultOutput) -> Result<Value, AiMuxError> {
+    match output {
+        ToolResultOutput::ExecutionDenied { reason, .. } => {
+            Ok(json!(reason.as_deref().unwrap_or("tool execution denied")))
+        }
+        ToolResultOutput::Content { value } => {
+            let mut parts = Vec::new();
+            for item in value {
+                match item {
+                    ToolResultContent::Text(part) => {
+                        parts.push(json!({"type":"input_text", "text":part.text}))
+                    }
+                    ToolResultContent::File(part)
+                        if get_top_level_media_type(&part.media_type) == "image" =>
+                    {
+                        let image_url = match &part.data {
+                            FileData::Url { url, .. } => url.clone(),
+                            FileData::Data { data } => {
+                                use base64::Engine;
+                                let encoded = match data {
+                                    FileBytes::Base64(data) => data.clone(),
+                                    FileBytes::Binary(bytes) => {
+                                        base64::engine::general_purpose::STANDARD.encode(bytes)
+                                    }
+                                };
+                                format!("data:{};base64,{encoded}", resolve_full_media_type(part)?)
+                            }
+                            _ => continue,
+                        };
+                        parts.push(json!({"type":"input_image", "image_url":image_url}));
+                    }
+                    _ => {}
+                }
+            }
+            Ok(json!(parts))
+        }
+        _ => Ok(crate::openai::convert::tool_result_to_content(output)),
+    }
+}
+
 fn convert_image_part(
-    media_type: &str,
+    file_part: &FilePart,
     b64_data: Option<&str>,
     url: Option<&str>,
-    provider_options: &Option<Value>,
-) -> Value {
+) -> Result<Value, AiMuxError> {
+    let media_type = &file_part.media_type;
+    if get_top_level_media_type(media_type) != "image" {
+        return Err(AiMuxError::UnsupportedFunctionality(format!(
+            "file part media type {media_type} as inline data (xAI Responses requires a URL or a Files API reference for non-image files)"
+        )));
+    }
     let image_url = if let Some(url_str) = url {
         url_str.to_string()
     } else if let Some(b64) = b64_data {
-        let full_mt = resolve_full_media_type(media_type, b64);
+        let full_mt = resolve_full_media_type(file_part)?;
         format!("data:{full_mt};base64,{b64}")
     } else {
         String::new()
@@ -555,15 +682,21 @@ fn convert_image_part(
     });
 
     // Image detail provider option.
-    if let Some(detail) = provider_options
+    if let Some(detail) = file_part
+        .provider_options
         .as_ref()
-        .and_then(|po| po.get("xai"))
+        .and_then(|po| crate::xai::options::xai_options(Some(po)))
         .and_then(|x| x.get("imageDetail"))
     {
+        validate_value("imageDetail", detail, |value| {
+            value
+                .as_str()
+                .is_some_and(|value| ["auto", "low", "high"].contains(&value))
+        })?;
         part["detail"] = detail.clone();
     }
 
-    part
+    Ok(part)
 }
 
 // ── Request body builder ─────────────────────────────────────────────────────
@@ -588,6 +721,21 @@ pub fn build_responses_request_body(
 ) -> Result<ResponsesRequestBodyResult, AiMuxError> {
     let mut warnings: Vec<Warning> = Vec::new();
     let xai_opts = &options.provider_options;
+    validate_response_options(xai_opts)?;
+
+    if options.frequency_penalty.is_some() {
+        warnings.push(Warning::Unsupported {
+            feature: "frequencyPenalty".to_string(),
+            details: None,
+        });
+    }
+
+    if options.presence_penalty.is_some() {
+        warnings.push(Warning::Unsupported {
+            feature: "presencePenalty".to_string(),
+            details: None,
+        });
+    }
 
     if options.stop_sequences.is_some() {
         warnings.push(Warning::Unsupported {
@@ -599,7 +747,7 @@ pub fn build_responses_request_body(
     let (input, input_warnings) = convert_to_xai_responses_input(&options.prompt)?;
     warnings.extend(input_warnings);
 
-    let prepared = prepare_responses_tools(&options.tools, Some(&options.tool_choice));
+    let prepared = prepare_responses_tools(&options.tools, options.tool_choice.as_ref())?;
     for tw in &prepared.tool_warnings {
         warnings.push(tw.clone());
     }
@@ -628,13 +776,21 @@ pub fn build_responses_request_body(
                 ReasoningEffort::Low => "low".to_string(),
                 ReasoningEffort::Medium => "medium".to_string(),
                 ReasoningEffort::High => "high".to_string(),
+                ReasoningEffort::Xhigh if model_id == "grok-4.6" => "xhigh".to_string(),
                 ReasoningEffort::Xhigh => "high".to_string(),
                 _ => reasoning.to_string(),
             });
+            if reasoning_effort.as_deref() != Some(reasoning.to_string().as_str()) {
+                warnings.push(Warning::Compatibility {
+                    feature: "reasoning".to_string(),
+                    details: Some(format!(
+                        "reasoning \"{reasoning}\" is not directly supported by this model. mapped to effort \"{}\".",
+                        reasoning_effort.as_deref().unwrap_or_default()
+                    )),
+                });
+            }
         }
     }
-
-    let reasoning_summary = xai_option(xai_opts, "reasoningSummary");
 
     // Store option.
     let store = xai_option(xai_opts, "store").and_then(|v| v.as_bool());
@@ -682,6 +838,9 @@ pub fn build_responses_request_body(
     if let Some(tp) = options.top_p {
         body["top_p"] = json!(tp);
     }
+    if let Some(tk) = options.top_k {
+        body["top_k"] = json!(tk);
+    }
     if let Some(seed) = options.seed {
         body["seed"] = json!(seed);
     }
@@ -692,16 +851,21 @@ pub fn build_responses_request_body(
         body["top_logprobs"] = tlp;
     }
 
-    // Reasoning object.
-    if reasoning_effort.is_some() || reasoning_summary.is_some() {
-        let mut reasoning_obj = json!({});
-        if let Some(effort) = &reasoning_effort {
-            reasoning_obj["effort"] = json!(effort);
+    if let Some(effort) = &reasoning_effort {
+        body["reasoning"] = json!({ "effort": effort });
+    }
+    for (option, parameter) in [
+        ("minP", "min_p"),
+        ("maxTurns", "max_turns"),
+        ("parallelToolCalls", "parallel_tool_calls"),
+        ("promptCacheKey", "prompt_cache_key"),
+        ("safetyIdentifier", "safety_identifier"),
+        ("serviceTier", "service_tier"),
+        ("user", "user"),
+    ] {
+        if let Some(value) = xai_option(xai_opts, option) {
+            body[parameter] = value;
         }
-        if let Some(summary) = &reasoning_summary {
-            reasoning_obj["summary"] = json!(summary);
-        }
-        body["reasoning"] = reasoning_obj;
     }
 
     // Store.
@@ -792,18 +956,10 @@ pub fn resolve_tool_name(
         .get("xai.code_execution")
         .cloned()
         .unwrap_or_else(|| "code_execution".to_string());
-    let default_view_image = provider_tool_names
-        .get("xai.view_image")
-        .cloned()
-        .unwrap_or_else(|| "view_image".to_string());
-    let default_view_x_video = provider_tool_names
-        .get("xai.view_x_video")
-        .cloned()
-        .unwrap_or_else(|| "view_x_video".to_string());
     let default_mcp = provider_tool_names
         .get("xai.mcp")
         .cloned()
-        .unwrap_or_else(|| "mcp".to_string());
+        .unwrap_or_else(|| part_name.unwrap_or("mcp").to_string());
     let default_file_search = provider_tool_names
         .get("xai.file_search")
         .cloned()
@@ -818,14 +974,15 @@ pub fn resolve_tool_name(
         || part_type == "code_execution_call"
     {
         default_code
-    } else if name == "view_image" || part_type == "view_image_call" {
-        default_view_image
-    } else if name == "view_x_video" || part_type == "view_x_video_call" {
-        default_view_x_video
     } else if part_type == "mcp_call" {
         default_mcp
     } else if part_type == "file_search_call" {
         default_file_search
+    } else if part_type == "image_generation_call" {
+        provider_tool_names
+            .get("xai.image_generation")
+            .cloned()
+            .unwrap_or_else(|| "image_generation".to_string())
     } else if !name.is_empty() {
         name.to_string()
     } else {

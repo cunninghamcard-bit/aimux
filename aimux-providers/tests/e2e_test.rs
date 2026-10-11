@@ -9,14 +9,37 @@
 use aimux_core::content::ContentPart;
 use aimux_core::error::AiMuxError;
 use aimux_core::generate::{GenerateTextOptions, generate_text, stream_text};
+use aimux_core::language_model_message::ToolResultOutput;
 use aimux_core::message::{MessageContent, ModelMessage, Role};
-use aimux_core::stream_part::StreamPart;
-use aimux_core::tool::{FunctionTool, Tool, ToolChoice};
+use aimux_core::stream_part::TextStreamPart;
+use aimux_core::tool::{FunctionTool, Tool, ToolCall, ToolChoice};
 use aimux_core::types::FinishReasonUnified;
+use aimux_providers::anthropic::{AnthropicProvider, AnthropicProviderSettings, create_anthropic};
+use aimux_providers::openai::{OpenAIProvider, OpenAIProviderSettings, create_openai};
 use aimux_providers::{
-    AnthropicConfig, AnthropicProvider, CohereConfig, CohereProvider, GoogleConfig, GoogleProvider,
-    MistralConfig, MistralProvider, OpenAIConfig, OpenAIProvider,
+    CohereProviderSettings, GoogleProviderSettings, MistralProviderSettings, create_cohere,
+    create_google, create_mistral,
 };
+
+/// The native Anthropic package pointed at a mock server.
+fn anthropic_at(server_uri: String, key: &str) -> AnthropicProvider {
+    create_anthropic(AnthropicProviderSettings {
+        api_key: Some(key.to_string()),
+        base_url: Some(format!("{server_uri}/v1")),
+        ..Default::default()
+    })
+    .expect("valid settings")
+}
+
+/// The native OpenAI package pointed at a mock server.
+fn openai_at(base_url: String, key: &str) -> OpenAIProvider {
+    create_openai(OpenAIProviderSettings {
+        api_key: Some(key.to_string()),
+        base_url: Some(base_url),
+        ..Default::default()
+    })
+    .unwrap()
+}
 use futures::StreamExt;
 use serde_json::json;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::*};
@@ -53,8 +76,8 @@ async fn e2e_openai_generate_text() {
         .mount(&server)
         .await;
 
-    let provider = OpenAIProvider::new(OpenAIConfig::new("test-key").with_base_url(server.uri()));
-    let model = provider.model("gpt-4o");
+    let provider = openai_at(server.uri(), "test-key");
+    let model = provider.chat("gpt-4o");
 
     let result = generate_text(&model, "What is Rust?", GenerateTextOptions::default())
         .await
@@ -88,8 +111,8 @@ async fn e2e_openai_stream_text() {
         .mount(&server)
         .await;
 
-    let provider = OpenAIProvider::new(OpenAIConfig::new("test-key").with_base_url(server.uri()));
-    let model = provider.model("gpt-4o");
+    let provider = openai_at(server.uri(), "test-key");
+    let model = provider.chat("gpt-4o");
 
     let result = stream_text(&model, "Say hello", GenerateTextOptions::default())
         .await
@@ -141,8 +164,8 @@ async fn e2e_openai_generate_with_tools() {
         .mount(&server)
         .await;
 
-    let provider = OpenAIProvider::new(OpenAIConfig::new("test-key").with_base_url(server.uri()));
-    let model = provider.model("gpt-4o");
+    let provider = openai_at(server.uri(), "test-key");
+    let model = provider.chat("gpt-4o");
 
     let result = generate_text(
         &model,
@@ -187,8 +210,8 @@ async fn e2e_openai_error_401() {
         .mount(&server)
         .await;
 
-    let provider = OpenAIProvider::new(OpenAIConfig::new("test-key").with_base_url(server.uri()));
-    let model = provider.model("gpt-4o");
+    let provider = openai_at(server.uri(), "test-key");
+    let model = provider.chat("gpt-4o");
 
     let result = generate_text(&model, "test", GenerateTextOptions::default()).await;
 
@@ -220,9 +243,8 @@ async fn e2e_anthropic_generate_text() {
         .mount(&server)
         .await;
 
-    let provider =
-        AnthropicProvider::new(AnthropicConfig::new("test-key").with_base_url(server.uri()));
-    let model = provider.model("claude-3-5-sonnet-20241022");
+    let provider = anthropic_at(server.uri(), "test-key");
+    let model = provider.messages("claude-3-5-sonnet-20241022");
 
     let result = generate_text(
         &model,
@@ -269,9 +291,8 @@ async fn e2e_anthropic_stream_text() {
         .mount(&server)
         .await;
 
-    let provider =
-        AnthropicProvider::new(AnthropicConfig::new("test-key").with_base_url(server.uri()));
-    let model = provider.model("claude-3-5-sonnet-20241022");
+    let provider = anthropic_at(server.uri(), "test-key");
+    let model = provider.messages("claude-3-5-sonnet-20241022");
 
     let result = stream_text(
         &model,
@@ -297,9 +318,8 @@ async fn e2e_anthropic_error_429() {
         .mount(&server)
         .await;
 
-    let provider =
-        AnthropicProvider::new(AnthropicConfig::new("test-key").with_base_url(server.uri()));
-    let model = provider.model("claude-3-5-sonnet-20241022");
+    let provider = anthropic_at(server.uri(), "test-key");
+    let model = provider.messages("claude-3-5-sonnet-20241022");
 
     let result = generate_text(&model, "test", GenerateTextOptions::default()).await;
 
@@ -340,8 +360,8 @@ async fn e2e_openai_stream_part_sequence() {
         .mount(&server)
         .await;
 
-    let provider = OpenAIProvider::new(OpenAIConfig::new("test-key").with_base_url(server.uri()));
-    let model = provider.model("gpt-4o");
+    let provider = openai_at(server.uri(), "test-key");
+    let model = provider.chat("gpt-4o");
 
     let result = stream_text(&model, "test", GenerateTextOptions::default())
         .await
@@ -353,25 +373,24 @@ async fn e2e_openai_stream_part_sequence() {
         parts.push(part.expect("stream part should be ok"));
     }
 
-    // Expected sequence: StreamStart, TextStart, TextDelta, TextEnd, Finish
-    // (ResponseMetadata may or may not be present depending on implementation)
+    // Expected sequence: StreamStart, TextStart, TextDelta, TextEnd, FinishStep, Finish
     assert!(
-        parts.len() >= 5,
-        "expected at least 5 parts, got {}",
+        parts.len() >= 6,
+        "expected at least 6 parts, got {}",
         parts.len()
     );
 
     // First part must be StreamStart
-    assert!(matches!(parts[0], StreamPart::StreamStart { .. }));
+    assert!(matches!(parts[0], TextStreamPart::StreamStart { .. }));
 
     // Last part must be Finish
     let last = parts.last().unwrap();
-    assert!(matches!(last, StreamPart::Finish { .. }));
+    assert!(matches!(last, TextStreamPart::Finish { .. }));
 
     // Must contain at least one TextDelta
     let has_text_delta = parts
         .iter()
-        .any(|p| matches!(p, StreamPart::TextDelta { delta, .. } if delta == "Hi"));
+        .any(|p| matches!(p, TextStreamPart::TextDelta { delta, .. } if delta == "Hi"));
     assert!(has_text_delta, "expected a TextDelta with 'Hi'");
 }
 
@@ -404,9 +423,8 @@ async fn e2e_anthropic_stream_part_sequence() {
         .mount(&server)
         .await;
 
-    let provider =
-        AnthropicProvider::new(AnthropicConfig::new("test-key").with_base_url(server.uri()));
-    let model = provider.model("claude-3-5-sonnet-20241022");
+    let provider = anthropic_at(server.uri(), "test-key");
+    let model = provider.messages("claude-3-5-sonnet-20241022");
 
     let result = stream_text(&model, "test", GenerateTextOptions::default())
         .await
@@ -419,16 +437,16 @@ async fn e2e_anthropic_stream_part_sequence() {
     }
 
     // First part must be StreamStart
-    assert!(matches!(parts[0], StreamPart::StreamStart { .. }));
+    assert!(matches!(parts[0], TextStreamPart::StreamStart { .. }));
 
     // Last part must be Finish
     let last = parts.last().unwrap();
-    assert!(matches!(last, StreamPart::Finish { .. }));
+    assert!(matches!(last, TextStreamPart::Finish { .. }));
 
     // Must contain at least one TextDelta
     let has_text_delta = parts
         .iter()
-        .any(|p| matches!(p, StreamPart::TextDelta { delta, .. } if delta == "Hi"));
+        .any(|p| matches!(p, TextStreamPart::TextDelta { delta, .. } if delta == "Hi"));
     assert!(has_text_delta, "expected a TextDelta with 'Hi'");
 }
 
@@ -453,8 +471,7 @@ async fn e2e_provider_interchangeability() {
         .mount(&openai_server)
         .await;
 
-    let openai = OpenAIProvider::new(OpenAIConfig::new("key").with_base_url(openai_server.uri()))
-        .model("gpt-4o");
+    let openai = openai_at(openai_server.uri(), "key").chat("gpt-4o");
 
     let openai_result = generate_text(&openai, "test", GenerateTextOptions::default())
         .await
@@ -474,9 +491,7 @@ async fn e2e_provider_interchangeability() {
         .mount(&anthropic_server)
         .await;
 
-    let anthropic =
-        AnthropicProvider::new(AnthropicConfig::new("key").with_base_url(anthropic_server.uri()))
-            .model("claude-3");
+    let anthropic = anthropic_at(anthropic_server.uri(), "key").messages("claude-3");
 
     let anthropic_result = generate_text(&anthropic, "test", GenerateTextOptions::default())
         .await
@@ -541,8 +556,8 @@ async fn e2e_openai_tool_call_round_trip() {
         .mount(&server)
         .await;
 
-    let provider = OpenAIProvider::new(OpenAIConfig::new("test-key").with_base_url(server.uri()));
-    let model = provider.model("gpt-4o");
+    let provider = openai_at(server.uri(), "test-key");
+    let model = provider.chat("gpt-4o");
 
     let weather_tool = || {
         Tool::Function(
@@ -593,10 +608,15 @@ async fn e2e_openai_tool_call_round_trip() {
         },
         ModelMessage {
             role: Role::Tool,
-            content: MessageContent::Parts(vec![ContentPart::tool_result(
-                "call_abc",
-                json!({"temperature": 22, "condition": "sunny"}),
-            )]),
+            content: MessageContent::Parts(vec![ContentPart::ToolResult {
+                tool_call_id: "call_abc".into(),
+                tool_name: "get_weather".into(),
+                output: ToolResultOutput::Json {
+                    value: json!({"temperature": 22, "condition": "sunny"}),
+                    provider_options: None,
+                },
+                provider_options: None,
+            }]),
         },
     ];
 
@@ -662,8 +682,8 @@ async fn e2e_openai_multi_turn_dialog() {
         .mount(&server)
         .await;
 
-    let provider = OpenAIProvider::new(OpenAIConfig::new("test-key").with_base_url(server.uri()));
-    let model = provider.model("gpt-4o");
+    let provider = openai_at(server.uri(), "test-key");
+    let model = provider.chat("gpt-4o");
 
     // Full multi-turn conversation:
     //   system → user(q1) → assistant(a1) → user(q2 follow-up)
@@ -734,8 +754,8 @@ async fn e2e_openai_tool_choice_required() {
         .mount(&server)
         .await;
 
-    let provider = OpenAIProvider::new(OpenAIConfig::new("test-key").with_base_url(server.uri()));
-    let model = provider.model("gpt-4o");
+    let provider = openai_at(server.uri(), "test-key");
+    let model = provider.chat("gpt-4o");
 
     let weather_tool = Tool::Function(
         FunctionTool::new(
@@ -802,8 +822,8 @@ async fn e2e_openai_stream_tool_calls() {
         .mount(&server)
         .await;
 
-    let provider = OpenAIProvider::new(OpenAIConfig::new("test-key").with_base_url(server.uri()));
-    let model = provider.model("gpt-4o");
+    let provider = openai_at(server.uri(), "test-key");
+    let model = provider.chat("gpt-4o");
 
     let weather_tool = Tool::Function(
         FunctionTool::new(
@@ -840,10 +860,10 @@ async fn e2e_openai_stream_tool_calls() {
     let has_tool_part = parts.iter().any(|p| {
         matches!(
             p,
-            StreamPart::ToolCall { .. }
-                | StreamPart::ToolInputStart { .. }
-                | StreamPart::ToolInputDelta { .. }
-                | StreamPart::ToolInputEnd { .. }
+            TextStreamPart::ToolCall(_)
+                | TextStreamPart::ToolInputStart { .. }
+                | TextStreamPart::ToolInputDelta { .. }
+                | TextStreamPart::ToolInputEnd { .. }
         )
     });
     assert!(
@@ -852,14 +872,16 @@ async fn e2e_openai_stream_tool_calls() {
     );
 
     // Must contain a Finish part
-    let has_finish = parts.iter().any(|p| matches!(p, StreamPart::Finish { .. }));
+    let has_finish = parts
+        .iter()
+        .any(|p| matches!(p, TextStreamPart::Finish { .. }));
     assert!(has_finish, "expected a Finish StreamPart");
 
     // If a complete ToolCall part exists, verify its fields
     let tool_call = parts.iter().find_map(|p| match p {
-        StreamPart::ToolCall {
+        TextStreamPart::ToolCall(ToolCall {
             tool_name, input, ..
-        } => Some((tool_name, input)),
+        }) => Some((tool_name, input)),
         _ => None,
     });
     if let Some((tool_name, input)) = tool_call {
@@ -896,8 +918,13 @@ async fn e2e_google_generate_text() {
         .mount(&server)
         .await;
 
-    let provider = GoogleProvider::new(GoogleConfig::new("test-key").with_base_url(server.uri()));
-    let model = provider.model("gemini-2.0-flash");
+    let provider = create_google(GoogleProviderSettings {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Default::default()
+    })
+    .unwrap();
+    let model = provider.chat("gemini-2.0-flash");
 
     let result = generate_text(&model, "What is Rust?", GenerateTextOptions::default())
         .await
@@ -935,8 +962,13 @@ async fn e2e_google_stream_text() {
         .mount(&server)
         .await;
 
-    let provider = GoogleProvider::new(GoogleConfig::new("test-key").with_base_url(server.uri()));
-    let model = provider.model("gemini-2.0-flash");
+    let provider = create_google(GoogleProviderSettings {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Default::default()
+    })
+    .unwrap();
+    let model = provider.chat("gemini-2.0-flash");
 
     let result = stream_text(&model, "Say hello", GenerateTextOptions::default())
         .await
@@ -977,8 +1009,13 @@ async fn e2e_mistral_generate_text() {
         .mount(&server)
         .await;
 
-    let provider = MistralProvider::new(MistralConfig::new("test-key").with_base_url(server.uri()));
-    let model = provider.model("mistral-small-latest");
+    let provider = create_mistral(MistralProviderSettings {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Default::default()
+    })
+    .expect("valid settings");
+    let model = provider.chat("mistral-small-latest");
 
     let result = generate_text(&model, "What is Rust?", GenerateTextOptions::default())
         .await
@@ -1019,8 +1056,13 @@ async fn e2e_mistral_stream_text() {
         .mount(&server)
         .await;
 
-    let provider = MistralProvider::new(MistralConfig::new("test-key").with_base_url(server.uri()));
-    let model = provider.model("mistral-small-latest");
+    let provider = create_mistral(MistralProviderSettings {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Default::default()
+    })
+    .expect("valid settings");
+    let model = provider.chat("mistral-small-latest");
 
     let result = stream_text(&model, "Say hello", GenerateTextOptions::default())
         .await
@@ -1063,8 +1105,13 @@ async fn e2e_cohere_generate_text() {
         .mount(&server)
         .await;
 
-    let provider = CohereProvider::new(CohereConfig::new("test-key").with_base_url(server.uri()));
-    let model = provider.model("command-r-plus");
+    let provider = create_cohere(CohereProviderSettings {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Default::default()
+    })
+    .expect("valid settings");
+    let model = provider.chat("command-r-plus");
 
     let result = generate_text(&model, "What is Rust?", GenerateTextOptions::default())
         .await
@@ -1113,8 +1160,13 @@ async fn e2e_cohere_stream_text() {
         .mount(&server)
         .await;
 
-    let provider = CohereProvider::new(CohereConfig::new("test-key").with_base_url(server.uri()));
-    let model = provider.model("command-r-plus");
+    let provider = create_cohere(CohereProviderSettings {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Default::default()
+    })
+    .expect("valid settings");
+    let model = provider.chat("command-r-plus");
 
     let result = stream_text(&model, "Say hello", GenerateTextOptions::default())
         .await

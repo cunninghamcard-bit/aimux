@@ -5,8 +5,6 @@
 //!
 //! Endpoint: `POST {base_url}/model/{model_id}/invoke`
 
-use std::collections::HashMap;
-
 use async_trait::async_trait;
 use serde_json::{Map, Value, json};
 
@@ -17,10 +15,10 @@ use aimux_core::image_model::{
 };
 use aimux_core::shared::Warning;
 
-use aimux_provider_utils::{HttpBody, HttpRequest};
+use aimux_provider_utils::HttpBody;
 
-use super::sigv4::sign_request;
-use super::{BedrockAuth, BedrockConfig};
+use super::options;
+use crate::shared::EndpointConfig;
 
 /// Returns the max images per call for the given model ID.
 fn get_max_images_per_call(model_id: &str) -> u32 {
@@ -37,46 +35,24 @@ fn get_max_images_per_call(model_id: &str) -> u32 {
 /// `Client` internally (RFC-0009 §4.1).
 pub struct BedrockImageModel {
     model_id: String,
-    config: BedrockConfig,
+    config: EndpointConfig,
 }
 
 impl BedrockImageModel {
-    #[must_use]
-    pub fn new(model_id: String, config: BedrockConfig) -> Self {
+    pub(crate) fn from_config(model_id: String, config: EndpointConfig) -> Self {
         Self { model_id, config }
     }
 
-    fn endpoint(&self) -> String {
-        format!("{}/model/{}/invoke", self.config.base_url, self.model_id)
+    /// Whether this model advertises image file inputs.
+    #[must_use]
+    pub fn supports_file_inputs(&self) -> Option<bool> {
+        (self.model_id == "amazon.nova-canvas-v1:0").then_some(true)
     }
 
-    fn build_headers(
-        &self,
-        body: &str,
-        url: &str,
-        extra: Option<&HashMap<String, String>>,
-    ) -> Result<Vec<(String, String)>, AiMuxError> {
-        let mut extra_headers: Vec<(String, String)> = Vec::new();
-        if let Some(extra) = extra {
-            for (k, v) in extra {
-                extra_headers.push((k.clone(), v.clone()));
-            }
-        }
-        match &self.config.auth {
-            BedrockAuth::BearerToken(token) => {
-                let mut headers = vec![("Authorization".into(), format!("Bearer {token}"))];
-                headers.extend(extra_headers);
-                Ok(headers)
-            }
-            BedrockAuth::SigV4(creds) => {
-                let signed = sign_request(creds, "bedrock", "POST", url, body, &extra_headers);
-                let mut headers: Vec<(String, String)> = Vec::new();
-                for (k, v) in &signed.headers {
-                    headers.push((k.clone(), v.clone()));
-                }
-                Ok(headers)
-            }
-        }
+    /// Whether this model advertises mask inputs.
+    #[must_use]
+    pub fn supports_mask_inputs(&self) -> Option<bool> {
+        self.supports_file_inputs()
     }
 
     fn get_base64_data(file: &ImageFile) -> Result<String, AiMuxError> {
@@ -98,13 +74,10 @@ impl BedrockImageModel {
 #[async_trait]
 impl ImageModel for BedrockImageModel {
     fn provider(&self) -> &str {
-        "amazon-bedrock"
+        &self.config.provider
     }
     fn model_id(&self) -> &str {
         &self.model_id
-    }
-    fn retry_config(&self) -> aimux_core::retry::RetryConfig {
-        self.config.retry_config
     }
     fn max_images_per_call(&self) -> Option<u32> {
         Some(get_max_images_per_call(&self.model_id))
@@ -118,11 +91,61 @@ impl ImageModel for BedrockImageModel {
             .unwrap_or((None, None));
         let has_files = options.files.as_ref().is_some_and(|f| !f.is_empty());
 
-        // Parse provider options (amazonBedrock or bedrock)
-        let ab_opts = options
-            .provider_options
-            .get("amazonBedrock")
-            .or_else(|| options.provider_options.get("bedrock"));
+        // Parse provider options (`amazonBedrock`)
+        let ab_opts = options::read(Some(&options.provider_options));
+
+        if let Some(opts) = ab_opts {
+            for (key, allowed) in [
+                ("quality", &["standard", "premium"][..]),
+                (
+                    "style",
+                    &[
+                        "3D_ANIMATED_FAMILY_FILM",
+                        "DESIGN_SKETCH",
+                        "FLAT_VECTOR_ILLUSTRATION",
+                        "GRAPHIC_NOVEL_ILLUSTRATION",
+                        "MAXIMALISM",
+                        "MIDCENTURY_RETRO",
+                        "PHOTOREALISM",
+                        "SOFT_DIGITAL_PAINTING",
+                    ][..],
+                ),
+                (
+                    "taskType",
+                    &[
+                        "TEXT_IMAGE",
+                        "IMAGE_VARIATION",
+                        "INPAINTING",
+                        "OUTPAINTING",
+                        "BACKGROUND_REMOVAL",
+                    ][..],
+                ),
+                ("outPaintingMode", &["DEFAULT", "PRECISE"][..]),
+            ] {
+                if opts
+                    .get(key)
+                    .is_some_and(|v| !v.as_str().is_some_and(|s| allowed.contains(&s)))
+                {
+                    return Err(AiMuxError::InvalidArgument(
+                        "invalid amazonBedrock provider options".into(),
+                    ));
+                }
+            }
+            for key in ["negativeText", "maskPrompt"] {
+                if opts.get(key).is_some_and(|v| !v.is_string()) {
+                    return Err(AiMuxError::InvalidArgument(
+                        "invalid amazonBedrock provider options".into(),
+                    ));
+                }
+            }
+            for key in ["cfgScale", "similarityStrength"] {
+                if opts.get(key).is_some_and(|v| !v.is_number()) {
+                    return Err(AiMuxError::InvalidArgument(
+                        "invalid amazonBedrock provider options".into(),
+                    ));
+                }
+            }
+        }
 
         // Build image generation config
         let mut image_gen_config = Map::new();
@@ -132,16 +155,22 @@ impl ImageModel for BedrockImageModel {
         if let Some(h) = height {
             image_gen_config.insert("height".into(), json!(h));
         }
-        if let Some(seed) = options.seed {
+        if let Some(seed) = options.seed.filter(|v| *v != 0) {
             image_gen_config.insert("seed".into(), json!(seed));
         }
         if options.n > 0 {
             image_gen_config.insert("numberOfImages".into(), json!(options.n));
         }
-        if let Some(v) = ab_opts.and_then(|o| o.get("quality")) {
+        if let Some(v) = ab_opts
+            .and_then(|o| o.get("quality"))
+            .filter(|v| v.as_str().is_some_and(|s| !s.is_empty()))
+        {
             image_gen_config.insert("quality".into(), v.clone());
         }
-        if let Some(v) = ab_opts.and_then(|o| o.get("cfgScale")) {
+        if let Some(v) = ab_opts
+            .and_then(|o| o.get("cfgScale"))
+            .filter(|v| v.as_f64().is_some_and(|n| n != 0.0))
+        {
             image_gen_config.insert("cfgScale".into(), v.clone());
         }
 
@@ -166,10 +195,13 @@ impl ImageModel for BedrockImageModel {
                 "INPAINTING" => {
                     let mut params = Map::new();
                     params.insert("image".into(), json!(source_image_b64));
-                    if let Some(ref p) = options.prompt {
+                    if let Some(p) = options.prompt.as_ref().filter(|p| !p.is_empty()) {
                         params.insert("text".into(), json!(p));
                     }
-                    if let Some(v) = ab_opts.and_then(|o| o.get("negativeText")) {
+                    if let Some(v) = ab_opts
+                        .and_then(|o| o.get("negativeText"))
+                        .filter(|v| v.as_str().is_some_and(|s| !s.is_empty()))
+                    {
                         params.insert("negativeText".into(), v.clone());
                     }
                     if has_mask {
@@ -189,13 +221,19 @@ impl ImageModel for BedrockImageModel {
                 "OUTPAINTING" => {
                     let mut params = Map::new();
                     params.insert("image".into(), json!(source_image_b64));
-                    if let Some(ref p) = options.prompt {
+                    if let Some(p) = options.prompt.as_ref().filter(|p| !p.is_empty()) {
                         params.insert("text".into(), json!(p));
                     }
-                    if let Some(v) = ab_opts.and_then(|o| o.get("negativeText")) {
+                    if let Some(v) = ab_opts
+                        .and_then(|o| o.get("negativeText"))
+                        .filter(|v| v.as_str().is_some_and(|s| !s.is_empty()))
+                    {
                         params.insert("negativeText".into(), v.clone());
                     }
-                    if let Some(v) = ab_opts.and_then(|o| o.get("outPaintingMode")) {
+                    if let Some(v) = ab_opts
+                        .and_then(|o| o.get("outPaintingMode"))
+                        .filter(|v| v.as_str().is_some_and(|s| !s.is_empty()))
+                    {
                         params.insert("outPaintingMode".into(), v.clone());
                     }
                     if has_mask {
@@ -226,10 +264,13 @@ impl ImageModel for BedrockImageModel {
                         .collect::<Result<_, _>>()?;
                     let mut params = Map::new();
                     params.insert("images".into(), json!(images));
-                    if let Some(ref p) = options.prompt {
+                    if let Some(p) = options.prompt.as_ref().filter(|p| !p.is_empty()) {
                         params.insert("text".into(), json!(p));
                     }
-                    if let Some(v) = ab_opts.and_then(|o| o.get("negativeText")) {
+                    if let Some(v) = ab_opts
+                        .and_then(|o| o.get("negativeText"))
+                        .filter(|v| v.as_str().is_some_and(|s| !s.is_empty()))
+                    {
                         params.insert("negativeText".into(), v.clone());
                     }
                     if let Some(v) = ab_opts.and_then(|o| o.get("similarityStrength")) {
@@ -254,10 +295,16 @@ impl ImageModel for BedrockImageModel {
             if let Some(ref p) = options.prompt {
                 params.insert("text".into(), json!(p));
             }
-            if let Some(v) = ab_opts.and_then(|o| o.get("negativeText")) {
+            if let Some(v) = ab_opts
+                .and_then(|o| o.get("negativeText"))
+                .filter(|v| v.as_str().is_some_and(|s| !s.is_empty()))
+            {
                 params.insert("negativeText".into(), v.clone());
             }
-            if let Some(v) = ab_opts.and_then(|o| o.get("style")) {
+            if let Some(v) = ab_opts
+                .and_then(|o| o.get("style"))
+                .filter(|v| v.as_str().is_some_and(|s| !s.is_empty()))
+            {
                 params.insert("style".into(), v.clone());
             }
             args.insert("taskType".into(), json!("TEXT_IMAGE"));
@@ -277,21 +324,18 @@ impl ImageModel for BedrockImageModel {
             });
         }
 
-        let body_str = serde_json::to_string(&Value::Object(args))
-            .map_err(|e| AiMuxError::JsonParse(e.to_string()))?;
-        let url = self.endpoint();
-        let headers = self.build_headers(&body_str, &url, options.headers.as_ref())?;
+        let current_date = chrono::Utc::now().to_rfc3339();
+        let exchange = self.config.exchange(options.headers.as_ref()).await?;
+        let body = Value::Object(args);
+        let body_str =
+            serde_json::to_string(&body).map_err(|e| AiMuxError::JsonParse(e.to_string()))?;
+        let url = exchange.url(&format!(
+            "/model/{}/invoke",
+            super::encode_model_id(&self.model_id)
+        ));
 
         let resp = aimux_provider_utils::post_to_api(
-            HttpRequest {
-                url: url.clone(),
-                headers,
-
-                abort_signal: options.abort_signal.clone(),
-                call_id: None,
-                recording_context: None,
-                ..Default::default()
-            },
+            exchange.request(url.clone(), options),
             HttpBody::Bytes(body_str.into_bytes(), "application/json".to_string()),
             aimux_provider_utils::create_json_response_handler::<Value>(),
             super::bedrock_failed_response_handler(),
@@ -349,7 +393,7 @@ impl ImageModel for BedrockImageModel {
             warnings,
             provider_metadata: None,
             response: ImageResponse {
-                timestamp: Some(chrono::Utc::now().to_rfc3339()),
+                timestamp: Some(current_date),
                 model_id: Some(self.model_id.clone()),
                 headers: Some(rh),
             },

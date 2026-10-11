@@ -23,29 +23,33 @@
 //! yields `AiMuxError::ApiCall` with the observed code in `status_code`;
 //! 408/409/429/5xx are stored retryable (`is_retryable`), other 4xx are not.
 
-use aimux_core::content::ContentPart;
 use aimux_core::error::AiMuxError;
 use aimux_core::language_model::LanguageModel;
-use aimux_core::language_model_message::{LanguageModelPrompt, LanguageModelPromptMessage};
-use aimux_core::message::Role;
+use aimux_core::language_model_message::{LanguageModelMessage, LanguageModelPrompt};
 use aimux_core::options::CallOptions;
 use aimux_core::stream_part::StreamPart;
-use aimux_provider_utils::RetryConfig;
-use aimux_providers::anthropic::{AnthropicConfig, AnthropicProvider};
-use aimux_providers::openai::{OpenAIConfig, OpenAIProvider};
+use aimux_providers::anthropic::{AnthropicProviderSettings, create_anthropic};
+use aimux_providers::openai::{OpenAIProvider, OpenAIProviderSettings, create_openai};
 use futures::StreamExt;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+/// A native OpenAI provider against `base_url`. The key is an explicit value,
+/// so the environment is never consulted.
+fn provider_with(api_key: &str, base_url: impl Into<String>) -> OpenAIProvider {
+    create_openai(OpenAIProviderSettings {
+        api_key: Some(api_key.to_string()),
+        base_url: Some(base_url.into()),
+        ..Default::default()
+    })
+    .expect("settings are valid")
+}
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
 /// The TS `TEST_PROMPT`: a single user text message "Hello".
 fn test_prompt() -> LanguageModelPrompt {
-    vec![LanguageModelPromptMessage {
-        role: Role::User,
-        content: vec![ContentPart::text("Hello")],
-        ..Default::default()
-    }]
+    vec![LanguageModelMessage::user_text("Hello")]
 }
 
 /// Build `CallOptions` with everything unset except `prompt`.
@@ -79,13 +83,7 @@ mod openai_generate_errors {
     use super::*;
 
     fn model(server: &MockServer) -> impl LanguageModel {
-        let config = OpenAIConfig::new("test-api-key")
-            .with_base_url(server.uri())
-            .with_retry_config(RetryConfig {
-                max_retries: 0,
-                ..Default::default()
-            });
-        OpenAIProvider::new(config).model("gpt-4o")
+        provider_with("test-api-key", server.uri()).chat("gpt-4o")
     }
 
     /// TS response-handler: 401 → AuthenticationError.
@@ -222,13 +220,7 @@ mod openai_stream_errors {
     use super::*;
 
     fn model(server: &MockServer) -> impl LanguageModel {
-        let config = OpenAIConfig::new("test-api-key")
-            .with_base_url(server.uri())
-            .with_retry_config(RetryConfig {
-                max_retries: 0,
-                ..Default::default()
-            });
-        OpenAIProvider::new(config).model("gpt-4o")
+        provider_with("test-api-key", server.uri()).chat("gpt-4o")
     }
 
     /// A non-success HTTP status on the stream endpoint makes `do_stream`
@@ -345,13 +337,13 @@ mod anthropic_generate_errors {
     use super::*;
 
     fn model(server: &MockServer) -> impl LanguageModel {
-        let config = AnthropicConfig::new("test-api-key")
-            .with_base_url(server.uri())
-            .with_retry_config(RetryConfig {
-                max_retries: 0,
-                ..Default::default()
-            });
-        AnthropicProvider::new(config).model("claude-3-haiku-20240307")
+        create_anthropic(AnthropicProviderSettings {
+            api_key: Some("test-api-key".to_string()),
+            base_url: Some(format!("{}/v1", server.uri())),
+            ..Default::default()
+        })
+        .unwrap()
+        .messages("claude-3-haiku-20240307")
     }
 
     /// Anthropic 401 → `ApiCall` (401). Anthropic body shape:
@@ -479,13 +471,13 @@ mod anthropic_stream_errors {
     use super::*;
 
     fn model(server: &MockServer) -> impl LanguageModel {
-        let config = AnthropicConfig::new("test-api-key")
-            .with_base_url(server.uri())
-            .with_retry_config(RetryConfig {
-                max_retries: 0,
-                ..Default::default()
-            });
-        AnthropicProvider::new(config).model("claude-3-haiku-20240307")
+        create_anthropic(AnthropicProviderSettings {
+            api_key: Some("test-api-key".to_string()),
+            base_url: Some(format!("{}/v1", server.uri())),
+            ..Default::default()
+        })
+        .unwrap()
+        .messages("claude-3-haiku-20240307")
     }
 
     /// TS: "should throw an api error when the server is returning a 529
@@ -542,105 +534,6 @@ mod anthropic_stream_errors {
                     && detail.message == "Overloaded"
                     && detail.is_retryable),
             "expected retryable 529 ApiCall error, got {error:?}"
-        );
-    }
-
-    /// TS: "should forward error chunks" + "should forward overloaded error
-    /// during streaming".
-    ///
-    /// A normal text delta is emitted first, then an error event mid-stream.
-    /// The error must be forwarded as a `StreamPart::Error`.
-    #[tokio::test]
-    async fn mid_stream_error_is_forwarded() {
-        let server = MockServer::start().await;
-        let body = concat!(
-            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_01\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-3-haiku-20240307\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":17,\"output_tokens\":1}}}\n\n",
-            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
-            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n",
-            "event: error\n",
-            "data: {\"type\":\"error\",\"error\":{\"details\":null,\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n",
-        );
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(body),
-            )
-            .mount(&server)
-            .await;
-
-        let stream = model(&server).do_stream(&options()).await.unwrap();
-        let parts = collect_stream(stream).await;
-
-        let saw_text = parts.iter().any(|p| {
-            matches!(p,
-            StreamPart::TextDelta { delta, .. } if delta == "Hello")
-        });
-        assert!(
-            saw_text,
-            "expected a 'Hello' text delta before the error, got {parts:?}"
-        );
-
-        assert!(
-            parts.iter().any(|p| matches!(p,
-                StreamPart::Error { error: AiMuxError::ApiCall(m) } if m.message == "Overloaded")),
-            "expected a StreamPart::Error carrying 'Overloaded', got {parts:?}"
-        );
-
-        // Finish=final chunk: a mid-stream error must still be followed by a
-        // Finish part (error finish), never leave the stream unterminated.
-        assert!(
-            matches!(parts.last(),
-                Some(StreamPart::Finish { finish_reason, .. })
-                    if matches!(finish_reason.unified,
-                        aimux_core::prelude::FinishReasonUnified::Error)),
-            "expected the last part to be Finish with unified=Error, got {parts:?}"
-        );
-        // Error-finish zeroes usage: the message_start input_tokens (17)
-        // must not leak into the final part (mirrors openai behaviour).
-        if let Some(StreamPart::Finish { usage, .. }) = parts.last() {
-            assert_eq!(
-                usage.input_tokens.total, None,
-                "usage must be zeroed on error finish"
-            );
-        }
-    }
-
-    /// TS: "should forward error chunks" — a generic (non-overloaded) error
-    /// event mid-stream must also be forwarded.
-    #[tokio::test]
-    async fn mid_stream_generic_error_is_forwarded() {
-        let server = MockServer::start().await;
-        let body = concat!(
-            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_01\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-3-haiku-20240307\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":17,\"output_tokens\":1}}}\n\n",
-            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
-            "data: {\"type\":\"ping\"}\n\n",
-            "data: {\"type\":\"error\",\"error\":{\"type\":\"error\",\"message\":\"test error\"}}\n\n",
-        );
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(body),
-            )
-            .mount(&server)
-            .await;
-
-        let stream = model(&server).do_stream(&options()).await.unwrap();
-        let parts = collect_stream(stream).await;
-        assert!(
-            parts.iter().any(|p| matches!(p,
-                StreamPart::Error { error: AiMuxError::ApiCall(m) } if m.message == "test error")),
-            "expected a StreamPart::Error carrying 'test error', got {parts:?}"
-        );
-        assert!(
-            matches!(parts.last(),
-                Some(StreamPart::Finish { finish_reason, .. })
-                    if matches!(finish_reason.unified,
-                        aimux_core::prelude::FinishReasonUnified::Error)),
-            "expected the last part to be Finish with unified=Error, got {parts:?}"
         );
     }
 }

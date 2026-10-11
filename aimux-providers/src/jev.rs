@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use aimux_core::decision_model::*;
 use aimux_core::{AiMuxError, Provider};
@@ -22,8 +22,9 @@ pub struct JevConfig {
     /// Full POST URL for the official API, or an explicitly configured proxy.
     pub endpoint: String,
     pub headers: HashMap<String, String>,
-    pub retry_config: aimux_core::retry::RetryConfig,
     pub probability_source: DecisionProbabilitySource,
+    /// Retry settings [`decide`] uses.
+    pub retry_config: aimux_core::retry::RetryConfig,
 }
 
 impl JevConfig {
@@ -33,8 +34,8 @@ impl JevConfig {
             api_key: api_key.into(),
             endpoint: "https://api.typesafe.ai/v1/systemone".into(),
             headers: HashMap::new(),
-            retry_config: Default::default(),
             probability_source: DecisionProbabilitySource::Native,
+            retry_config: aimux_core::retry::RetryConfig::default(),
         }
     }
 
@@ -64,9 +65,9 @@ impl JevProvider {
 }
 
 impl Provider for JevProvider {
-    fn name(&self) -> &str {
-        "jev"
-    }
+    crate::__unsupported_required_model!(language_model, LanguageModel, "languageModel");
+    crate::__unsupported_required_model!(embedding_model, EmbeddingModel, "embeddingModel");
+    crate::__unsupported_required_model!(image_model, ImageModel, "imageModel");
 
     fn decision_model(&self, model_id: &str) -> Result<Box<dyn DecisionModel>, AiMuxError> {
         if model_id.trim().is_empty() {
@@ -96,16 +97,20 @@ impl DecisionModel for JevDecisionModel {
     }
     fn config_snapshot(&self) -> aimux_core::recording::ProviderRecord {
         let mut snapshot =
-            aimux_core::recording::ProviderRecord::minimal(self.provider(), self.model_id());
+            aimux_core::recording::ProviderRecord::from_model(self.provider(), self.model_id());
         snapshot.base_url = Some(self.config.endpoint.clone());
-        snapshot.api_key_source = if self.config.api_key.is_empty() {
-            "none"
-        } else {
-            "explicit"
-        }
-        .into();
-        snapshot.profile = Some(json!({"decision_capabilities": self.capabilities()}));
-        snapshot.provider_options = Some(json!({"headers": self.config.headers}));
+        snapshot.api_key_source = Some(
+            if self.config.api_key.is_empty() {
+                "none"
+            } else {
+                "explicit"
+            }
+            .into(),
+        );
+        snapshot.profile = Some(serde_json::json!({"decision_capabilities": self.capabilities()}));
+        snapshot.provider_options = Some(aimux_core::recording::redact_provider_options(
+            serde_json::json!({"headers": self.config.headers}),
+        ));
         snapshot
     }
     fn retry_config(&self) -> aimux_core::retry::RetryConfig {

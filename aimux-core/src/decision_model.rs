@@ -18,11 +18,51 @@ pub type DecisionState = serde_json::Value;
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct DecisionImage {
+    /// On the wire in #226's externally tagged form, `{"Base64": "..."}` or
+    /// `{"Binary": [...]}`, which the bindings send.
+    #[serde(with = "tagged_file_bytes")]
+    #[ts(type = "{ \"Base64\": string } | { \"Binary\": Array<number> }")]
     pub data: crate::shared::FileBytes,
     pub media_type: String,
     /// Provider image detail, for example OpenAI's `low`, `high`, `auto`, `original`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+}
+
+/// #226's decision image wire form for [`FileBytes`](crate::shared::FileBytes):
+/// externally tagged, independent of the untagged form other modalities use.
+mod tagged_file_bytes {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use crate::shared::FileBytes;
+
+    #[derive(Serialize, Deserialize)]
+    enum Tagged<B, S> {
+        Binary(B),
+        Base64(S),
+    }
+
+    pub(super) fn serialize<S: Serializer>(
+        data: &FileBytes,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match data {
+            FileBytes::Binary(bytes) => Tagged::<&[u8], &str>::Binary(bytes),
+            FileBytes::Base64(text) => Tagged::Base64(text.as_str()),
+        }
+        .serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<FileBytes, D::Error> {
+        Ok(
+            match Tagged::<Vec<u8>, String>::deserialize(deserializer)? {
+                Tagged::Binary(bytes) => FileBytes::Binary(bytes),
+                Tagged::Base64(text) => FileBytes::Base64(text),
+            },
+        )
+    }
 }
 
 /// A native choice value, distinct from the canonical option label used as a key.
@@ -507,20 +547,22 @@ impl DecisionResult {
 
 #[async_trait]
 pub trait DecisionModel: Send + Sync {
-    fn specification_version(&self) -> &'static str {
-        "v4"
-    }
     fn provider(&self) -> &str;
     fn model_id(&self) -> &str;
     fn capabilities(&self) -> DecisionCapabilities;
+    /// The provider snapshot written into decision recordings (#226): identity
+    /// plus connection metadata (base URL, credential *source*, capabilities,
+    /// redacted options). Never carries a credential value.
     fn config_snapshot(&self) -> crate::recording::ProviderRecord {
         let mut snapshot =
-            crate::recording::ProviderRecord::minimal(self.provider(), self.model_id());
+            crate::recording::ProviderRecord::from_model(self.provider(), self.model_id());
         snapshot.profile = Some(serde_json::json!({"decision_capabilities": self.capabilities()}));
         snapshot
     }
-    fn retry_config(&self) -> crate::retry::RetryConfig {
-        crate::retry::RetryConfig::default()
+    /// Retry settings for [`decide`] (#226). A per-call `max_retries`
+    /// overrides only the retry count.
+    fn retry_config(&self) -> retry::RetryConfig {
+        retry::RetryConfig::default()
     }
     /// Perform one provider attempt.
     /// # Errors
@@ -606,7 +648,7 @@ pub async fn decide(
     }
     let timeout = timeout::OperationTimeout::new(options.timeout.unwrap_or_default())?;
     let abort_signal = options.abort_signal.clone();
-    let retries = retry::prepare_retries(
+    let retries = retry::prepare_retries_with_config(
         options.max_retries,
         model.retry_config(),
         abort_signal.clone(),
@@ -620,9 +662,10 @@ pub async fn decide(
             &options,
             model.provider(),
             model.model_id(),
+            &capabilities,
         );
         ctx.recorder
-            .record_provider(&ctx.call_id, &model.config_snapshot());
+            .record_provider(&ctx.call_id, &model.config_snapshot().redacted());
         ctx
     });
     let result = timeout::run(

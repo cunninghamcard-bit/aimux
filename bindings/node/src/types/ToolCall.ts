@@ -9,11 +9,11 @@ export type ToolCall = {
 /**
  * Provider-assigned call id.
  */
-tool_call_id: string, 
+toolCallId: string, 
 /**
  * Tool name.
  */
-tool_name: string, 
+toolName: string, 
 /**
  * Parsed arguments, or the original string when `invalid` is true and the
  * provider input was not valid JSON.
@@ -22,28 +22,21 @@ input: JsonValue,
 /**
  * Whether the tool call will be executed by the provider.
  */
-provider_executed?: boolean | null, 
+providerExecuted?: boolean, 
 /**
  * Whether the tool is dynamic (defined at runtime, e.g. MCP tools).
  */
-dynamic?: boolean | null, 
-/**
- * Provider-assigned thought signature (e.g. Google Gemini
- * `thoughtSignature`). Must be echoed back verbatim on the follow-up turn
- * when the tool result is sent; thinking models reject the request
- * otherwise.
- */
-thought_signature?: string | null, 
+dynamic?: boolean, 
 /**
  * Additional provider-specific metadata associated with this call.
  */
-provider_metadata?: JsonValue | null, 
+providerMetadata?: { [key in string]: { [key in string]: JsonValue } }, 
 /**
  * Set when lookup, JSON parsing, or schema validation still failed after
  * the optional repair attempt.
  */
-invalid?: boolean | null, 
+invalid?: boolean, 
 /**
  * Typed failure associated with an invalid tool call.
  */
-error?: AiMuxError | null, };
+error?: AiMuxError, };

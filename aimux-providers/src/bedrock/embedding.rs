@@ -9,8 +9,6 @@
 //! request/response payloads. This implementation adapts based on the model ID,
 //! matching the TS reference.
 
-use std::collections::HashMap;
-
 use async_trait::async_trait;
 use serde_json::{Map, Value, json};
 
@@ -20,11 +18,10 @@ use aimux_core::embedding_model::{
 use aimux_core::error::AiMuxError;
 use aimux_core::shared::SharedProviderOptions;
 
-use aimux_provider_utils::{HttpBody, HttpRequest};
+use aimux_provider_utils::HttpBody;
 
-use super::BedrockAuth;
-use super::model::BedrockConfig;
-use super::sigv4::sign_request;
+use super::{AmazonBedrockEmbeddingModelFamily, options};
+use crate::shared::EndpointConfig;
 
 /// An Amazon Bedrock embedding model (e.g. `"amazon.titan-embed-text-v2:0"`).
 ///
@@ -32,50 +29,35 @@ use super::sigv4::sign_request;
 /// `Client` internally (RFC-0009 §4.1).
 pub struct BedrockEmbeddingModel {
     model_id: String,
-    config: BedrockConfig,
+    config: EndpointConfig,
+    model_family: Option<AmazonBedrockEmbeddingModelFamily>,
 }
 
 impl BedrockEmbeddingModel {
-    #[must_use]
-    pub fn new(model_id: String, config: BedrockConfig) -> Self {
-        Self { model_id, config }
-    }
-
-    fn endpoint(&self) -> String {
-        // Bedrock model IDs contain dots and colons (e.g.
-        // `amazon.titan-embed-text-v2:0`). The TS reference URL-encodes the
-        // model ID, but these characters are valid in URL paths and AWS accepts
-        // them unencoded — matching the LanguageModel implementation.
-        format!("{}/model/{}/invoke", self.config.base_url, self.model_id)
-    }
-
-    fn build_headers(
-        &self,
-        body: &str,
-        url: &str,
-        extra: Option<&HashMap<String, String>>,
-    ) -> Result<Vec<(String, String)>, AiMuxError> {
-        let mut extra_headers: Vec<(String, String)> = Vec::new();
-        if let Some(extra) = extra {
-            for (k, v) in extra {
-                extra_headers.push((k.clone(), v.clone()));
-            }
+    pub(crate) fn from_config(model_id: String, config: EndpointConfig) -> Self {
+        Self {
+            model_id,
+            config,
+            model_family: None,
         }
+    }
 
-        match &self.config.auth {
-            BedrockAuth::BearerToken(token) => {
-                let mut headers = vec![("Authorization".to_string(), format!("Bearer {token}"))];
-                headers.extend(extra_headers);
-                Ok(headers)
-            }
-            BedrockAuth::SigV4(creds) => {
-                let signed = sign_request(creds, "bedrock", "POST", url, body, &extra_headers);
-                let mut headers: Vec<(String, String)> = Vec::new();
-                for (k, v) in &signed.headers {
-                    headers.push((k.clone(), v.clone()));
-                }
-                Ok(headers)
-            }
+    pub(crate) fn with_model_family(
+        mut self,
+        model_family: Option<AmazonBedrockEmbeddingModelFamily>,
+    ) -> Self {
+        self.model_family = model_family;
+        self
+    }
+
+    fn model_family(&self) -> &str {
+        match self.model_family {
+            Some(AmazonBedrockEmbeddingModelFamily::Titan) => "titan",
+            Some(AmazonBedrockEmbeddingModelFamily::Cohere) => options::COHERE_MODEL_FAMILY,
+            Some(AmazonBedrockEmbeddingModelFamily::Nova) => "nova",
+            None if is_nova_embedding_model(&self.model_id) => "nova",
+            None if is_cohere_embedding_model(&self.model_id) => options::COHERE_MODEL_FAMILY,
+            None => "titan",
         }
     }
 }
@@ -89,25 +71,21 @@ fn is_cohere_embedding_model(model_id: &str) -> bool {
 
 /// Returns `true` if the model ID is an Amazon Nova embedding model.
 fn is_nova_embedding_model(model_id: &str) -> bool {
-    model_id.starts_with("amazon.nova-") && model_id.contains("embed")
+    model_id.contains("amazon.nova-") && model_id.contains("embed")
 }
 
 #[async_trait]
 impl EmbeddingModel for BedrockEmbeddingModel {
     fn provider(&self) -> &str {
-        "amazon-bedrock"
+        &self.config.provider
     }
 
     fn model_id(&self) -> &str {
         &self.model_id
     }
 
-    fn retry_config(&self) -> aimux_core::retry::RetryConfig {
-        self.config.retry_config
-    }
-
     fn max_embeddings_per_call(&self) -> Option<u32> {
-        if is_cohere_embedding_model(&self.model_id) {
+        if self.model_family() == options::COHERE_MODEL_FAMILY {
             Some(96)
         } else {
             Some(1)
@@ -122,10 +100,17 @@ impl EmbeddingModel for BedrockEmbeddingModel {
         &self,
         options: &EmbeddingCallOptions,
     ) -> Result<EmbeddingResult, AiMuxError> {
-        let bedrock_options = parse_bedrock_provider_options(options.provider_options.as_ref());
+        if options.values.len() > self.max_embeddings_per_call().unwrap_or(1) as usize {
+            return Err(AiMuxError::InvalidArgument(format!(
+                "Too many embedding values for amazon-bedrock model {}: maximum {} per call",
+                self.model_id,
+                self.max_embeddings_per_call().unwrap_or(1)
+            )));
+        }
+        let bedrock_options = parse_bedrock_provider_options(options.provider_options.as_ref())?;
 
-        let is_nova = is_nova_embedding_model(&self.model_id);
-        let is_cohere = is_cohere_embedding_model(&self.model_id);
+        let is_nova = self.model_family() == "nova";
+        let is_cohere = self.model_family() == options::COHERE_MODEL_FAMILY;
 
         // Build request body based on model family.
         let body = if is_nova {
@@ -195,20 +180,15 @@ impl EmbeddingModel for BedrockEmbeddingModel {
             Value::Object(body)
         };
 
+        let exchange = self.config.exchange(options.headers.as_ref()).await?;
         let body_str = serde_json::to_string(&body).unwrap_or_default();
-        let url = self.endpoint();
-        let headers = self.build_headers(&body_str, &url, options.headers.as_ref())?;
+        let url = exchange.url(&format!(
+            "/model/{}/invoke",
+            super::encode_model_id(&self.model_id)
+        ));
 
         let resp = aimux_provider_utils::post_to_api(
-            HttpRequest {
-                url,
-                headers,
-
-                abort_signal: options.abort_signal.clone(),
-                call_id: None,
-                recording_context: None,
-                ..Default::default()
-            },
+            exchange.request(url, options),
             HttpBody::Bytes(body_str.into_bytes(), "application/json".to_string()),
             aimux_provider_utils::create_json_response_handler(),
             super::bedrock_failed_response_handler(),
@@ -236,8 +216,11 @@ impl EmbeddingModel for BedrockEmbeddingModel {
             ]
         } else if let Some(embeddings_arr) = raw_value.get("embeddings").and_then(|e| e.as_array())
         {
-            let first = &embeddings_arr[0];
-            if first.get("embeddingType").is_some() {
+            if embeddings_arr
+                .first()
+                .is_some_and(|first| first.get("embeddingType").is_some())
+            {
+                let first = &embeddings_arr[0];
                 // Nova response: { embeddings: [{ embeddingType, embedding }] }
                 vec![
                     first
@@ -335,26 +318,76 @@ struct BedrockEmbeddingProviderOptions {
 
 /// Parse Bedrock embedding provider options.
 ///
-/// Tries the `"amazonBedrock"` key first, then falls back to the legacy
-/// `"bedrock"` key for backward compatibility.
+/// Reads the `amazonBedrock` key only.
 fn parse_bedrock_provider_options(
     options: Option<&SharedProviderOptions>,
-) -> BedrockEmbeddingProviderOptions {
-    let provider_opts = options
-        .and_then(|o| o.get("amazonBedrock"))
-        .or_else(|| options.and_then(|o| o.get("bedrock")));
+) -> Result<BedrockEmbeddingProviderOptions, AiMuxError> {
+    let provider_opts = options::read(options);
+    if let Some(opts) = provider_opts {
+        let valid_dimensions = [
+            ("dimensions", &[1024, 512, 256][..]),
+            ("embeddingDimension", &[256, 384, 1024, 3072][..]),
+            ("outputDimension", &[256, 512, 1024, 1536][..]),
+        ]
+        .iter()
+        .all(|(key, allowed)| {
+            opts.get(*key).is_none_or(|v| {
+                v.as_f64()
+                    .is_some_and(|n| allowed.iter().any(|allowed| n == f64::from(*allowed)))
+            })
+        });
+        let valid_enums = [
+            (
+                "embeddingPurpose",
+                &[
+                    "GENERIC_INDEX",
+                    "TEXT_RETRIEVAL",
+                    "IMAGE_RETRIEVAL",
+                    "VIDEO_RETRIEVAL",
+                    "DOCUMENT_RETRIEVAL",
+                    "AUDIO_RETRIEVAL",
+                    "GENERIC_RETRIEVAL",
+                    "CLASSIFICATION",
+                    "CLUSTERING",
+                ][..],
+            ),
+            (
+                "inputType",
+                &[
+                    "search_document",
+                    "search_query",
+                    "classification",
+                    "clustering",
+                ][..],
+            ),
+            ("truncate", &["NONE", "START", "END"][..]),
+        ]
+        .iter()
+        .all(|(key, allowed)| {
+            opts.get(*key)
+                .is_none_or(|v| v.as_str().is_some_and(|s| allowed.contains(&s)))
+        });
+        if !valid_dimensions
+            || !valid_enums
+            || opts.get("normalize").is_some_and(|v| !v.is_boolean())
+        {
+            return Err(AiMuxError::InvalidArgument(
+                "invalid amazonBedrock provider options".into(),
+            ));
+        }
+    }
 
-    BedrockEmbeddingProviderOptions {
+    Ok(BedrockEmbeddingProviderOptions {
         dimensions: provider_opts
             .and_then(|o| o.get("dimensions"))
-            .and_then(serde_json::Value::as_u64)
+            .and_then(serde_json::Value::as_f64)
             .map(|d| d as u32),
         normalize: provider_opts
             .and_then(|o| o.get("normalize"))
             .and_then(serde_json::Value::as_bool),
         embedding_dimension: provider_opts
             .and_then(|o| o.get("embeddingDimension"))
-            .and_then(serde_json::Value::as_u64)
+            .and_then(serde_json::Value::as_f64)
             .map(|d| d as u32),
         embedding_purpose: provider_opts
             .and_then(|o| o.get("embeddingPurpose"))
@@ -370,7 +403,7 @@ fn parse_bedrock_provider_options(
             .map(std::string::ToString::to_string),
         output_dimension: provider_opts
             .and_then(|o| o.get("outputDimension"))
-            .and_then(serde_json::Value::as_u64)
+            .and_then(serde_json::Value::as_f64)
             .map(|d| d as u32),
-    }
+    })
 }

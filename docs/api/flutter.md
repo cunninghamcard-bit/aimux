@@ -1,6 +1,6 @@
 # aimux · Flutter/Dart API
 
-> Unified LLM service access layer — one API to access 325 AI providers
+> Unified LLM service access layer — one API to access AI providers
 
 Flutter/Dart wraps the Rust core through the `aimux-ffi` C ABI (via `dart:ffi`).
 
@@ -47,27 +47,26 @@ model.close();
 
 ## Providers
 
-All 251 registry-backed OpenAI-compatible providers are reachable by name;
-`ProviderName` holds the constants:
+The vendor packages and 281 registry-backed OpenAI-compatible providers are reachable by string name:
 
-> **Scope:** `provider(name)` covers only the 251 registry OpenAI-compatible
-> providers; Anthropic/Google/multimodal/local → typed factories
-> (`Model.anthropic(apiKey, modelId)`); custom endpoints → base-URL variant.
+> **Scope:** `provider(name)` reaches vendor packages and the 281 preset rows;
+> typed factories remain available. Custom endpoints use the base-URL variant.
 > Full list: [providers.md](providers.md).
 
 ```dart
-// 推荐:ProviderName.groq 常量(补全 + 防拼写错误)
-final model = Model.provider(ProviderName.groq, 'llama-3.3-70b');
+final model = Model.provider('groq', 'llama-3.3-70b');
 final result = model.generateText('Hello');
 model.close();
 
-// 字符串形式同样可用 + 可选 config JSON ({"base_url": "..."}):
-final model2 = Model.provider('groq', 'llama-3.3-70b', apiKey: 'sk-...');
+// Optional settings JSON; keys are camelCase ({"baseUrl": "...", "headers": {...},
+// "organization", "project", "params"}) and an unknown key is an
+// InvalidArgumentError:
+final model2 = Model.provider('groq', 'llama-3.3-70b',
+    apiKey: 'sk-...', configJson: '{"baseUrl": "http://localhost:3000"}');
 model2.close();
 ```
 
-Unknown names throw `NoSuchProviderError` (payload: the provider id); valid
-names come from the generated `ProviderName` constants.
+Unknown names throw `NoSuchProviderError` (payload: the provider id).
 
 ## Errors
 
@@ -76,7 +75,7 @@ shares a base with the other (both just `implements Exception`):
 
 | Source | Rust | Dart | C code |
 |---|---|---|---|
-| AiMux | `AiMuxError` | `AimuxException` hierarchy | 1..17 (4 retired) |
+| AiMux | `AiMuxError` | `AimuxException` hierarchy | 1..19 (4 retired) |
 | recorder | `RecordingError` | `RecordingException` | 100..105 |
 
 Every fallible C call returns an opaque `aimux_error_t *` (`NULL` =
@@ -84,7 +83,7 @@ success, result in the trailing out-parameter). The binding has one decoder
 (`errors.dart`): `expectAimuxError(e, context)` for model calls,
 `expectRecordingError(e, context)` for `initRecording` / `recordingTryFlush`,
 `expectFfiError(e, context)` for utilities that can only fail in the C ABI.
-One unified code selects 1..17, 100..105, or 200..206; each decoder copies the
+One unified code selects 1..19, 100..105, or 200..206; each decoder copies the
 relevant fields, releases the error with `aimux_error_free` exactly once, and
 throws the matching `AimuxException` subclass / `RecordingException`. Codes
 200..206 throw the native
@@ -108,6 +107,8 @@ Exception (implements)
       ├── NoSuchToolError           // code 15; tool not in the supplied tool set
       ├── InvalidToolInputError     // code 16; tool arguments failed to parse/validate
       ├── ToolCallRepairError       // code 17; a repairToolCall hook itself failed
+      ├── LoadAPIKeyError           // code 18; no API key, fallback env var unset (envVar)
+      ├── LoadSettingError          // code 19; a required setting is missing (envVar)
       └── OtherError
 ```
 
@@ -117,15 +118,13 @@ Every instance has `message`, `code` (`AimuxErrorCode` constants matching C
 subclass only: `APICallError.providerCode` / `.providerMessage` / `.responseBody`
 (`String?`), `NoSuchModelError.modelId` / `.modelType`, and
 `NoSuchProviderError.providerId`. A code outside the enum is a header/library
-mismatch and fails with `StateError`, not an error type.
-subclass only: `APICallError.providerCode` / `.providerMessage` / `.requestId` / `.responseBody`
-(`String?`), `NoSuchModelError.modelId` / `.modelType`,
-`NoSuchProviderError.providerId`, `NoSuchToolError.toolName` /
+mismatch and fails with `StateError`, not an error type. Further payload:
+`NoSuchToolError.toolName` /
 `.availableTools` (`List<String>?`, null when no tool set was supplied),
 `InvalidToolInputError.toolName` / `.toolInput` (the raw argument text), and
 `ToolCallRepairError.originalError` (the repaired-over error decoded from its
-wire JSON — the same shape as `ToolCall.error`). A code outside the enum is a
-header/library mismatch and fails with `StateError`, not an error type.
+wire JSON: an `AiMuxError` object keyed by `name`, the same shape as
+`ToolCall.error`).
 
 `APICallError` additionally exposes the sanitized URL/request values,
 response headers/body, parsed provider data/code, and retryability.
@@ -153,7 +152,7 @@ errors, never an aimux type. Raw JSON string parameters (`configJson`,
 `optsJson`, `valuesJson`, …) are validated with `jsonDecode` in Dart *before*
 the C call. Empty/blank is rejected for required raw-JSON params (`valuesJson`,
 the `optsJson` of speech/image/video/rerank/search, and the `configJson` of
-`registerProviders` / `initProxy`) and treated as "defaults" for optional ones
+`initProxy`) and treated as "defaults" for optional ones
 (nullable in the signature — provider/router/moa `configJson`,
 embed/upload/transcription `optsJson`), matching the C ABI; use-after-close is
 guarded locally. A returned C code in 200..206 is a binding/library invariant:
@@ -206,7 +205,7 @@ models, `TranscriptionSession`, `Files`) throws `StateError`.
 Stream terminal failures surface via `Stream.addError` with whatever the
 decoder produced (`AimuxException`, or the native `StateError` for a C ABI
 failure) and the stream is then closed — there is no `on_error` callback;
-provider mid-stream `StreamPart::Error` is data on `on_part`. A
+a provider mid-stream failure is an `error` part, data on `on_part`. A
 `TranscriptionSession.nextPart` timeout is a poll state, not an error:
 `AimuxTranscriptionTimeoutException` (session still live); a normal end is
 `AimuxTranscriptionEndedException`.
@@ -229,7 +228,7 @@ model.close();
 final model = Model.openai('sk-...', 'gpt-4o');
 final stream = model.streamText('Write a haiku');
 await for (final part in stream) {
-  if (part.containsKey('TextDelta')) print(part['TextDelta']['delta']);
+  if (part['type'] == 'text-delta') print(part['delta']);
 }
 model.close();
 ```
@@ -290,7 +289,7 @@ instance). Throwing means the repair failed: the call stays invalid and carries
 a `ToolCallRepairError` whose cause is the thrown object's `toString()`. A
 replacement that still fails schema validation does the same.
 
-`streamText` repairs the `ToolCall` part in flight — tool-input deltas are
+`streamText` repairs the `tool-call` part in flight — tool-input deltas are
 forwarded verbatim and in order — and is the only entry point that awaits an
 `async` hook; the synchronous ones reject a `Future` with a `StateError`.
 `generateTextAsOpenAI` repairs too: `ChatCompletion` carries no invalid
@@ -299,23 +298,66 @@ marker, so it repairs the native result and converts it
 repair — the chunk stream forwards the provider's argument deltas verbatim.
 
 `RawToolCall` carries every provider field (`providerExecuted`,
-`thoughtSignature`, `providerMetadata`), and the core adopts a replacement as
+`dynamic`, `providerMetadata`), and the core adopts a replacement as
 returned — build it with `context.toolCall.copyWith(input: …)` so those
 fields survive the repair.
+
+## Wire format
+
+The JSON that crosses the C ABI is the AI SDK's JSON, and `types.dart` reads
+and writes exactly the shapes of the generated TypeScript types
+(`bindings/node/src/types/*.ts`):
+
+- field names are camelCase (`toolCalls`, `finishReason`, `providerOptions`,
+  `maxOutputTokens`, ...); `config_json` / router / moa settings follow suit
+  (`baseUrl`, `providerName`, ...);
+- unions carry a `type` tag with kebab-case values (`text-delta`, `tool-call`,
+  `file-base64`, ...); sources use `sourceType`; errors use `name`
+  (`{"name": "AI_APICallError", ...}`);
+- optional fields are absent, never `null`;
+- `FileBytes`, audio and image outputs are untagged (a byte array or a base64
+  string);
+- image `size` is a `"WxH"` string and `aspectRatio` a `"W:H"` string.
+
+A tool result in a message is a `ContentPartToolResult(toolCallId, toolName,
+output)`; `output` is a `ToolResultOutput` (`text`, `json`, `executionDenied`,
+`errorText`, `errorJson` or `content`):
+
+```dart
+final followUp = [
+  ModelMessage(role: 'tool', content: [
+    ContentPartToolResult(
+      toolCallId: call.toolCallId,
+      toolName: call.toolName,
+      output: ToolResultOutput.json({'temperature': 22}),
+    ).toJson(),
+  ]),
+];
+```
+
+There is no provider-registration API: `aimux_register_providers` is gone, and
+so is `registerProviders`. Use `Model.provider` / `createProvider` with a
+`baseUrl` to reach a custom endpoint.
 
 ## Types
 
 `bindings/flutter/lib/types.dart` declares the typed model surface (with
 `toJson` / `fromJson` on each): `Role`, `FinishReasonUnified`,
-`ReasoningEffort`, `TokenUsage`, `Usage`, `FinishReason`, `ToolCall`,
-`FunctionTool`, `Tool`, `ToolChoice`, `ResponseMetadata`, `GenerateContent`
-(sealed), `GenerateResult`, `GenerateTextResult`, `GenerateTextOptions`,
-`ModelMessage`, `StreamPart` (sealed), `FileBytes`, `FileData`, `ContentPart`,
-`RawToolCall` / `ToolCallRepairContext` / `RepairToolCall` (tool-call repair).
+`ReasoningEffort`, `InputTokenUsage` / `OutputTokenUsage` / `Usage`,
+`FinishReason`, `ToolCall`, `FunctionTool`, `Tool`, `ToolChoice`,
+`RequestInfo` / `ResponseInfo` / `ResponseMetadata`, `GeneratedFile`,
+`Source`, `ToolResult`, `GenerateContent` (sealed), `GenerateResult`,
+`GenerateTextResult`, `GenerateObjectResult`, `StreamTextResultAggregated`,
+`GenerateTextOptions`, `ModelMessage`, `StreamPart` (sealed; the
+`TextStreamPart` shapes the stream emits), `FileBytes`, `FileData`,
+`ContentPart` (sealed), `ToolResultOutput`, and `RawToolCall` /
+`ToolCallRepairContext` / `RepairToolCall` (tool-call repair). A `type` the
+binding does not model decodes to the `...Unknown` fallback of each union and
+re-encodes verbatim.
 
 `ToolCall` carries `providerMetadata` plus `invalid` (set by Core when tool
 lookup, input parse, or schema validation fails, even after repair) and `error`
-(the serialized `AiMuxError` for that failure).
+(the `AiMuxError` object for that failure).
 
 ## Coverage
 

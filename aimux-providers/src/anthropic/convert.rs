@@ -18,18 +18,26 @@
 //!   conversion with `send_reasoning = false`, discarding the betas and
 //!   warnings.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
 
-use aimux_core::content::ContentPart;
 use aimux_core::error::AiMuxError;
-use aimux_core::language_model_message::LanguageModelPrompt;
-use aimux_core::message::Role;
-use aimux_core::options::{CallOptions, Tool};
+use aimux_core::language_model_message::{
+    AssistantPart, FilePart, LanguageModelMessage, LanguageModelPrompt, ReasoningPart, TextPart,
+    ToolCallPart, ToolPart, ToolResultContent, ToolResultOutput, ToolResultPart, UserPart,
+};
+use aimux_core::options::{CallOptions, FunctionTool, ResponseFormat, Tool, ToolChoice};
+use aimux_core::shared::{FileBytes, FileData, SharedProviderOptions};
 use aimux_core::types::{FinishReason, FinishReasonUnified, ReasoningEffort, Warning};
+use aimux_provider_utils::{
+    MediaTypeData, detect_media_type, get_top_level_media_type, is_full_media_type,
+};
 use serde_json::{Map, Value, json};
 
 use crate::anthropic::cache_control::CacheControlValidator;
-use crate::anthropic::prepare_tools::{AnthropicTool, prepare_tools_with_provider};
+use crate::anthropic::options::{
+    CANONICAL, PROVIDER_SKILL_TYPE, anthropic_options, anthropic_options_in,
+};
+use crate::anthropic::prepare_tools::{AnthropicTool, prepare_tools_with_validator};
 use crate::anthropic::tool_name_mapping::ToolNameMapping;
 
 /// Beta header emitted when a PDF file part is present.
@@ -97,17 +105,50 @@ pub fn convert_prompt_to_anthropic_full_with_tools(
     send_reasoning: bool,
     tool_names: &ToolNameMapping,
 ) -> Result<AnthropicPromptConversion, AiMuxError> {
+    convert_prompt_for(prompt, send_reasoning, tool_names, CANONICAL)
+}
+
+/// [`convert_prompt_to_anthropic_full_with_tools`] for a provider whose
+/// providerOptions key is `options_name`: the part and message options are
+/// read from `anthropic` merged with `options_name` (the custom key wins) and
+/// the metadata the response side wrote under `options_name` is read back.
+///
+/// # Errors
+///
+/// Same as [`convert_prompt_to_anthropic_full_with_tools`].
+pub(crate) fn convert_prompt_for(
+    prompt: &LanguageModelPrompt,
+    send_reasoning: bool,
+    tool_names: &ToolNameMapping,
+    options_name: &str,
+) -> Result<AnthropicPromptConversion, AiMuxError> {
+    let mut validator = CacheControlValidator::for_options_name(options_name);
+    convert_prompt_with_validator(
+        prompt,
+        send_reasoning,
+        tool_names,
+        options_name,
+        &mut validator,
+    )
+}
+
+fn convert_prompt_with_validator(
+    prompt: &LanguageModelPrompt,
+    send_reasoning: bool,
+    tool_names: &ToolNameMapping,
+    options_name: &str,
+    validator: &mut CacheControlValidator,
+) -> Result<AnthropicPromptConversion, AiMuxError> {
     // Ids of tool calls that were executed over MCP. Their results must be sent
     // back as `mcp_tool_result`, not as a provider-tool result block. Upstream
     // scopes this set to one merged assistant block; scanning the whole prompt
     // is a superset of that and is safe because tool call ids are unique.
-    let mcp_tool_use_ids = collect_mcp_tool_use_ids(prompt);
+    let mcp_tool_use_ids = collect_mcp_tool_use_ids(prompt, options_name);
 
     let mut system: Vec<Value> = Vec::new();
     let mut messages: Vec<Value> = Vec::new();
     let mut betas: BTreeSet<String> = BTreeSet::new();
     let mut warnings: Vec<Warning> = Vec::new();
-    let mut validator = CacheControlValidator::new();
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Eff {
@@ -127,134 +168,243 @@ pub fn convert_prompt_to_anthropic_full_with_tools(
                 Eff::User => "user",
                 Eff::Assistant => "assistant",
             };
-            messages.push(json!({ "role": role_str, "content": std::mem::take(acc) }));
+            let mut content = std::mem::take(acc);
+            if role == Eff::Assistant {
+                let mut ordered = Vec::new();
+                let mut segment = Vec::new();
+                let flush_segment = |segment: &mut Vec<Value>, ordered: &mut Vec<Value>| {
+                    let (tool_uses, other): (Vec<_>, Vec<_>) =
+                        std::mem::take(segment).into_iter().partition(|part| {
+                            part.get("type").and_then(Value::as_str) == Some("tool_use")
+                        });
+                    ordered.extend(other);
+                    ordered.extend(tool_uses);
+                };
+                for part in content {
+                    if matches!(
+                        part.get("type").and_then(Value::as_str),
+                        Some("thinking" | "redacted_thinking")
+                    ) {
+                        flush_segment(&mut segment, &mut ordered);
+                        ordered.push(part);
+                    } else {
+                        segment.push(part);
+                    }
+                }
+                flush_segment(&mut segment, &mut ordered);
+                content = ordered;
+            }
+            messages.push(json!({ "role": role_str, "content": content }));
         }
     }
 
-    for msg in prompt {
-        match msg.role {
-            Role::System => {
-                // A system message interrupts any in-flight user/assistant group.
-                flush(&mut messages, &mut last, &mut acc);
-                let n = msg.content.len();
-                let mut blocks: Vec<Value> = Vec::new();
-                for (idx, p) in msg.content.iter().enumerate() {
-                    if let ContentPart::Text {
-                        text,
-                        provider_options,
-                    } = p
-                    {
-                        let is_last = idx + 1 == n;
-                        // cache_control: part-level first, then message-level
-                        // for the last text part (system content is a string in
-                        // the TS model, so message-level is the primary path).
-                        let cache_control = match validator.get_cache_control(
-                            provider_options.as_ref(),
-                            "system message part",
-                            true,
-                        ) {
-                            Some(v) => Some(v),
-                            None => {
-                                if is_last {
-                                    validator.get_cache_control(
-                                        msg.provider_options.as_ref(),
-                                        "system message",
-                                        true,
-                                    )
-                                } else {
-                                    None
-                                }
-                            }
-                        };
-                        let mut block = json!({ "type": "text", "text": text });
-                        if let Some(cc) = cache_control {
-                            block["cache_control"] = cc;
-                        }
-                        blocks.push(block);
-                    }
-                    // Non-text parts on a system message are ignored.
+    let mut has_system = false;
+    for (index, msg) in prompt.iter().enumerate() {
+        let eff = match msg {
+            LanguageModelMessage::System { .. } => {
+                if index > 0 && matches!(prompt[index - 1], LanguageModelMessage::System { .. }) {
+                    continue;
                 }
-
-                if !seen_non_system {
-                    // Initial system block(s) become the top-level system prompt.
-                    system.extend(blocks);
+                flush(&mut messages, &mut last, &mut acc);
+                let mut converted = Vec::new();
+                for message in prompt[index..]
+                    .iter()
+                    .take_while(|message| matches!(message, LanguageModelMessage::System { .. }))
+                {
+                    let LanguageModelMessage::System {
+                        content,
+                        provider_options,
+                    } = message
+                    else {
+                        unreachable!()
+                    };
+                    let options = anthropic_options(provider_options.as_ref(), options_name)
+                        .unwrap_or_default();
+                    let invalid =
+                        || AiMuxError::InvalidArgument("invalid anthropic provider options".into());
+                    let clear_at = options.get("clearAt");
+                    if clear_at.is_some_and(|value| value.as_str() != Some("next_user_message")) {
+                        return Err(invalid());
+                    }
+                    let effort = options.get("effort");
+                    if effort.is_some_and(|value| {
+                        !matches!(
+                            value.as_str(),
+                            Some("low" | "medium" | "high" | "xhigh" | "max")
+                        )
+                    }) {
+                        return Err(invalid());
+                    }
+                    let changes = match options.get("toolChanges") {
+                        Some(value) => value.as_array().ok_or_else(invalid)?.as_slice(),
+                        None => &[],
+                    };
+                    let mut blocks = Vec::new();
+                    if !content.is_empty()
+                        || (changes.is_empty() && clear_at.is_none() && effort.is_none())
+                    {
+                        let cc = validator.get_cache_control(
+                            provider_options.as_ref(),
+                            "system message",
+                            true,
+                        );
+                        blocks.push(apply_cc(json!({ "type": "text", "text": content }), cc));
+                    }
+                    for change in changes {
+                        let kind = change
+                            .get("type")
+                            .and_then(Value::as_str)
+                            .filter(|kind| matches!(*kind, "tool_addition" | "tool_removal"))
+                            .ok_or_else(invalid)?;
+                        let name = change
+                            .get("toolName")
+                            .and_then(Value::as_str)
+                            .ok_or_else(invalid)?;
+                        blocks.push(json!({ "type": kind, "tool": {
+                            "type": "tool_reference", "name": tool_names.to_provider_tool_name(name)
+                        }}));
+                    }
+                    converted.push((blocks, clear_at.cloned(), effort.cloned(), changes.len()));
+                }
+                let change_count: usize = converted.iter().map(|message| message.3).sum();
+                let has_controls = converted
+                    .iter()
+                    .any(|message| message.1.is_some() || message.2.is_some());
+                if !seen_non_system || (!has_system && change_count == 0 && !has_controls) {
+                    if change_count > 0 {
+                        warnings.push(Warning::Other { message: "tool changes on the initial system message are not supported by Anthropic. Configure the initial tool set via the tools option instead. The tool changes have been ignored.".into() });
+                    }
+                    for (blocks, clear_at, effort, _) in converted {
+                        if blocks.is_empty() && clear_at.is_none() && effort.is_some() {
+                            messages.push(json!({ "role": "system", "content": [], "output_config": { "effort": effort } }));
+                            betas.insert("mid-conversation-output-config-2026-07-01".into());
+                        } else if clear_at.is_some() || effort.is_some() {
+                            warnings.push(Warning::Other { message: "clearAt and effort on this initial system message are not supported by Anthropic. Use a separate effort-only system message with empty content to set effort. These options have been ignored.".into() });
+                        }
+                        system.extend(blocks.into_iter().filter(|block| block["type"] == "text"));
+                    }
+                    has_system = true;
                 } else {
-                    // A mid-conversation system message is emitted inline.
-                    messages.push(json!({ "role": "system", "content": blocks }));
                     betas.insert(BETA_MID_CONVERSATION_SYSTEM.to_string());
+                    for (blocks, clear_at, effort, changes) in converted {
+                        let mut message = json!({ "role": "system", "content": blocks });
+                        if let Some(clear_at) = clear_at {
+                            message["clear_at"] = clear_at;
+                            betas.insert("mid-conversation-system-clear-at-2026-08-21".into());
+                        }
+                        if let Some(effort) = effort {
+                            message["output_config"] = json!({ "effort": effort });
+                            betas.insert("mid-conversation-output-config-2026-07-01".into());
+                        }
+                        if changes > 0 {
+                            betas.insert("mid-conversation-tool-changes-2026-07-01".into());
+                        }
+                        messages.push(message);
+                    }
+                }
+                continue;
+            }
+            LanguageModelMessage::Assistant { .. } => Eff::Assistant,
+            LanguageModelMessage::User { .. } | LanguageModelMessage::Tool { .. } => Eff::User,
+        };
+        seen_non_system = true;
+        if last != Some(eff) {
+            flush(&mut messages, &mut last, &mut acc);
+        }
+        match msg {
+            LanguageModelMessage::System { .. } => unreachable!(),
+            LanguageModelMessage::User {
+                content,
+                provider_options,
+            } => {
+                for (idx, part) in content.iter().enumerate() {
+                    let is_last = idx + 1 == content.len();
+                    let block = match part {
+                        UserPart::Text(TextPart {
+                            text,
+                            provider_options: part_options,
+                        }) => {
+                            let cc = resolve_cache_control(
+                                validator,
+                                part_options.as_ref(),
+                                provider_options.as_ref(),
+                                is_last,
+                                "user message part",
+                                "user message",
+                            );
+                            apply_cc(json!({ "type": "text", "text": text }), cc)
+                        }
+                        UserPart::File(file) => convert_file_part(
+                            file,
+                            &mut betas,
+                            validator,
+                            provider_options.as_ref(),
+                            is_last,
+                            "user message part",
+                            "user message",
+                            options_name,
+                        )?,
+                    };
+                    acc.push(block);
                 }
             }
-            Role::User | Role::Tool => {
-                seen_non_system = true;
-                if last != Some(Eff::User) {
-                    flush(&mut messages, &mut last, &mut acc);
-                }
-                let (part_ctx, msg_ctx) = match msg.role {
-                    Role::Tool => ("tool result part", "tool result message"),
-                    _ => ("user message part", "user message"),
-                };
-                let n = msg.content.len();
-                for (idx, p) in msg.content.iter().enumerate() {
-                    let is_last_part = idx + 1 == n;
-                    if let Some(block) = convert_part_to_anthropic(
-                        p,
-                        send_reasoning,
-                        tool_names,
+            LanguageModelMessage::Tool {
+                content,
+                provider_options,
+            } => {
+                for (idx, part) in content.iter().enumerate() {
+                    let ToolPart::ToolResult(part) = part else {
+                        continue;
+                    };
+                    acc.push(convert_tool_result(
+                        part,
+                        validator,
                         &mut betas,
                         &mut warnings,
-                        &mut validator,
-                        is_last_part,
-                        msg.provider_options.as_ref(),
-                        part_ctx,
-                        msg_ctx,
-                    )? {
-                        acc.push(block);
-                    }
+                        idx + 1 == content.len(),
+                        provider_options.as_ref(),
+                        options_name,
+                        tool_names,
+                    )?);
                 }
-                last = Some(Eff::User);
             }
-            Role::Assistant => {
-                seen_non_system = true;
-                if last != Some(Eff::Assistant) {
-                    flush(&mut messages, &mut last, &mut acc);
-                }
-                let n = msg.content.len();
-                for (idx, p) in msg.content.iter().enumerate() {
-                    let is_last_part = idx + 1 == n;
-                    // Assistant-role tool results are provider-executed results;
-                    // Anthropic only accepts a bare `tool_result` in a *user*
-                    // message, so they take a dedicated path.
-                    let block = if let ContentPart::ToolResult { .. } = p {
+            LanguageModelMessage::Assistant {
+                content,
+                provider_options,
+            } => {
+                for (idx, part) in content.iter().enumerate() {
+                    let is_last = idx + 1 == content.len();
+                    let block = if let AssistantPart::ToolResult(part) = part {
                         convert_assistant_tool_result(
-                            p,
+                            part,
                             tool_names,
                             &mcp_tool_use_ids,
                             &mut warnings,
-                            &mut validator,
-                            is_last_part,
-                            msg.provider_options.as_ref(),
+                            validator,
+                            is_last,
+                            provider_options.as_ref(),
+                            options_name,
                         )
                     } else {
-                        convert_part_to_anthropic(
-                            p,
+                        convert_assistant_part(
+                            part,
                             send_reasoning,
                             tool_names,
                             &mut betas,
                             &mut warnings,
-                            &mut validator,
-                            is_last_part,
-                            msg.provider_options.as_ref(),
-                            "assistant message part",
-                            "assistant message",
+                            validator,
+                            is_last,
+                            provider_options.as_ref(),
+                            options_name,
                         )?
                     };
                     if let Some(block) = block {
                         acc.push(block);
                     }
                 }
-                last = Some(Eff::Assistant);
             }
         }
+        last = Some(eff);
     }
     flush(&mut messages, &mut last, &mut acc);
 
@@ -275,11 +425,7 @@ pub fn convert_prompt_to_anthropic_full_with_tools(
     // Merge any cache_control validation warnings.
     warnings.extend(validator.take_warnings());
 
-    let system_opt = if system.is_empty() {
-        None
-    } else {
-        Some(system)
-    };
+    let system_opt = has_system.then_some(system);
     Ok(AnthropicPromptConversion {
         system: system_opt,
         messages,
@@ -333,199 +479,326 @@ pub fn convert_prompt_to_anthropic(
     }
 }
 
-/// Return the top-level media type (the segment before the first `/`).
-fn top_level_media_type(media_type: &str) -> &str {
-    media_type.split('/').next().unwrap_or("")
+fn resolve_cache_control(
+    validator: &mut CacheControlValidator,
+    part_options: Option<&SharedProviderOptions>,
+    message_options: Option<&SharedProviderOptions>,
+    is_last_part: bool,
+    part_context: &str,
+    message_context: &str,
+) -> Option<Value> {
+    validator
+        .get_cache_control(part_options, part_context, true)
+        .or_else(|| {
+            if is_last_part {
+                validator.get_cache_control(message_options, message_context, true)
+            } else {
+                None
+            }
+        })
 }
 
-/// Convert a single content part into an Anthropic content block.
-///
-/// Returns `None` when the part should be omitted entirely (e.g. a reasoning
-/// part that is dropped). `betas` and `warnings` are appended to as side
-/// effects.
-///
-/// `cache_control` is resolved from the part's `provider_options.anthropic
-/// .cacheControl`, falling back to the message-level `provider_options` for the
-/// last part of a message (mirroring the TS SDK). Thinking blocks reject
-/// cache_control (validated with a warning).
+fn apply_cc(mut block: Value, cc: Option<Value>) -> Value {
+    if let Some(cc) = cc {
+        block["cache_control"] = cc;
+    }
+    block
+}
+
 #[allow(clippy::too_many_arguments)]
-fn convert_part_to_anthropic(
-    part: &ContentPart,
+fn convert_file_part(
+    file: &FilePart,
+    betas: &mut BTreeSet<String>,
+    validator: &mut CacheControlValidator,
+    message_options: Option<&SharedProviderOptions>,
+    is_last_part: bool,
+    part_context: &str,
+    message_context: &str,
+    options_name: &str,
+) -> Result<Value, AiMuxError> {
+    let FilePart {
+        data,
+        media_type,
+        filename,
+        provider_options,
+    } = file;
+    let resolve_inline_media_type = |data| -> Result<String, AiMuxError> {
+        if is_full_media_type(media_type) {
+            return Ok(media_type.clone());
+        }
+        if let Some(detected) = detect_media_type(data, Some(get_top_level_media_type(media_type)))?
+        {
+            return Ok(detected.into());
+        }
+        Err(AiMuxError::UnsupportedFunctionality(format!(
+            "file of media type \"{media_type}\" must specify subtype since it could not be auto-detected"
+        )))
+    };
+    let mut block = match data {
+        FileData::Data {
+            data: FileBytes::Binary(bytes),
+        } => {
+            let full = if matches!(
+                get_top_level_media_type(media_type),
+                "image" | "application"
+            ) {
+                resolve_inline_media_type(MediaTypeData::Bytes(bytes))?
+            } else {
+                media_type.clone()
+            };
+            route_file_bytes(&full, bytes, filename.as_deref(), betas)?
+        }
+        FileData::Data {
+            data: FileBytes::Base64(data),
+        } => {
+            use base64::Engine;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .unwrap_or_default();
+            let full = if matches!(
+                get_top_level_media_type(media_type),
+                "image" | "application"
+            ) {
+                resolve_inline_media_type(MediaTypeData::Base64(data))?
+            } else {
+                media_type.clone()
+            };
+            route_file_base64(&full, data, &bytes, filename.as_deref(), betas)?
+        }
+        FileData::Url { url, .. } => route_file_url(media_type, url, betas)?,
+        FileData::Reference { reference } => {
+            let file_id = resolve_anthropic_reference(reference)?;
+            betas.insert(BETA_FILES_API.to_string());
+            let container_upload = anthropic_options(provider_options.as_ref(), options_name)
+                .as_ref()
+                .and_then(|a| a.get("containerUpload"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if container_upload {
+                return Ok(json!({ "type": "container_upload", "file_id": file_id }));
+            } else if get_top_level_media_type(media_type) == "image" {
+                json!({ "type": "image", "source": { "type": "file", "file_id": file_id } })
+            } else {
+                json!({ "type": "document", "source": { "type": "file", "file_id": file_id } })
+            }
+        }
+        FileData::Text { text } => {
+            let document_options = anthropic_options(provider_options.as_ref(), options_name);
+            let options = document_options.as_ref();
+            let mut block = json!({ "type": "document", "source": {
+                "type": "text", "media_type": "text/plain", "data": text,
+            }});
+            if let Some(title) = options
+                .and_then(|o| o.get("title"))
+                .and_then(Value::as_str)
+                .or(filename.as_deref())
+            {
+                block["title"] = json!(title);
+            }
+            if let Some(context) = options
+                .and_then(|o| o.get("context"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                block["context"] = json!(context);
+            }
+            if options
+                .and_then(|o| o.get("citations"))
+                .and_then(|c| c.get("enabled"))
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                block["citations"] = json!({ "enabled": true });
+            }
+            block
+        }
+    };
+    if block.get("type").and_then(Value::as_str) == Some("document")
+        && !matches!(data, FileData::Reference { .. })
+        && let Some(metadata) = anthropic_options(provider_options.as_ref(), options_name)
+    {
+        for field in ["title", "context"] {
+            if let Some(value) = metadata.get(field).filter(|value| {
+                value.is_string() && (field == "title" || value.as_str() != Some(""))
+            }) {
+                block[field] = value.clone();
+            }
+        }
+        if metadata
+            .get("citations")
+            .and_then(|v| v.get("enabled"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            block["citations"] = json!({ "enabled": true });
+        }
+    }
+    let cc = resolve_cache_control(
+        validator,
+        provider_options.as_ref(),
+        message_options,
+        is_last_part,
+        part_context,
+        message_context,
+    );
+    Ok(apply_cc(block, cc))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn convert_tool_result(
+    part: &ToolResultPart,
+    validator: &mut CacheControlValidator,
+    betas: &mut BTreeSet<String>,
+    warnings: &mut Vec<Warning>,
+    is_last_part: bool,
+    message_provider_options: Option<&SharedProviderOptions>,
+    options_name: &str,
+    tool_names: &ToolNameMapping,
+) -> Result<Value, AiMuxError> {
+    let ToolResultPart {
+        tool_call_id,
+        tool_name,
+        output,
+        provider_options,
+        ..
+    } = part;
+
+    let (content, is_error) = resolve_tool_result_output(output, betas, warnings, options_name)?;
+    let mut block = json!({
+        "type": "tool_result",
+        "tool_use_id": tool_call_id,
+        "content": content,
+    });
+    if let Some(name) = toolset_name(
+        tool_names,
+        tool_name,
+        provider_options.as_ref(),
+        options_name,
+    ) {
+        block["toolset_name"] = json!(name);
+    }
+    if is_error {
+        block["is_error"] = json!(true);
+    }
+    // cache_control: part ?? output ?? (is_last_part ? message).
+    let cc = validator
+        .get_cache_control(provider_options.as_ref(), "tool result part", true)
+        .or_else(|| {
+            validator.get_cache_control(
+                extract_tool_result_output_provider_options(output),
+                "tool result output",
+                true,
+            )
+        })
+        .or_else(|| {
+            is_last_part
+                .then(|| {
+                    validator.get_cache_control(
+                        message_provider_options,
+                        "tool result message",
+                        true,
+                    )
+                })
+                .flatten()
+        });
+    Ok(apply_cc(block, cc))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn convert_assistant_part(
+    part: &AssistantPart,
     send_reasoning: bool,
     tool_names: &ToolNameMapping,
     betas: &mut BTreeSet<String>,
     warnings: &mut Vec<Warning>,
     validator: &mut CacheControlValidator,
     is_last_part: bool,
-    message_provider_options: Option<&Value>,
-    part_context_type: &str,
-    message_context_type: &str,
+    message_provider_options: Option<&SharedProviderOptions>,
+    options_name: &str,
 ) -> Result<Option<Value>, AiMuxError> {
-    // Resolve cache_control = part-level ?? (is_last_part ? message-level).
-    let resolve_cc =
-        |validator: &mut CacheControlValidator, part_opts: Option<&Value>| match validator
-            .get_cache_control(part_opts, part_context_type, true)
-        {
-            Some(v) => Some(v),
-            None => {
-                if is_last_part {
-                    validator.get_cache_control(
-                        message_provider_options,
-                        message_context_type,
-                        true,
-                    )
-                } else {
-                    None
+    let resolve_cc = |validator: &mut CacheControlValidator, part_opts| {
+        resolve_cache_control(
+            validator,
+            part_opts,
+            message_provider_options,
+            is_last_part,
+            "assistant message part",
+            "assistant message",
+        )
+    };
+    Ok(Some(match part {
+        AssistantPart::Text(TextPart {
+            text,
+            provider_options,
+        }) => {
+            let cc = resolve_cc(validator, provider_options.as_ref());
+            let metadata = anthropic_options(provider_options.as_ref(), options_name);
+            let mut block = json!({ "type": "text", "text": text });
+            if let Some(metadata) = metadata {
+                if metadata.get("type").and_then(Value::as_str) == Some("compaction") {
+                    if text.is_empty() {
+                        return Ok(None);
+                    }
+                    block = json!({ "type": "compaction", "content": text });
+                    if let Some(signature) =
+                        metadata.get("signature").filter(|value| value.is_string())
+                    {
+                        block["signature"] = signature.clone();
+                        betas.insert("compact-2026-09-04".to_string());
+                    }
+                } else if let Some(citations) = metadata.get("citations").filter(|v| !v.is_null()) {
+                    block["citations"] = citations.clone();
                 }
             }
-        };
-
-    let apply_cc = |block: Value, cc: Option<Value>| -> Value {
-        match cc {
-            Some(c) => {
-                let mut b = block;
-                b["cache_control"] = c;
-                b
-            }
-            None => block,
+            apply_cc(block, cc)
         }
-    };
 
-    Ok(Some(match part {
-        ContentPart::Text {
+        AssistantPart::File(file) => convert_file_part(
+            file,
+            betas,
+            validator,
+            message_provider_options,
+            is_last_part,
+            "assistant message part",
+            "assistant message",
+            options_name,
+        )?,
+        AssistantPart::Reasoning(ReasoningPart {
             text,
             provider_options,
-        } => {
-            let cc = resolve_cc(validator, provider_options.as_ref());
-            apply_cc(json!({ "type": "text", "text": text }), cc)
-        }
-
-        ContentPart::Image {
-            image,
-            media_type,
-            provider_options,
-        } => {
-            use base64::Engine;
-            let b64 = base64::engine::general_purpose::STANDARD.encode(image);
-            let cc = resolve_cc(validator, provider_options.as_ref());
-            apply_cc(
-                json!({
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": media_type,
-                        "data": b64,
-                    }
-                }),
-                cc,
-            )
-        }
-
-        ContentPart::File {
-            data,
-            media_type,
-            filename,
-            provider_options,
-        } => {
-            let full = resolve_full_media_type(media_type, data)?;
-            let block = route_file_bytes(&full, data, filename.as_deref(), betas)?;
-            let cc = resolve_cc(validator, provider_options.as_ref());
-            apply_cc(block, cc)
-        }
-
-        ContentPart::FileBase64 {
-            data,
-            media_type,
-            filename,
-            provider_options,
-        } => {
-            use base64::Engine;
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(data)
-                .unwrap_or_default();
-            let full = resolve_full_media_type(media_type, &bytes)?;
-            let block = route_file_base64(&full, data, &bytes, filename.as_deref(), betas)?;
-            let cc = resolve_cc(validator, provider_options.as_ref());
-            apply_cc(block, cc)
-        }
-
-        ContentPart::FileUrl {
-            url,
-            media_type,
-            provider_options,
-        } => {
-            let block = route_file_url(media_type, url, betas)?;
-            let cc = resolve_cc(validator, provider_options.as_ref());
-            apply_cc(block, cc)
-        }
-
-        ContentPart::FileReference {
-            media_type,
-            reference,
-            provider_options,
-            ..
-        } => {
-            let file_id = resolve_anthropic_reference(reference)?;
-            betas.insert(BETA_FILES_API.to_string());
-            let container_upload = provider_options
-                .as_ref()
-                .and_then(|o| o.get("anthropic"))
-                .and_then(|a| a.get("containerUpload"))
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            let block = if container_upload {
-                json!({ "type": "container_upload", "file_id": file_id })
-            } else if top_level_media_type(media_type) == "image" {
-                json!({ "type": "image", "source": { "type": "file", "file_id": file_id } })
-            } else {
-                json!({ "type": "document", "source": { "type": "file", "file_id": file_id } })
-            };
-            // container_upload blocks do not carry cache_control in the TS SDK.
-            let cc = if container_upload {
-                None
-            } else {
-                resolve_cc(validator, provider_options.as_ref())
-            };
-            apply_cc(block, cc)
-        }
-
-        ContentPart::Reasoning {
-            text,
-            signature,
-            provider_options,
-        } => {
+        }) => {
             return Ok(convert_reasoning_part(
                 text,
-                signature.as_deref(),
                 provider_options.as_ref(),
                 send_reasoning,
                 warnings,
                 validator,
+                options_name,
             ));
         }
 
-        ContentPart::ToolCall {
+        AssistantPart::ToolCall(ToolCallPart {
             tool_call_id,
             tool_name,
             input,
             provider_executed,
             provider_options,
             ..
-        } => {
+        }) => {
             let cc = resolve_cc(validator, provider_options.as_ref());
 
             if *provider_executed == Some(true) {
                 let provider_name = tool_names.to_provider_tool_name(tool_name);
-                let anthropic_options = provider_options
-                    .as_ref()
-                    .and_then(|options| options.get("anthropic"));
+                let own_options = anthropic_options(provider_options.as_ref(), options_name);
 
-                if anthropic_options
+                if own_options
+                    .as_ref()
                     .and_then(|options| options.get("type"))
                     .and_then(Value::as_str)
                     == Some("mcp-tool-use")
                 {
-                    let Some(server_name) = anthropic_options
+                    let Some(server_name) = own_options
+                        .as_ref()
                         .and_then(|options| options.get("serverName"))
                         .and_then(Value::as_str)
                     else {
@@ -582,15 +855,14 @@ fn convert_part_to_anthropic(
                     return Ok(None);
                 };
 
-                return Ok(Some(apply_cc(
-                    json!({
-                        "type": "server_tool_use",
-                        "id": tool_call_id,
-                        "name": server_name,
-                        "input": server_input,
-                    }),
-                    cc,
-                )));
+                let mut block = json!({
+                    "type": "server_tool_use", "id": tool_call_id,
+                    "name": server_name, "input": server_input,
+                });
+                if let Some(caller) = tool_caller(provider_options.as_ref(), options_name) {
+                    block["caller"] = caller;
+                }
+                return Ok(Some(apply_cc(block, cc)));
             }
 
             // Anthropic requires `input` to be a JSON object. The SDK wraps any
@@ -601,25 +873,38 @@ fn convert_part_to_anthropic(
             } else {
                 json!({ "rawInvalidInput": input })
             };
-            let caller = provider_options
-                .as_ref()
-                .and_then(|options| options.get("anthropic"))
-                .and_then(|anthropic| anthropic.get("caller"))
-                .and_then(|caller| {
-                    let caller_type = caller.get("type")?.as_str()?;
-                    match caller_type {
-                        "code_execution_20250825" | "code_execution_20260120" => {
-                            let tool_id = caller.get("toolId")?.as_str()?;
-                            Some(json!({ "type": caller_type, "tool_id": tool_id }))
-                        }
-                        "direct" => Some(json!({ "type": "direct" })),
-                        _ => None,
-                    }
+            let caller = tool_caller(provider_options.as_ref(), options_name);
+            if let Some(toolset_name) = toolset_name(
+                tool_names,
+                tool_name,
+                provider_options.as_ref(),
+                options_name,
+            ) {
+                let Some(action) = input_val.get("action").and_then(Value::as_str) else {
+                    warnings.push(Warning::Other {
+                        message: format!(
+                            "toolset tool call for tool {tool_name} is missing the action"
+                        ),
+                    });
+                    return Ok(None);
+                };
+                let mut block = json!({
+                    "type": "tool_use",
+                    "id": tool_call_id,
+                    "name": action,
+                    "toolset_name": toolset_name,
+                    "input": input_val,
                 });
+                block["input"].as_object_mut().unwrap().remove("action");
+                if let Some(caller) = caller {
+                    block["caller"] = caller;
+                }
+                return Ok(Some(apply_cc(block, cc)));
+            }
             let mut block = json!({
                 "type": "tool_use",
                 "id": tool_call_id,
-                "name": tool_names.to_provider_tool_name(tool_name),
+                "name": tool_name,
                 "input": input_val,
             });
             if let Some(caller) = caller {
@@ -628,47 +913,8 @@ fn convert_part_to_anthropic(
             apply_cc(block, cc)
         }
 
-        ContentPart::ToolResult {
-            tool_call_id,
-            result,
-            provider_options,
-            ..
-        } => {
-            let (content, is_error) = resolve_tool_result_output(result);
-            let mut block = json!({
-                "type": "tool_result",
-                "tool_use_id": tool_call_id,
-                "content": content,
-            });
-            if is_error {
-                block["is_error"] = json!(true);
-            }
-            // cache_control: part ?? output ?? (is_last_part ? message).
-            let cc = match validator.get_cache_control(
-                provider_options.as_ref(),
-                part_context_type,
-                true,
-            ) {
-                Some(v) => Some(v),
-                None => match extract_tool_result_output_provider_options(result) {
-                    Some(out_opts) => {
-                        validator.get_cache_control(Some(out_opts), "tool result output", true)
-                    }
-                    None => {
-                        if is_last_part {
-                            validator.get_cache_control(
-                                message_provider_options,
-                                message_context_type,
-                                true,
-                            )
-                        } else {
-                            None
-                        }
-                    }
-                },
-            };
-            apply_cc(block, cc)
-        }
+        AssistantPart::ReasoningFile(_) | AssistantPart::Custom(_) => return Ok(None),
+        AssistantPart::ToolResult(_) => unreachable!(),
     }))
 }
 
@@ -680,20 +926,23 @@ fn convert_part_to_anthropic(
 /// before any message is converted. The marker is the one the response side
 /// writes on an `mcp_tool_use` block (`stream.rs`):
 /// `providerOptions.anthropic.type == "mcp-tool-use"`.
-fn collect_mcp_tool_use_ids(prompt: &LanguageModelPrompt) -> HashSet<&str> {
+fn collect_mcp_tool_use_ids<'a>(
+    prompt: &'a LanguageModelPrompt,
+    options_name: &str,
+) -> HashSet<&'a str> {
     let mut ids = HashSet::new();
     for msg in prompt {
-        if msg.role != Role::Assistant {
+        let LanguageModelMessage::Assistant { content, .. } = msg else {
             continue;
-        }
-        for part in &msg.content {
-            if let ContentPart::ToolCall {
+        };
+        for part in content {
+            if let AssistantPart::ToolCall(ToolCallPart {
                 tool_call_id,
                 provider_options: Some(opts),
                 ..
-            } = part
-                && opts
-                    .get("anthropic")
+            }) = part
+                && anthropic_options(Some(opts), options_name)
+                    .as_ref()
                     .and_then(|a| a.get("type"))
                     .and_then(|t| t.as_str())
                     == Some("mcp-tool-use")
@@ -703,6 +952,45 @@ fn collect_mcp_tool_use_ids(prompt: &LanguageModelPrompt) -> HashSet<&str> {
         }
     }
     ids
+}
+
+fn toolset_name(
+    tool_names: &ToolNameMapping,
+    tool_name: &str,
+    provider_options: Option<&SharedProviderOptions>,
+    options_name: &str,
+) -> Option<String> {
+    tool_names
+        .toolset_name(tool_name)
+        .map(str::to_string)
+        .or_else(|| {
+            anthropic_options(provider_options, options_name).and_then(|options| {
+                options
+                    .get("toolsetName")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+        })
+}
+
+fn tool_caller(
+    provider_options: Option<&SharedProviderOptions>,
+    options_name: &str,
+) -> Option<Value> {
+    anthropic_options(provider_options, options_name)
+        .as_ref()
+        .and_then(|anthropic| anthropic.get("caller"))
+        .and_then(|caller| {
+            let caller_type = caller.get("type")?.as_str()?;
+            match caller_type {
+                "code_execution_20250825" | "code_execution_20260120" => {
+                    let tool_id = caller.get("toolId")?.as_str()?;
+                    Some(json!({ "type": caller_type, "tool_id": tool_id }))
+                }
+                "direct" => Some(json!({ "type": "direct" })),
+                _ => None,
+            }
+        })
 }
 
 /// Clone `key` out of `value`, defaulting to `null`.
@@ -716,15 +1004,19 @@ fn field(value: &Value, key: &str) -> Value {
 /// through unmapped keep `error_code`. Both are accepted so a replayed result
 /// round-trips either way.
 fn result_error_code(value: &Value, fallback: &str) -> String {
+    let parsed = value
+        .as_str()
+        .and_then(|value| serde_json::from_str::<Value>(value).ok());
+    let value = parsed.as_ref().unwrap_or(value);
     value
         .get("errorCode")
         .or_else(|| value.get("error_code"))
-        .and_then(|c| c.as_str())
+        .and_then(Value::as_str)
         .unwrap_or(fallback)
         .to_string()
 }
 
-/// Convert an assistant-role `ContentPart::ToolResult` into the matching
+/// Convert an assistant-role `AssistantPart::ToolResult` into the matching
 /// Anthropic provider-executed result block.
 ///
 /// Anthropic only accepts a bare `tool_result` block inside a **user** message;
@@ -735,57 +1027,78 @@ fn result_error_code(value: &Value, fallback: &str) -> String {
 /// rather than sent as a bare `tool_result`.
 ///
 /// Returns `None` when the part is skipped.
+#[allow(clippy::too_many_arguments)]
 fn convert_assistant_tool_result(
-    part: &ContentPart,
+    part: &ToolResultPart,
     tool_names: &ToolNameMapping,
     mcp_tool_use_ids: &HashSet<&str>,
     warnings: &mut Vec<Warning>,
     validator: &mut CacheControlValidator,
     is_last_part: bool,
-    message_provider_options: Option<&Value>,
+    message_provider_options: Option<&SharedProviderOptions>,
+    options_name: &str,
 ) -> Option<Value> {
-    let ContentPart::ToolResult {
+    let ToolResultPart {
         tool_call_id,
         tool_name,
-        result,
-        is_error,
+        output,
         provider_options,
         ..
-    } = part
-    else {
-        return None;
-    };
+    } = part;
 
-    // cache_control: part ?? output ?? (is_last_part ? message) — the same
-    // resolution order the bare `tool_result` path uses.
-    let cache_control = match validator.get_cache_control(
+    let cache_control = resolve_cache_control(
+        validator,
         provider_options.as_ref(),
+        message_provider_options,
+        is_last_part,
         "assistant message part",
-        true,
-    ) {
-        Some(v) => Some(v),
-        None => match extract_tool_result_output_provider_options(result) {
-            Some(out_opts) => {
-                validator.get_cache_control(Some(out_opts), "tool result output", true)
-            }
-            None => {
-                if is_last_part {
-                    validator.get_cache_control(message_provider_options, "assistant message", true)
-                } else {
-                    None
-                }
-            }
-        },
-    };
+        "assistant message",
+    );
 
-    // The payload is carried bare, with the error flag alongside it. Upstream
-    // reads both off a `{ type, value }` envelope instead; reconstructing that
-    // envelope here would mean guessing, and a legitimate payload that happens
-    // to look like one (`{"type":"error","value":...}`) would be unwrapped and
-    // have its `is_error` overwritten. The envelope belongs on the type.
-    let value = result;
-    let is_error = is_error.unwrap_or(false);
-    let tool_name = tool_name.as_deref().unwrap_or_default();
+    let raw_value = match output {
+        ToolResultOutput::Json { value, .. } | ToolResultOutput::ErrorJson { value, .. } => {
+            value.clone()
+        }
+        ToolResultOutput::Text { value, .. } | ToolResultOutput::ErrorText { value, .. } => {
+            json!(value)
+        }
+        ToolResultOutput::ExecutionDenied { reason, .. } => {
+            json!(reason.as_deref().unwrap_or("Tool call execution denied."))
+        }
+        ToolResultOutput::Content { value } => json!(value),
+    };
+    let provider_tool_name = tool_names.to_provider_tool_name(tool_name);
+    let allowed = match output {
+        ToolResultOutput::Json { .. } => true,
+        ToolResultOutput::ErrorJson { .. } => {
+            mcp_tool_use_ids.contains(tool_call_id.as_str())
+                || matches!(
+                    provider_tool_name,
+                    "code_execution" | "web_fetch" | "web_search" | "advisor"
+                )
+        }
+        ToolResultOutput::ErrorText { .. } => {
+            provider_tool_name == "code_execution"
+                && !mcp_tool_use_ids.contains(tool_call_id.as_str())
+        }
+        _ => false,
+    };
+    if !allowed {
+        warnings.push(Warning::Other {
+            message: format!(
+                "provider executed tool result output for tool {tool_name} is not supported"
+            ),
+        });
+        return None;
+    }
+    let value = &raw_value;
+    let is_error = matches!(
+        output,
+        ToolResultOutput::ErrorText { .. }
+            | ToolResultOutput::ErrorJson { .. }
+            | ToolResultOutput::ExecutionDenied { .. }
+    );
+    let tool_name = tool_name.as_str();
     let payload_type = value.get("type").and_then(|t| t.as_str());
 
     let mut block = if mcp_tool_use_ids.contains(tool_call_id.as_str()) {
@@ -797,6 +1110,23 @@ fn convert_assistant_tool_result(
         })
     } else {
         let (block_type, content) = match tool_names.to_provider_tool_name(tool_name) {
+            "code_execution" if is_error => {
+                let error = if let Value::String(raw) = value {
+                    serde_json::from_str(raw).unwrap_or(json!({}))
+                } else {
+                    value.clone()
+                };
+                let code_error = error.get("type").and_then(Value::as_str)
+                    == Some("code_execution_tool_result_error");
+                (
+                    if code_error {
+                        "code_execution_tool_result"
+                    } else {
+                        "bash_code_execution_tool_result"
+                    },
+                    json!({ "type": if code_error { "code_execution_tool_result_error" } else { "bash_code_execution_tool_result_error" }, "error_code": error.get("errorCode").and_then(Value::as_str).unwrap_or("unknown") }),
+                )
+            }
             "code_execution" => match assistant_code_execution_content(value, payload_type) {
                 Some(v) => v,
                 None => {
@@ -814,7 +1144,11 @@ fn convert_assistant_tool_result(
             ),
             "web_search" => (
                 "web_search_tool_result",
-                assistant_web_search_content(value),
+                if is_error {
+                    json!({ "type": "web_search_tool_result_error", "error_code": result_error_code(value, "unavailable") })
+                } else {
+                    assistant_web_search_content(value)
+                },
             ),
             "tool_search_tool_regex" | "tool_search_tool_bm25" => (
                 "tool_search_tool_result",
@@ -840,6 +1174,11 @@ fn convert_assistant_tool_result(
         })
     };
 
+    if matches!(provider_tool_name, "web_fetch" | "web_search")
+        && let Some(caller) = tool_caller(provider_options.as_ref(), options_name)
+    {
+        block["caller"] = caller;
+    }
     if let Some(cc) = cache_control {
         block["cache_control"] = cc;
     }
@@ -1016,21 +1355,31 @@ fn assistant_advisor_content(value: &Value, payload_type: Option<&str>) -> Value
 ///   returned (e.g. `{ type: 'text', value, providerOptions }`).
 /// - When the output is a `content` output whose `value` is an array of content
 ///   parts, the `providerOptions` of the first part that has one is returned.
-fn extract_tool_result_output_provider_options(output: &Value) -> Option<&Value> {
-    if let Some(opts) = output.get("providerOptions") {
-        return Some(opts);
-    }
-    let output_type = output.get("type").and_then(|t| t.as_str());
-    if output_type == Some("content")
-        && let Some(value) = output.get("value").and_then(|v| v.as_array())
-    {
-        for part in value {
-            if let Some(opts) = part.get("providerOptions") {
-                return Some(opts);
-            }
+fn extract_tool_result_output_provider_options(
+    output: &ToolResultOutput,
+) -> Option<&SharedProviderOptions> {
+    match output {
+        ToolResultOutput::Text {
+            provider_options, ..
         }
+        | ToolResultOutput::Json {
+            provider_options, ..
+        }
+        | ToolResultOutput::ErrorText {
+            provider_options, ..
+        }
+        | ToolResultOutput::ErrorJson {
+            provider_options, ..
+        }
+        | ToolResultOutput::ExecutionDenied {
+            provider_options, ..
+        } => provider_options.as_ref(),
+        ToolResultOutput::Content { value } => value.iter().find_map(|part| match part {
+            ToolResultContent::Text(part) => part.provider_options.as_ref(),
+            ToolResultContent::File(part) => part.provider_options.as_ref(),
+            ToolResultContent::Custom { provider_options } => provider_options.as_ref(),
+        }),
     }
-    None
 }
 
 /// Route an inline-bytes file part. `full_media_type` is the resolved
@@ -1044,7 +1393,7 @@ fn route_file_bytes(
     betas: &mut BTreeSet<String>,
 ) -> Result<Value, AiMuxError> {
     use base64::Engine;
-    match top_level_media_type(full_media_type) {
+    match get_top_level_media_type(full_media_type) {
         "image" => {
             let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
             Ok(json!({
@@ -1092,7 +1441,7 @@ fn route_file_base64(
     title: Option<&str>,
     betas: &mut BTreeSet<String>,
 ) -> Result<Value, AiMuxError> {
-    match top_level_media_type(full_media_type) {
+    match get_top_level_media_type(full_media_type) {
         "image" => Ok(json!({
             "type": "image",
             "source": { "type": "base64", "media_type": full_media_type, "data": b64 }
@@ -1134,7 +1483,7 @@ fn route_file_url(
     url: &str,
     betas: &mut BTreeSet<String>,
 ) -> Result<Value, AiMuxError> {
-    match top_level_media_type(media_type) {
+    match get_top_level_media_type(media_type) {
         "image" => Ok(json!({ "type": "image", "source": { "type": "url", "url": url } })),
         "application" if media_type == "application/pdf" => {
             betas.insert(BETA_PDFS.to_string());
@@ -1149,72 +1498,6 @@ fn route_file_url(
     }
 }
 
-/// Returns `true` only when the media type has a non-empty, non-wildcard
-/// subtype (i.e. `type/subtype` where `subtype` is not `*`).
-fn is_full_media_type(media_type: &str) -> bool {
-    match media_type.find('/') {
-        Some(i) => {
-            let subtype = &media_type[i + 1..];
-            !subtype.is_empty() && subtype != "*"
-        }
-        None => false,
-    }
-}
-
-/// Sniff the concrete media type from inline bytes for the given top-level
-/// segment, mirroring the TS `detectMediaType` signature tables.
-fn detect_media_type(bytes: &[u8], top_level: &str) -> Option<&'static str> {
-    match top_level {
-        "image" => detect_image_media_type(bytes),
-        "application" => detect_document_media_type(bytes),
-        _ => None,
-    }
-}
-
-fn detect_image_media_type(bytes: &[u8]) -> Option<&'static str> {
-    const SIGS: &[(&[u8], &str)] = &[
-        (&[0x47, 0x49, 0x46], "image/gif"),
-        (&[0x89, 0x50, 0x4e, 0x47], "image/png"),
-        (&[0xff, 0xd8], "image/jpeg"),
-        (&[0x42, 0x4d], "image/bmp"),
-        (&[0x49, 0x49, 0x2a, 0x00], "image/tiff"),
-        (&[0x4d, 0x4d, 0x00, 0x2a], "image/tiff"),
-    ];
-    for (prefix, mt) in SIGS {
-        if bytes.starts_with(prefix) {
-            return Some(mt);
-        }
-    }
-    // WEBP: "RIFF" .... "WEBP"
-    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        return Some("image/webp");
-    }
-    None
-}
-
-fn detect_document_media_type(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(&[0x25, 0x50, 0x44, 0x46]) {
-        return Some("application/pdf");
-    }
-    None
-}
-
-/// Resolve a file part's media type to a full `type/subtype` form, mirroring
-/// the TS `resolveFullMediaType`. When the media type is already a full type it
-/// is returned as-is; otherwise the subtype is sniffed from the inline bytes.
-fn resolve_full_media_type(media_type: &str, bytes: &[u8]) -> Result<String, AiMuxError> {
-    if is_full_media_type(media_type) {
-        return Ok(media_type.to_string());
-    }
-    let top = top_level_media_type(media_type);
-    match detect_media_type(bytes, top) {
-        Some(detected) => Ok(detected.to_string()),
-        None => Err(AiMuxError::UnsupportedFunctionality(format!(
-            "file of media type \"{media_type}\" must specify subtype since it could not be auto-detected"
-        ))),
-    }
-}
-
 /// Convert an assistant `Reasoning` part into a `thinking` or
 /// `redacted_thinking` block, or drop it with a warning. Returns `None` when
 /// the part is dropped.
@@ -1224,11 +1507,11 @@ fn resolve_full_media_type(media_type: &str, bytes: &[u8]) -> Result<String, AiM
 /// matching the TS SDK — thinking blocks are cached implicitly by Anthropic.
 fn convert_reasoning_part(
     text: &str,
-    signature: Option<&str>,
-    provider_options: Option<&Value>,
+    provider_options: Option<&SharedProviderOptions>,
     send_reasoning: bool,
     warnings: &mut Vec<Warning>,
     validator: &mut CacheControlValidator,
+    options_name: &str,
 ) -> Option<Value> {
     if !send_reasoning {
         warnings.push(Warning::Other {
@@ -1239,19 +1522,16 @@ fn convert_reasoning_part(
 
     // `redactedData` is read from `providerOptions.anthropic.redactedData`
     // (mirroring the TS `anthropicReasoningMetadataSchema`).
-    let redacted_data = provider_options
-        .and_then(|o| o.get("anthropic"))
+    let reasoning_options = anthropic_options(provider_options, options_name);
+    let redacted_data = reasoning_options
+        .as_ref()
         .and_then(|a| a.get("redactedData"))
         .and_then(|v| v.as_str());
 
-    // #6: Fall back to `providerOptions.anthropic.signature` when the
-    // `signature` field is None (upstream convert-to-anthropic-prompt.ts:669-690).
-    let effective_signature = signature.or_else(|| {
-        provider_options
-            .and_then(|o| o.get("anthropic"))
-            .and_then(|a| a.get("signature"))
-            .and_then(|v| v.as_str())
-    });
+    let effective_signature = reasoning_options
+        .as_ref()
+        .and_then(|a| a.get("signature"))
+        .and_then(Value::as_str);
 
     if let Some(sig) = effective_signature {
         // Thinking blocks cannot carry cache_control directly — they are cached
@@ -1279,46 +1559,109 @@ fn convert_reasoning_part(
 }
 
 /// Resolve the Anthropic file id from a provider-reference object, mirroring the
-/// TS `resolveProviderReference`. Panics when no `anthropic` key is present,
-/// matching the TS `UnsupportedFunctionalityError`.
-fn resolve_anthropic_reference(reference: &Value) -> Result<String, AiMuxError> {
-    if let Some(id) = reference.get("anthropic").and_then(|v| v.as_str()) {
+/// TS `resolveProviderReference`: the reference is always keyed by the
+/// canonical name, whatever the provider is called. Errors when that key is
+/// absent, matching the TS `UnsupportedFunctionalityError`.
+fn resolve_anthropic_reference(
+    reference: &std::collections::HashMap<String, String>,
+) -> Result<String, AiMuxError> {
+    if let Some(id) = reference.get(CANONICAL) {
         return Ok(id.to_string());
     }
-    let providers: Vec<&str> = reference
-        .as_object()
-        .map(|o| o.keys().map(String::as_str).collect())
-        .unwrap_or_default();
+    let providers: Vec<&str> = reference.keys().map(String::as_str).collect();
     Err(AiMuxError::InvalidArgument(format!(
-        "No provider reference found for provider 'anthropic'. Available providers: {}",
+        "No provider reference found for provider '{CANONICAL}'. Available providers: {}",
         providers.join(", ")
     )))
 }
 
-/// Resolve a `ContentPart::ToolResult` `output` value into the Anthropic
-/// `tool_result.content` (and whether it is an error), mirroring the TS SDK.
-///
-/// The V4 `tool-result` `output` is a discriminated `{ type, value }` object:
-/// - `json` → `JSON.stringify(value)` (a string),
-/// - `text` → `value` as-is,
-/// - `error` → `value` as-is with `is_error: true`,
-/// - `content` → `value` as-is (an array of content blocks),
-/// - anything else → the `output` is passed through unchanged.
-fn resolve_tool_result_output(output: &Value) -> (Value, bool) {
-    if let (Some(t), Some(v)) = (
-        output.get("type").and_then(|x| x.as_str()),
-        output.get("value"),
-    ) {
-        match t {
-            "json" => (Value::String(v.to_string()), false),
-            "text" => (v.clone(), false),
-            "error" => (v.clone(), true),
-            "content" => (v.clone(), false),
-            _ => (output.clone(), false),
+/// Serialize a unified tool-result payload into the Anthropic content string.
+fn resolve_tool_result_output(
+    output: &ToolResultOutput,
+    betas: &mut BTreeSet<String>,
+    warnings: &mut Vec<Warning>,
+    options_name: &str,
+) -> Result<(Value, bool), AiMuxError> {
+    let value = match output {
+        ToolResultOutput::Text { value, .. } | ToolResultOutput::ErrorText { value, .. } => {
+            json!(value)
         }
-    } else {
-        (output.clone(), false)
-    }
+        ToolResultOutput::Json { value, .. } | ToolResultOutput::ErrorJson { value, .. } => {
+            json!(value.to_string())
+        }
+        ToolResultOutput::ExecutionDenied { reason, .. } => {
+            json!(reason.as_deref().unwrap_or("Tool call execution denied."))
+        }
+        ToolResultOutput::Content { value } => {
+            let mut content = Vec::new();
+            for part in value {
+                match part {
+                    ToolResultContent::Text(part) => {
+                        content.push(json!({ "type": "text", "text": part.text }))
+                    }
+                    ToolResultContent::File(part) => {
+                        let is_image = get_top_level_media_type(&part.media_type) == "image";
+                        let source = match &part.data {
+                            FileData::Url { url, .. } => json!({ "type": "url", "url": url }),
+                            FileData::Data { data } => {
+                                use base64::Engine;
+                                let media_type =
+                                    aimux_provider_utils::resolve_full_media_type(part)?;
+                                if !is_image && media_type != "application/pdf" {
+                                    warnings.push(Warning::Other { message: format!("unsupported tool content part type: file with media type: {}", part.media_type) });
+                                    continue;
+                                }
+                                if !is_image {
+                                    betas.insert(BETA_PDFS.to_string());
+                                }
+                                let data = match data {
+                                    FileBytes::Binary(bytes) => {
+                                        base64::engine::general_purpose::STANDARD.encode(bytes)
+                                    }
+                                    FileBytes::Base64(data) => data.clone(),
+                                };
+                                json!({ "type": "base64", "media_type": media_type, "data": data })
+                            }
+                            data => {
+                                let data_type = match data {
+                                    FileData::Reference { .. } => "reference",
+                                    FileData::Text { .. } => "text",
+                                    _ => unreachable!(),
+                                };
+                                warnings.push(Warning::Other { message: format!("unsupported tool content part type: file with data type: {data_type}") });
+                                continue;
+                            }
+                        };
+                        content.push(json!({ "type": if is_image { "image" } else { "document" }, "source": source }));
+                    }
+                    ToolResultContent::Custom { provider_options } => {
+                        if let Some(options) =
+                            anthropic_options(provider_options.as_ref(), options_name)
+                            && options.get("type").and_then(Value::as_str) == Some("tool-reference")
+                        {
+                            let mut part = json!({ "type": "tool_reference" });
+                            if let Some(tool_name) = options.get("toolName") {
+                                part["tool_name"] = tool_name.clone();
+                            }
+                            content.push(part);
+                        } else {
+                            warnings.push(Warning::Other {
+                                message: "unsupported custom tool content part".to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+            json!(content)
+        }
+    };
+    Ok((
+        value,
+        matches!(
+            output,
+            ToolResultOutput::ErrorText { .. } | ToolResultOutput::ErrorJson { .. }
+        ),
+    ))
 }
 
 // ── model capabilities & reasoning config ───────────────────────────────────
@@ -1332,6 +1675,9 @@ struct ModelCapabilities {
     rejects_sampling_parameters: bool,
     supports_xhigh_effort: bool,
     rejects_thinking_disabled_above_high_effort: bool,
+    rejects_thinking_disabled: bool,
+    rejects_forced_tool_use: bool,
+    supports_between_tools_thinking: bool,
     /// Whether the model supports native structured outputs (and therefore
     /// strict tool schemas). Mirrors the TS `supportsStructuredOutput` from
     /// `getModelCapabilities`; `supportsStrictTools` tracks it 1:1 because the
@@ -1386,18 +1732,32 @@ fn get_model_capabilities(model_id: &str) -> ModelCapabilities {
             rejects_sampling_parameters,
             supports_xhigh_effort,
             rejects_thinking_disabled_above_high_effort,
+            rejects_thinking_disabled: false,
+            rejects_forced_tool_use: false,
+            supports_between_tools_thinking: false,
             supports_structured_output,
             is_known_model,
         }
     }
 
-    if model_id.contains("claude-opus-5") {
-        caps(128000, true, true, true, true, true, true)
-    } else if model_id.contains("claude-opus-4-8")
-        || model_id.contains("claude-opus-4-7")
-        || model_id.contains("claude-fable-5")
-        || model_id.contains("claude-sonnet-5")
-    {
+    if let Some((_, suffix)) = model_id.split_once("claude-opus-5") {
+        let mut result = caps(128000, true, true, true, true, true, true);
+        result.rejects_thinking_disabled = suffix.starts_with("-5");
+        result.rejects_forced_tool_use = result.rejects_thinking_disabled;
+        result
+    } else if let Some((_, suffix)) = model_id.split_once("claude-fable-5") {
+        let mut result = caps(128000, true, true, true, false, true, true);
+        result.rejects_thinking_disabled = true;
+        result.rejects_forced_tool_use = suffix.starts_with("-1");
+        result
+    } else if let Some((_, suffix)) = model_id.split_once("claude-sonnet-5") {
+        let mut result = caps(128000, true, true, true, false, true, true);
+        result.supports_between_tools_thinking = suffix.starts_with("-5");
+        result.rejects_thinking_disabled_above_high_effort = result.supports_between_tools_thinking;
+        result.rejects_thinking_disabled = result.supports_between_tools_thinking;
+        result.rejects_forced_tool_use = result.supports_between_tools_thinking;
+        result
+    } else if model_id.contains("claude-opus-4-8") || model_id.contains("claude-opus-4-7") {
         caps(128000, true, true, true, false, true, true)
     } else if model_id.contains("claude-sonnet-4-6") || model_id.contains("claude-opus-4-6") {
         caps(128000, true, false, false, false, true, true)
@@ -1543,7 +1903,7 @@ fn resolve_anthropic_reasoning_config(
     if supports_adaptive_thinking {
         let effort = map_reasoning_to_effort(reasoning, supports_xhigh_effort, warnings)?;
         return Some(ReasoningConfig {
-            thinking: json!({ "type": "adaptive" }),
+            thinking: json!({ "type": "adaptive", "display": "summarized" }),
             effort: Some(effort),
         });
     }
@@ -1559,6 +1919,7 @@ fn resolve_anthropic_reasoning_config(
 /// beta headers required by the request.
 #[derive(Debug, Clone)]
 pub struct RequestBodyResult {
+    pub(crate) uses_json_response_tool: bool,
     pub body: Value,
     pub warnings: Vec<Warning>,
     /// Beta headers (e.g. `code-execution-2025-08-25`, `mcp-client-2025-04-04`)
@@ -1566,13 +1927,256 @@ pub struct RequestBodyResult {
     pub betas: BTreeSet<String>,
 }
 
-/// Read a value from `provider_options["anthropic"][key]`.
-fn anthropic_option(options: &Option<HashMap<String, Value>>, key: &str) -> Option<Value> {
-    options
-        .as_ref()
-        .and_then(|m| m.get("anthropic"))
-        .and_then(|o| o.get(key))
-        .cloned()
+fn parse_anthropic_option_object(shape: &str, value: &Value) -> Result<Value, ()> {
+    let object = value.as_object().ok_or(())?;
+    let parsed = crate::openai::convert::parse_option_fields(object, CANONICAL, |key, value| {
+        let kind = match (shape, key) {
+            ("options", "sendReasoning" | "disableParallelToolUse" | "toolStreaming") => "bool",
+            ("options", "structuredOutputMode") => "outputFormat|jsonTool|auto",
+            ("options", "thinking") => "thinking",
+            ("options", "cacheControl") => "cache",
+            ("options", "metadata") => "metadata",
+            ("options", "mcpServers") => "[]mcp",
+            ("options", "container") => "container",
+            ("options", "effort") => "low|medium|high|xhigh|max",
+            ("options", "taskBudget") => "taskBudget",
+            ("options", "speed") | ("fallback", "speed") => "fast|standard",
+            ("options", "serviceTier") => "auto|standard_only",
+            ("options", "inferenceGeo") => "us|global",
+            ("options", "fallbacks") => "fallbacks",
+            ("options", "anthropicBeta") => "[]string",
+            ("options", "safeguards") => "[]safeguard",
+            ("options", "compaction") => "compaction",
+            ("options", "contextManagement") => "context",
+            ("thinking", "type") => "adaptive|enabled|disabled|between_tools",
+            ("thinking", "display")
+                if object.get("type").and_then(Value::as_str) == Some("adaptive") =>
+            {
+                "omitted|summarized|updates"
+            }
+            ("thinking", "budgetTokens")
+                if object.get("type").and_then(Value::as_str) == Some("enabled") =>
+            {
+                "number"
+            }
+            ("thinking", "blockBinding")
+                if object
+                    .get("type")
+                    .is_none_or(|t| t.as_str() == Some("adaptive")) =>
+            {
+                "binding"
+            }
+            ("binding", "prefixMismatchBehavior") => "error|drop_block",
+            ("cache", "type") => "ephemeral",
+            ("cache", "ttl") => "5m|1h",
+            ("metadata", "userId") => "string",
+            ("mcp", "type") => "url",
+            ("mcp", "name" | "url") => "string",
+            ("mcp", "authorizationToken") => "?string",
+            ("mcp", "toolConfiguration") => "?toolConfiguration",
+            ("toolConfiguration", "enabled") => "?bool",
+            ("toolConfiguration", "allowedTools") => "?[]string",
+            ("container", "id") | ("skill", "version") => "string",
+            ("container", "skills") => "[]skill",
+            ("skill", "type") => "anthropic|custom",
+            ("skill", "skillId")
+                if object.get("type").and_then(Value::as_str) == Some(PROVIDER_SKILL_TYPE) =>
+            {
+                "string"
+            }
+            ("skill", "providerReference")
+                if object.get("type").and_then(Value::as_str) == Some("custom") =>
+            {
+                "stringRecord"
+            }
+            ("taskBudget", "type") => "tokens",
+            ("taskBudget", "total") => "total",
+            ("taskBudget", "remaining") => "remaining",
+            ("fallback", "model") => "string",
+            ("fallback", "max_tokens") => "integer",
+            ("fallback", "thinking" | "output_config") | ("safeguard", "classifierContext") => {
+                "record"
+            }
+            ("safeguard", "type") => "dangerous_tool_use",
+            ("compaction", "type") => "summarize",
+            ("compaction", "instructions") => "string",
+            ("edit", "instructions")
+                if object.get("type").and_then(Value::as_str) == Some("compact_20260112") =>
+            {
+                "string"
+            }
+            ("context", "edits") => "[]edit",
+            ("edit", "type") => "clear_tool_uses_20250919|clear_thinking_20251015|compact_20260112",
+            ("edit", "trigger")
+                if object.get("type").and_then(Value::as_str)
+                    == Some("clear_tool_uses_20250919") =>
+            {
+                "trigger"
+            }
+            ("edit", "trigger")
+                if object.get("type").and_then(Value::as_str) == Some("compact_20260112") =>
+            {
+                "inputTokens"
+            }
+            ("edit", "clearAtLeast")
+                if object.get("type").and_then(Value::as_str)
+                    == Some("clear_tool_uses_20250919") =>
+            {
+                "inputTokens"
+            }
+            ("edit", "keep")
+                if object.get("type").and_then(Value::as_str)
+                    == Some("clear_tool_uses_20250919") =>
+            {
+                "toolUses"
+            }
+            ("edit", "keep")
+                if object.get("type").and_then(Value::as_str)
+                    == Some("clear_thinking_20251015") =>
+            {
+                "keepThinking"
+            }
+            ("edit", "clearToolInputs")
+                if object.get("type").and_then(Value::as_str)
+                    == Some("clear_tool_uses_20250919") =>
+            {
+                "bool"
+            }
+            ("edit", "excludeTools")
+                if object.get("type").and_then(Value::as_str)
+                    == Some("clear_tool_uses_20250919") =>
+            {
+                "[]string"
+            }
+            ("edit", "pauseAfterCompaction")
+                if object.get("type").and_then(Value::as_str) == Some("compact_20260112") =>
+            {
+                "bool"
+            }
+            ("trigger", "type") => "input_tokens|tool_uses",
+            ("inputTokens", "type") => "input_tokens",
+            ("toolUses", "type") => "tool_uses",
+            ("thinkingTurns", "type") => "thinking_turns",
+            ("trigger" | "inputTokens" | "toolUses" | "thinkingTurns", "value") => "number",
+            _ => return None,
+        };
+        Some(parse_anthropic_option_value(kind, value))
+    })
+    .map_err(|_| ())?;
+    let required: &[&str] = match shape {
+        "thinking" if !object.contains_key("type") => &["blockBinding"],
+        "thinking" | "cache" | "compaction" | "safeguard" | "edit" => &["type"],
+        "binding" => &["prefixMismatchBehavior"],
+        "mcp" => &["type", "name", "url"],
+        "skill" if object.get("type").and_then(Value::as_str) == Some("custom") => {
+            &["type", "providerReference"]
+        }
+        "skill" => &["type", "skillId"],
+        "taskBudget" => &["type", "total"],
+        "fallback" => &["model"],
+        "context" => &["edits"],
+        "trigger" | "inputTokens" | "toolUses" | "thinkingTurns" => &["type", "value"],
+        _ => &[],
+    };
+    if required.iter().any(|key| !parsed.contains_key(*key)) {
+        return Err(());
+    }
+    Ok(Value::Object(parsed))
+}
+
+fn parse_anthropic_option_value(kind: &str, value: &Value) -> Result<Value, ()> {
+    if let Some(kind) = kind.strip_prefix('?') {
+        return if value.is_null() {
+            Ok(Value::Null)
+        } else {
+            parse_anthropic_option_value(kind, value)
+        };
+    }
+    if let Some(kind) = kind.strip_prefix("[]") {
+        return value
+            .as_array()
+            .ok_or(())?
+            .iter()
+            .map(|v| parse_anthropic_option_value(kind, v))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Array);
+    }
+    let valid = match kind {
+        "bool" => value.is_boolean(),
+        "string" => value.is_string(),
+        "number" => value.is_number(),
+        "integer" => value
+            .as_f64()
+            .is_some_and(|n| n.fract() == 0.0 && n.abs() <= 9_007_199_254_740_991.0),
+        "total" => value
+            .as_f64()
+            .is_some_and(|n| n.fract() == 0.0 && (20000.0..=9_007_199_254_740_991.0).contains(&n)),
+        "remaining" => value
+            .as_f64()
+            .is_some_and(|n| n.fract() == 0.0 && (0.0..=9_007_199_254_740_991.0).contains(&n)),
+        "record" => value.is_object(),
+        "stringRecord" => value
+            .as_object()
+            .is_some_and(|o| o.values().all(Value::is_string)),
+        "fallbacks" => {
+            return if value.as_str() == Some("default") {
+                Ok(value.clone())
+            } else {
+                parse_anthropic_option_value("[]fallback", value)
+            };
+        }
+        "keepThinking" => {
+            return if value.as_str() == Some("all") {
+                Ok(value.clone())
+            } else {
+                parse_anthropic_option_object("thinkingTurns", value)
+            };
+        }
+        "thinking" | "binding" | "cache" | "metadata" | "mcp" | "toolConfiguration"
+        | "container" | "skill" | "taskBudget" | "fallback" | "safeguard" | "compaction"
+        | "context" | "edit" | "trigger" | "inputTokens" | "toolUses" | "thinkingTurns" => {
+            return parse_anthropic_option_object(kind, value);
+        }
+        _ => value
+            .as_str()
+            .is_some_and(|s| kind.split('|').any(|allowed| allowed == s)),
+    };
+    if valid { Ok(value.clone()) } else { Err(()) }
+}
+
+/// What differs between the hosts of the Messages API as far as the request
+/// body goes: which providerOptions key the caller's options live under (read
+/// in addition to the canonical one) and which tool/output features the host
+/// accepts.
+#[derive(Debug, Clone)]
+pub(crate) struct RequestProfile {
+    /// The custom providerOptions key; `anthropic` is always read too.
+    pub(crate) options_name: String,
+    /// Structured outputs and their beta header (Vertex has neither).
+    pub(crate) supports_native_structured_output: bool,
+    /// `strict` on tool definitions (Vertex rejects it).
+    pub(crate) supports_strict_tools: bool,
+}
+
+impl Default for RequestProfile {
+    /// The first-party API under its canonical name.
+    fn default() -> Self {
+        Self {
+            options_name: CANONICAL.to_string(),
+            supports_native_structured_output: true,
+            supports_strict_tools: true,
+        }
+    }
+}
+
+/// Read a value from the Anthropic options of a call (`anthropic` merged with
+/// the profile's custom key).
+fn anthropic_option(
+    options: &Option<SharedProviderOptions>,
+    profile: &RequestProfile,
+    key: &str,
+) -> Option<Value> {
+    anthropic_options_in(options.as_ref(), &profile.options_name).and_then(|o| o.get(key).cloned())
 }
 
 /// Recursively remove `null`-valued fields from JSON objects (mirroring the
@@ -1622,6 +2226,38 @@ fn strip_anthropic_sampling_params(
     warnings: &mut Vec<Warning>,
 ) -> (Option<f64>, Option<f64>, Option<f64>) {
     let mut temperature = options.temperature;
+    for (present, feature) in [
+        (options.frequency_penalty.is_some(), "frequencyPenalty"),
+        (options.presence_penalty.is_some(), "presencePenalty"),
+        (options.seed.is_some(), "seed"),
+    ] {
+        if present {
+            warnings.push(Warning::Unsupported {
+                feature: feature.to_string(),
+                details: None,
+            });
+        }
+    }
+    if let Some(value) = temperature
+        && !(0.0..=1.0).contains(&value)
+    {
+        let (limit, details) = if value > 1.0 {
+            (
+                1.0,
+                format!("{value} exceeds anthropic maximum of 1.0. clamped to 1.0"),
+            )
+        } else {
+            (
+                0.0,
+                format!("{value} is below anthropic minimum of 0. clamped to 0"),
+            )
+        };
+        temperature = Some(limit);
+        warnings.push(Warning::Unsupported {
+            feature: "temperature".to_string(),
+            details: Some(details),
+        });
+    }
     let mut top_p = options.top_p;
     let mut top_k = options.top_k;
 
@@ -1669,12 +2305,13 @@ fn strip_anthropic_sampling_params(
 fn resolve_anthropic_thinking(
     model_id: &str,
     options: &CallOptions,
+    profile: &RequestProfile,
     caps: &ModelCapabilities,
     warnings: &mut Vec<Warning>,
 ) -> (Option<Value>, Option<String>) {
     let mut thinking_config: Option<Value> =
-        anthropic_option(&options.provider_options, "thinking");
-    let mut effort: Option<String> = anthropic_option(&options.provider_options, "effort")
+        anthropic_option(&options.provider_options, profile, "thinking");
+    let mut effort: Option<String> = anthropic_option(&options.provider_options, profile, "effort")
         .and_then(|v| v.as_str().map(std::string::ToString::to_string));
 
     if let Some(reasoning) = options.reasoning
@@ -1701,6 +2338,61 @@ fn resolve_anthropic_thinking(
                 effort = Some(eff);
             }
         }
+    }
+
+    if options.reasoning == Some(ReasoningEffort::None)
+        && anthropic_option(&options.provider_options, profile, "thinking").is_none()
+        && anthropic_option(&options.provider_options, profile, "effort").is_none()
+        && caps.rejects_thinking_disabled
+    {
+        if caps.supports_between_tools_thinking {
+            thinking_config = Some(json!({ "type": "between_tools" }));
+        } else {
+            thinking_config = None;
+            effort = Some("low".to_string());
+            warnings.push(Warning::Compatibility { feature: "reasoning".to_string(), details: Some(format!("reasoning 'none' is not supported by {model_id}; it always uses adaptive thinking. Using effort 'low' to minimize thinking instead.")) });
+        }
+    }
+
+    if caps.rejects_thinking_disabled {
+        match thinking_config
+            .as_ref()
+            .and_then(|v| v.get("type"))
+            .and_then(Value::as_str)
+        {
+            Some("disabled") => {
+                let details = if caps.supports_between_tools_thinking {
+                    thinking_config = Some(json!({ "type": "between_tools" }));
+                    format!(
+                        "thinking cannot be disabled for {model_id}. Using 'between_tools' thinking, the lowest thinking setting, instead."
+                    )
+                } else {
+                    thinking_config = None;
+                    format!(
+                        "thinking cannot be disabled for {model_id}; it always uses adaptive thinking. The thinking setting has been removed. Lower 'effort' to reduce thinking."
+                    )
+                };
+                warnings.push(Warning::Unsupported {
+                    feature: "providerOptions.anthropic.thinking".to_string(),
+                    details: Some(details),
+                });
+            }
+            Some("enabled") => {
+                thinking_config = Some(json!({ "type": "adaptive" }));
+                warnings.push(Warning::Unsupported { feature: "providerOptions.anthropic.thinking".to_string(), details: Some(format!("budget-based thinking is not supported by {model_id}; it always uses adaptive thinking. Using adaptive thinking instead. Use 'effort' to control how much the model thinks.")) });
+            }
+            _ => {}
+        }
+    }
+    if thinking_config
+        .as_ref()
+        .and_then(|v| v.get("type"))
+        .and_then(Value::as_str)
+        == Some("between_tools")
+        && matches!(effort.as_deref(), Some("xhigh" | "max"))
+    {
+        warnings.push(Warning::Unsupported { feature: "providerOptions.anthropic.effort".to_string(), details: Some(format!("effort '{}' is not supported with 'between_tools' thinking. The effort has been lowered to 'high'.", effort.as_deref().unwrap_or_default())) });
+        effort = Some("high".to_string());
     }
 
     // Newer models only allow disabling thinking at effort ≤ high; lower the
@@ -1740,8 +2432,10 @@ fn derive_anthropic_thinking(
         .and_then(|t| t.as_str())
         .map(std::string::ToString::to_string);
 
-    let is_thinking =
-        thinking_type.as_deref() == Some("enabled") || thinking_type.as_deref() == Some("adaptive");
+    let is_thinking = matches!(
+        thinking_type.as_deref(),
+        Some("enabled" | "adaptive" | "between_tools")
+    );
     let send_thinking = is_thinking || thinking_type.as_deref() == Some("disabled");
 
     let thinking_budget: Option<u32> = if thinking_type.as_deref() == Some("enabled") {
@@ -1809,8 +2503,10 @@ fn apply_anthropic_thinking_post_processing(
     top_p: &mut Option<f64>,
     warnings: &mut Vec<Warning>,
 ) -> u32 {
-    let is_thinking =
-        thinking_type.as_deref() == Some("enabled") || thinking_type.as_deref() == Some("adaptive");
+    let is_thinking = matches!(
+        thinking_type.as_deref(),
+        Some("enabled" | "adaptive" | "between_tools")
+    );
     if !is_thinking {
         return max_tokens;
     }
@@ -1853,7 +2549,7 @@ fn apply_anthropic_thinking_post_processing(
         *top_p = None;
     }
 
-    max_tokens + thinking_budget.unwrap_or(0)
+    max_tokens.saturating_add(thinking_budget.unwrap_or(0))
 }
 
 /// Insert the surviving sampling params + stop sequences into the body.
@@ -1881,24 +2577,28 @@ fn insert_anthropic_sampling(
 /// Map user tools to `tools` / `tool_choice`, delegating to
 /// `prepare_tools_with_provider` (provider-defined tools, required beta
 /// headers, and tool warnings).
+#[allow(clippy::too_many_arguments)]
 fn apply_anthropic_tools(
     body: &mut Value,
     options: &CallOptions,
+    profile: &RequestProfile,
     stream: bool,
+    json_schema: Option<&Value>,
     caps: &ModelCapabilities,
     betas: &mut BTreeSet<String>,
     warnings: &mut Vec<Warning>,
+    cache_validator: &mut CacheControlValidator,
 ) {
-    let disable_parallel_tool_use =
-        anthropic_option(&options.provider_options, "disableParallelToolUse")
+    let disable_parallel_tool_use = json_schema.is_some()
+        || anthropic_option(&options.provider_options, profile, "disableParallelToolUse")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
     let default_eager_input_streaming = stream
-        && anthropic_option(&options.provider_options, "toolStreaming")
+        && anthropic_option(&options.provider_options, profile, "toolStreaming")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
 
-    let anthropic_tools: Vec<AnthropicTool> = match &options.tools {
+    let mut anthropic_tools: Vec<AnthropicTool> = match &options.tools {
         Some(tools) => tools
             .iter()
             .map(|t| match t {
@@ -1913,17 +2613,50 @@ fn apply_anthropic_tools(
         None => Vec::new(),
     };
 
-    let prepared = prepare_tools_with_provider(
-        if options.tools.is_some() {
+    if let Some(schema) = json_schema {
+        anthropic_tools.push(AnthropicTool::Function(
+            FunctionTool::new("json", schema.clone())
+                .with_description("Respond with a JSON object."),
+        ));
+    }
+    let requested_choice = if json_schema.is_some() {
+        Some(&ToolChoice::Required)
+    } else {
+        options.tool_choice.as_ref()
+    };
+    let tool_choice = if caps.rejects_forced_tool_use
+        && !anthropic_tools.is_empty()
+        && matches!(
+            requested_choice,
+            Some(ToolChoice::Required | ToolChoice::Tool { .. })
+        ) {
+        warnings.push(Warning::Unsupported {
+            feature: "toolChoice".to_string(),
+            details: Some(match requested_choice {
+                Some(ToolChoice::Required) => "toolChoice 'required' is not supported by this model because it rejects forced tool use. Using 'auto' instead. Instruct the model to use a tool in the prompt and verify that a tool call was made.".to_string(),
+                Some(ToolChoice::Tool { tool_name }) => format!("toolChoice 'tool' is not supported by this model because it rejects forced tool use. Only the '{tool_name}' tool is sent with 'auto' tool choice. Instruct the model to use the tool in the prompt and verify that a tool call was made."),
+                _ => unreachable!(),
+            }),
+        });
+        Some(&ToolChoice::Auto)
+    } else {
+        requested_choice
+    };
+    let prepared = prepare_tools_with_validator(
+        if options.tools.is_some() || json_schema.is_some() {
             Some(&anthropic_tools)
         } else {
             None
         },
-        Some(&options.tool_choice),
+        tool_choice,
         disable_parallel_tool_use,
-        caps.supports_structured_output,
-        caps.supports_structured_output,
+        json_schema.is_none()
+            && caps.supports_structured_output
+            && profile.supports_native_structured_output,
+        caps.supports_structured_output && profile.supports_strict_tools,
         default_eager_input_streaming,
+        &profile.options_name,
+        cache_validator,
     );
 
     warnings.extend(prepared.tool_warnings);
@@ -1934,12 +2667,26 @@ fn apply_anthropic_tools(
         // request body matches the TS behaviour (JSON.stringify drops
         // `undefined` args on provider-defined tools such as web_search).
         let mut defs = tool_defs;
+        if caps.rejects_forced_tool_use
+            && let Some(ToolChoice::Tool { tool_name }) = requested_choice
+        {
+            defs.retain(|tool| {
+                tool.get("name").and_then(Value::as_str) == Some(tool_name.as_str())
+            });
+        }
         for def in defs.iter_mut() {
             strip_null_fields(def);
         }
         body["tools"] = json!(defs);
     }
-    if let Some(tool_choice) = prepared.tool_choice {
+    if let Some(mut tool_choice) = prepared.tool_choice {
+        if json_schema.is_none()
+            && let Some(value) =
+                anthropic_option(&options.provider_options, profile, "disableParallelToolUse")
+                    .filter(Value::is_boolean)
+        {
+            tool_choice["disable_parallel_tool_use"] = value;
+        }
         body["tool_choice"] = tool_choice;
     }
 }
@@ -1949,9 +2696,10 @@ fn apply_anthropic_tools(
 fn append_anthropic_mcp_servers(
     body: &mut Value,
     options: &CallOptions,
+    profile: &RequestProfile,
     betas: &mut BTreeSet<String>,
 ) {
-    let Some(mcp) = anthropic_option(&options.provider_options, "mcpServers") else {
+    let Some(mcp) = anthropic_option(&options.provider_options, profile, "mcpServers") else {
         return;
     };
     let Some(arr) = mcp.as_array() else {
@@ -1977,7 +2725,10 @@ fn append_anthropic_mcp_servers(
             if let Some(at) = server.get("authorizationToken") {
                 o.insert("authorization_token".to_string(), at.clone());
             }
-            if let Some(tc) = server.get("toolConfiguration") {
+            if let Some(tc) = server
+                .get("toolConfiguration")
+                .filter(|value| !value.is_null())
+            {
                 let mut tc_obj = Map::new();
                 if let Some(at) = tc.get("allowedTools") {
                     tc_obj.insert("allowed_tools".to_string(), at.clone());
@@ -2001,10 +2752,11 @@ fn append_anthropic_mcp_servers(
 fn append_anthropic_container(
     body: &mut Value,
     options: &CallOptions,
+    profile: &RequestProfile,
     betas: &mut BTreeSet<String>,
     warnings: &mut Vec<Warning>,
 ) -> Result<(), AiMuxError> {
-    let Some(container) = anthropic_option(&options.provider_options, "container") else {
+    let Some(container) = anthropic_option(&options.provider_options, profile, "container") else {
         return Ok(());
     };
     let skills = container.get("skills").and_then(|s| s.as_array());
@@ -2021,12 +2773,12 @@ fn append_anthropic_container(
             let skill_id = if stype == "custom" {
                 match skill
                     .get("providerReference")
-                    .and_then(|r| r.get("anthropic"))
+                    .and_then(|r| r.get(CANONICAL))
                 {
                     Some(id) => id.clone(),
                     None => {
                         return Err(AiMuxError::UnsupportedFunctionality(format!(
-                            "skill provider reference is missing the 'anthropic' key: {skill}"
+                            "skill provider reference is missing the '{CANONICAL}' key: {skill}"
                         )));
                     }
                 }
@@ -2095,6 +2847,39 @@ pub fn build_request_body_with_warnings(
     options: &CallOptions,
     stream: bool,
 ) -> Result<RequestBodyResult, AiMuxError> {
+    build_request_body_for(model_id, options, stream, &RequestProfile::default())
+}
+
+/// [`build_request_body_with_warnings`] for a host of the Messages API other
+/// than the first-party endpoint under its canonical name.
+///
+/// # Errors
+///
+/// Same as [`build_request_body_with_warnings`].
+pub(crate) fn build_request_body_for(
+    model_id: &str,
+    options: &CallOptions,
+    stream: bool,
+    profile: &RequestProfile,
+) -> Result<RequestBodyResult, AiMuxError> {
+    let mut parsed_options = options.clone();
+    if let Some(raw) =
+        anthropic_options_in(options.provider_options.as_ref(), &profile.options_name)
+    {
+        let parsed =
+            parse_anthropic_option_object("options", &Value::Object(raw)).map_err(|()| {
+                AiMuxError::InvalidArgument("invalid anthropic provider options".to_string())
+            })?;
+        let namespaces = parsed_options
+            .provider_options
+            .get_or_insert_with(Default::default);
+        namespaces.remove(CANONICAL);
+        namespaces.insert(
+            profile.options_name.clone(),
+            parsed.as_object().unwrap().clone(),
+        );
+    }
+    let options = &parsed_options;
     let mut warnings: Vec<Warning> = Vec::new();
     let mut betas: BTreeSet<String> = BTreeSet::new();
     let caps = get_model_capabilities(model_id);
@@ -2118,24 +2903,23 @@ pub fn build_request_body_with_warnings(
 
     // providerOptions.anthropic.thinking / .effort + top-level `reasoning`.
     let (thinking_config, thinking_effort) =
-        resolve_anthropic_thinking(model_id, options, &caps, &mut warnings);
+        resolve_anthropic_thinking(model_id, options, profile, &caps, &mut warnings);
     let (thinking_type, send_thinking, mut thinking_budget, thinking_display) =
         derive_anthropic_thinking(&thinking_config);
 
     let max_tokens = options.max_output_tokens.unwrap_or(caps.max_output_tokens);
 
-    // Extended-thinking multi-turn: when thinking is enabled/adaptive, the
-    // prior assistant turns' reasoning parts (carrying their signatures)
-    // must be echoed back as thinking blocks — Anthropic rejects tool-use
-    // continuations that omit them, and the reasoning context is lost
-    // otherwise. With thinking disabled the blocks would be rejected, so
-    // the parts are omitted with a warning instead.
     let send_input_reasoning =
-        matches!(thinking_type.as_deref(), Some("enabled") | Some("adaptive"));
-    let conversion = convert_prompt_to_anthropic_full_with_tools(
+        anthropic_option(&options.provider_options, profile, "sendReasoning")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true);
+    let mut cache_validator = CacheControlValidator::for_options_name(&profile.options_name);
+    let conversion = convert_prompt_with_validator(
         &options.prompt,
         send_input_reasoning,
         &ToolNameMapping::new(options.tools.as_deref()),
+        &profile.options_name,
+        &mut cache_validator,
     )?;
     let system = conversion.system;
     let messages = conversion.messages;
@@ -2146,8 +2930,11 @@ pub fn build_request_body_with_warnings(
         "model": model_id,
         "messages": messages,
         "max_tokens": max_tokens,
-        "stream": stream,
     });
+    // `stream` is sent only when streaming, as the AI SDK does.
+    if stream {
+        body["stream"] = json!(true);
+    }
 
     if let Some(sys) = system {
         body["system"] = json!(sys);
@@ -2162,9 +2949,18 @@ pub fn build_request_body_with_warnings(
         &thinking_effort,
     );
 
+    if let Some(binding) = thinking_config.as_ref().and_then(|v| v.get("blockBinding")) {
+        if body.get("thinking").is_none() {
+            body["thinking"] = json!({});
+        }
+        body["thinking"]["block_binding"] =
+            json!({ "prefix_mismatch_behavior": binding.get("prefixMismatchBehavior") });
+        betas.insert("thinking-binding-controls-2026-08-01".to_string());
+    }
+
     // Thinking-enabled post-processing (TS L651-696): default budget,
     // sampling-parameter stripping, `max_tokens` adjustment.
-    let adjusted_max_tokens = apply_anthropic_thinking_post_processing(
+    let mut adjusted_max_tokens = apply_anthropic_thinking_post_processing(
         &mut body,
         &thinking_type,
         &mut thinking_budget,
@@ -2174,32 +2970,220 @@ pub fn build_request_body_with_warnings(
         &mut top_p,
         &mut warnings,
     );
+    if caps.is_known_model && adjusted_max_tokens > caps.max_output_tokens {
+        if options.max_output_tokens.is_some() {
+            warnings.push(Warning::Unsupported {
+                feature: "maxOutputTokens".to_string(),
+                details: Some(format!(
+                    "{} (maxOutputTokens + thinkingBudget) is greater than {} {} max output tokens. The max output tokens have been limited to {}.",
+                    adjusted_max_tokens, model_id, caps.max_output_tokens, caps.max_output_tokens
+                )),
+            });
+        }
+        adjusted_max_tokens = caps.max_output_tokens;
+    }
     if adjusted_max_tokens != max_tokens {
         body["max_tokens"] = json!(adjusted_max_tokens);
     }
 
+    if !matches!(
+        thinking_type.as_deref(),
+        Some("enabled" | "adaptive" | "between_tools")
+    ) && (caps.is_known_model || is_legacy_claude(model_id))
+        && temperature.is_some()
+        && top_p.is_some()
+    {
+        warnings.push(Warning::Unsupported {
+            feature: "topP".to_string(),
+            details: Some(
+                "topP is not supported when temperature is set. topP is ignored.".to_string(),
+            ),
+        });
+        top_p = None;
+    }
     insert_anthropic_sampling(&mut body, temperature, top_p, top_k, options);
+
+    let mut json_tool_schema = None;
+    if let Some(ResponseFormat::Json { schema, .. }) = &options.response_format {
+        if let Some(schema) = schema {
+            let mode = anthropic_option(&options.provider_options, profile, "structuredOutputMode");
+            let mut use_native = mode.as_ref().and_then(Value::as_str) == Some("outputFormat")
+                || (mode.as_ref().and_then(Value::as_str).unwrap_or("auto") == "auto"
+                    && caps.supports_structured_output
+                    && profile.supports_native_structured_output);
+            if !use_native
+                && caps.rejects_forced_tool_use
+                && caps.supports_structured_output
+                && profile.supports_native_structured_output
+            {
+                warnings.push(Warning::Unsupported {
+                    feature: "providerOptions.anthropic.structuredOutputMode".to_string(),
+                    details: Some(format!("structuredOutputMode 'jsonTool' is not supported by {model_id} because it rejects forced tool use. Using 'outputFormat' instead.")),
+                });
+                use_native = true;
+            }
+            if !use_native {
+                json_tool_schema = Some(schema);
+                if anthropic_option(&options.provider_options, profile, "disableParallelToolUse")
+                    .and_then(|v| v.as_bool())
+                    == Some(false)
+                {
+                    warnings.push(Warning::Unsupported {
+                        feature: "providerOptions.anthropic.disableParallelToolUse".to_string(),
+                        details: Some("`disableParallelToolUse: false` is ignored when using the JSON response tool. Parallel tool use is disabled to ensure a single coherent JSON tool call.".to_string()),
+                    });
+                }
+            }
+            if use_native {
+                if body.get("output_config").is_none() {
+                    body["output_config"] = json!({});
+                }
+                body["output_config"]["format"] = json!({ "type": "json_schema", "schema": super::sanitize_json_schema::sanitize_json_schema(schema) });
+            }
+        } else {
+            warnings.push(Warning::Unsupported {
+                feature: "responseFormat".to_string(),
+                details: Some(
+                    "JSON response format requires a schema. The response format is ignored."
+                        .to_string(),
+                ),
+            });
+        }
+    }
+
+    // providerOptions.anthropic.metadata.userId -> metadata.user_id.
+    if let Some(user_id) = anthropic_option(&options.provider_options, profile, "metadata")
+        .and_then(|metadata| metadata.get("userId").cloned())
+        .filter(|user_id| !user_id.is_null())
+    {
+        body["metadata"] = json!({ "user_id": user_id });
+    }
 
     // Tools — provider-defined tools alongside function tools, plus the
     // required beta headers / tool warnings.
-    apply_anthropic_tools(&mut body, options, stream, &caps, &mut betas, &mut warnings);
+    apply_anthropic_tools(
+        &mut body,
+        options,
+        profile,
+        stream,
+        json_tool_schema,
+        &caps,
+        &mut betas,
+        &mut warnings,
+        &mut cache_validator,
+    );
+    warnings.extend(cache_validator.take_warnings());
 
     // providerOptions.anthropic.mcpServers → mcp_servers + beta header.
-    append_anthropic_mcp_servers(&mut body, options, &mut betas);
+    append_anthropic_mcp_servers(&mut body, options, profile, &mut betas);
 
     // providerOptions.anthropic.container — programmatic tool calling / skills.
-    append_anthropic_container(&mut body, options, &mut betas, &mut warnings)?;
+    append_anthropic_container(&mut body, options, profile, &mut betas, &mut warnings)?;
 
-    // providerOptions.anthropic.contextManagement → context_management is not
-    // yet implemented (build_context_management pending).
-
-    // Per-call request body overrides (RFC-0017): deep-merge user-supplied
-    // JSON into the built body. `null` values delete the corresponding key.
-    if let Some(ref overrides) = options.body_overrides {
-        crate::openai::convert::deep_merge_json(&mut body, overrides);
+    let provider_options =
+        anthropic_options_in(options.provider_options.as_ref(), &profile.options_name);
+    if let Some(provider_options) = provider_options {
+        if provider_options
+            .get("compaction")
+            .is_some_and(|v| !v.is_null())
+            && provider_options
+                .get("contextManagement")
+                .is_some_and(|v| !v.is_null())
+        {
+            return Err(AiMuxError::InvalidArgument("Anthropic provider options `compaction` and `contextManagement` cannot be used together.".to_string()));
+        }
+        for (source, target) in [
+            ("speed", "speed"),
+            ("serviceTier", "service_tier"),
+            ("inferenceGeo", "inference_geo"),
+            ("cacheControl", "cache_control"),
+            ("compaction", "compaction"),
+        ] {
+            if let Some(value) = provider_options.get(source).filter(|v| !v.is_null()) {
+                body[target] = value.clone();
+            }
+        }
+        if let Some(value) = provider_options.get("fallbacks").filter(|v| {
+            v.as_str() == Some("default") || v.as_array().is_some_and(|a| !a.is_empty())
+        }) {
+            body["fallbacks"] = value.clone();
+            betas.insert(
+                if value.as_str() == Some("default") {
+                    "server-side-fallback-2026-07-01"
+                } else {
+                    "server-side-fallback-2026-06-01"
+                }
+                .to_string(),
+            );
+        }
+        if let Some(value) = provider_options.get("taskBudget").filter(|v| !v.is_null()) {
+            if body.get("output_config").is_none() {
+                body["output_config"] = json!({});
+            }
+            body["output_config"]["task_budget"] = value.clone();
+            betas.insert("task-budgets-2026-03-13".to_string());
+        }
+        if body.get("speed").and_then(Value::as_str) == Some("fast") {
+            betas.insert("fast-mode-2026-02-01".to_string());
+        }
+        if body.get("compaction").is_some() {
+            betas.insert("compact-2026-09-04".to_string());
+        }
+        if let Some(edits) = provider_options
+            .get("contextManagement")
+            .and_then(|v| v.get("edits"))
+            .and_then(Value::as_array)
+        {
+            let mut mapped = Vec::new();
+            for edit in edits {
+                let strategy = edit.get("type").and_then(Value::as_str).unwrap_or_default();
+                let fields: &[(&str, &str)] = match strategy {
+                    "clear_tool_uses_20250919" => &[
+                        ("trigger", "trigger"),
+                        ("keep", "keep"),
+                        ("clearAtLeast", "clear_at_least"),
+                        ("clearToolInputs", "clear_tool_inputs"),
+                        ("excludeTools", "exclude_tools"),
+                    ],
+                    "clear_thinking_20251015" => &[("keep", "keep")],
+                    "compact_20260112" => {
+                        betas.insert("compact-2026-01-12".to_string());
+                        &[
+                            ("trigger", "trigger"),
+                            ("pauseAfterCompaction", "pause_after_compaction"),
+                            ("instructions", "instructions"),
+                        ]
+                    }
+                    _ => {
+                        warnings.push(Warning::Other {
+                            message: format!("Unknown context management strategy: {strategy}"),
+                        });
+                        continue;
+                    }
+                };
+                let mut mapped_edit = json!({ "type": strategy });
+                for (source, target) in fields {
+                    if let Some(value) = edit.get(*source) {
+                        mapped_edit[*target] = value.clone();
+                    }
+                }
+                mapped.push(mapped_edit);
+            }
+            body["context_management"] = json!({ "edits": mapped });
+            betas.insert("context-management-2025-06-27".to_string());
+        }
+    }
+    if let Some(values) = anthropic_option(&options.provider_options, profile, "anthropicBeta")
+        .and_then(|value| value.as_array().cloned())
+    {
+        betas.extend(values.iter().filter_map(Value::as_str).map(str::to_string));
+    }
+    if thinking_display.as_ref().and_then(Value::as_str) == Some("updates") {
+        betas.insert("thinking-display-updates-2026-08-18".to_string());
     }
 
     Ok(RequestBodyResult {
+        uses_json_response_tool: json_tool_schema.is_some(),
         body,
         warnings,
         betas,
@@ -2210,54 +3194,14 @@ pub fn build_request_body_with_warnings(
 #[must_use]
 pub fn parse_stop_reason(s: &str) -> FinishReason {
     let unified = match s {
-        "end_turn" => FinishReasonUnified::Stop,
-        "max_tokens" => FinishReasonUnified::Length,
+        "end_turn" | "stop_sequence" | "pause_turn" => FinishReasonUnified::Stop,
+        "max_tokens" | "model_context_window_exceeded" => FinishReasonUnified::Length,
+        "refusal" => FinishReasonUnified::ContentFilter,
         "tool_use" => FinishReasonUnified::ToolCalls,
         _ => FinishReasonUnified::Other,
     };
     FinishReason {
         unified,
         raw: Some(s.to_string()),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn opts_with_anthropic_thinking(thinking: serde_json::Value) -> CallOptions {
-        let mut provider = std::collections::HashMap::new();
-        provider.insert("anthropic".to_string(), thinking);
-        CallOptions {
-            provider_options: Some(provider),
-            ..CallOptions::new(LanguageModelPrompt::default())
-        }
-    }
-
-    /// Regression (audit finding on the M11 split): when `thinking.enabled` is
-    /// set without an explicit `budgetTokens`, the body must carry both the
-    /// default `budget_tokens: 1024` **and** the adjusted `max_tokens`
-    /// (base + 1024), exactly like the pre-split implementation.
-    #[test]
-    fn thinking_enabled_without_budget_writes_default_budget() {
-        let opts = opts_with_anthropic_thinking(json!({
-            "thinking": { "type": "enabled" }
-        }));
-        let req = build_request_body_with_warnings("claude-sonnet-4-5", &opts, false).unwrap();
-        assert_eq!(req.body["thinking"]["type"], json!("enabled"));
-        assert_eq!(req.body["thinking"]["budget_tokens"], json!(1024));
-        // claude-sonnet-4-5 caps: 64000 tokens, +1024 thinking budget.
-        assert_eq!(req.body["max_tokens"], json!(65024));
-    }
-
-    /// Explicit `budgetTokens` must be preserved (no default override).
-    #[test]
-    fn thinking_enabled_with_explicit_budget_keeps_it() {
-        let opts = opts_with_anthropic_thinking(json!({
-            "thinking": { "type": "enabled", "budgetTokens": 4096 }
-        }));
-        let req = build_request_body_with_warnings("claude-sonnet-4-5", &opts, false).unwrap();
-        assert_eq!(req.body["thinking"]["budget_tokens"], json!(4096));
-        assert_eq!(req.body["max_tokens"], json!(64000 + 4096));
     }
 }

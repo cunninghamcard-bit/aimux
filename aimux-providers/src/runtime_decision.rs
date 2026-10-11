@@ -3,13 +3,11 @@ use std::collections::{BTreeMap, HashMap};
 
 use aimux_core::AiMuxError;
 use aimux_core::decision_model::*;
-use aimux_core::recording::ProviderRecord;
-use aimux_core::types::{TokenUsage, Usage};
+use aimux_core::types::{InputTokenUsage, OutputTokenUsage, Usage};
 use async_trait::async_trait;
 use serde_json::{Map, Value, json};
 
-use crate::decision_support::{self as support, invalid};
-use crate::openai::OpenAIConfig;
+use crate::decision_support::{self as support, DecisionEndpoint, invalid};
 
 pub(crate) fn supported(provider: &str) -> bool {
     matches!(
@@ -26,17 +24,24 @@ pub(crate) fn supported(provider: &str) -> bool {
 }
 
 pub(crate) struct RuntimeDecisionModel {
-    pub(crate) config: OpenAIConfig,
+    pub(crate) endpoint: DecisionEndpoint,
+    /// The runtime this endpoint speaks for (`"ollama"`, `"vllm"`, ...); also
+    /// what [`DecisionModel::provider`] reports.
+    pub(crate) vendor: String,
     pub(crate) model_id: String,
+    pub(crate) retry_config: aimux_core::retry::RetryConfig,
 }
 
 impl RuntimeDecisionModel {
-    pub(crate) fn new(model_id: &str, config: OpenAIConfig) -> Result<Self, AiMuxError> {
-        if !supported(&config.provider) || config.body_overrides.is_some() {
-            return Err(AiMuxError::UnsupportedFunctionality(
-                "native decisions require an official adapter without generation body_overrides"
-                    .into(),
-            ));
+    pub(crate) fn new(
+        model_id: &str,
+        vendor: &str,
+        endpoint: DecisionEndpoint,
+    ) -> Result<Self, AiMuxError> {
+        if !supported(vendor) {
+            return Err(AiMuxError::UnsupportedFunctionality(format!(
+                "{vendor} does not provide native decision models"
+            )));
         }
         if model_id.trim().is_empty() {
             return Err(AiMuxError::InvalidArgument(
@@ -44,8 +49,10 @@ impl RuntimeDecisionModel {
             ));
         }
         Ok(Self {
-            config,
+            endpoint,
+            vendor: vendor.into(),
             model_id: model_id.into(),
+            retry_config: aimux_core::retry::RetryConfig::default(),
         })
     }
 
@@ -153,7 +160,8 @@ impl RuntimeDecisionModel {
         }
         copy_options(&mut body, options, allowed)?;
         self.add_images(request, &mut body)?;
-        let base = self.config.base_url.trim_end_matches('/');
+        let base = self.endpoint.base_url()?;
+        let base = base.as_str();
         let url = if matches!(provider, "cloudflare" | "cloudflare_workers_ai") {
             let model = self
                 .model_id
@@ -326,9 +334,12 @@ impl RuntimeDecisionModel {
         // Cloudflare's usage belongs to the nested result; keep the full envelope as raw.
         if let Some(usage) = &mut result.usage {
             usage.raw = if raw.get("result").is_some() {
-                raw["result"].get("usage").cloned()
+                raw["result"]
+                    .get("usage")
+                    .and_then(Value::as_object)
+                    .cloned()
             } else {
-                raw.get("usage").cloned()
+                raw.get("usage").and_then(Value::as_object).cloned()
             };
         }
         result.latency_ms = raw.get("latency_ms").and_then(Value::as_f64);
@@ -499,21 +510,21 @@ pub(crate) fn result_from_distributions(
         .get("usage")
         .filter(|v| !v.is_null())
         .map(|value| Usage {
-            input_tokens: TokenUsage {
+            input_tokens: InputTokenUsage {
                 total: value
                     .get("prompt_tokens")
                     .and_then(Value::as_u64)
                     .and_then(|n| n.try_into().ok()),
                 ..Default::default()
             },
-            output_tokens: TokenUsage {
+            output_tokens: OutputTokenUsage {
                 total: value
                     .get("completion_tokens")
                     .and_then(Value::as_u64)
                     .and_then(|n| n.try_into().ok()),
                 ..Default::default()
             },
-            raw: Some(value.clone()),
+            raw: value.as_object().cloned(),
         });
     let result = DecisionResult {
         rounding: DecisionRounding::default(),
@@ -524,7 +535,12 @@ pub(crate) fn result_from_distributions(
         probability_source: DecisionProbabilitySource::LogitScoring,
         usage,
         latency_ms: None,
-        provider_metadata: Some(HashMap::from([(provider.into(), raw.clone())])),
+        provider_metadata: Some(HashMap::from([(
+            provider.into(),
+            raw.as_object().cloned().ok_or_else(|| {
+                AiMuxError::InvalidResponseData("decision response must be an object".into())
+            })?,
+        )])),
         response: Some(DecisionResponse {
             headers: Some(headers),
             body: Some(raw),
@@ -613,13 +629,21 @@ fn sglang_response(
 #[async_trait]
 impl DecisionModel for RuntimeDecisionModel {
     fn provider(&self) -> &str {
-        &self.config.provider
+        &self.vendor
     }
     fn model_id(&self) -> &str {
         &self.model_id
     }
     fn retry_config(&self) -> aimux_core::retry::RetryConfig {
-        self.config.retry_config
+        self.retry_config
+    }
+    fn config_snapshot(&self) -> aimux_core::recording::ProviderRecord {
+        self.endpoint.snapshot(
+            self.provider(),
+            self.model_id(),
+            self.retry_config,
+            json!({"decision_default_protocol":"systemone", "decision_capabilities":self.capabilities()}),
+        )
     }
     fn capabilities(&self) -> DecisionCapabilities {
         let provider = self.provider();
@@ -658,25 +682,14 @@ impl DecisionModel for RuntimeDecisionModel {
             },
         }
     }
-    fn config_snapshot(&self) -> ProviderRecord {
-        let mut record = crate::openai::config_snapshot_from_config(
-            self.provider(),
-            self.model_id(),
-            &self.config,
-        );
-        record.profile = Some(
-            json!({"decision_default_protocol":"systemone", "decision_capabilities":self.capabilities()}),
-        );
-        record
-    }
     async fn do_decide(&self, request: &DecisionCallOptions) -> Result<DecisionResult, AiMuxError> {
         let mut options = support::options(request, self.provider())?;
         let protocol = options.remove("protocol").unwrap_or(json!("systemone"));
         match (self.provider(), protocol.as_str()) {
             ("sglang", Some("decisions")) => {
                 let body = self.sglang_request(request, options)?;
-                let url = format!("{}/decisions", self.config.base_url.trim_end_matches('/'));
-                support::post(&self.config, request, &url, body, |raw, headers| {
+                let url = format!("{}/decisions", self.endpoint.base_url()?);
+                support::post(&self.endpoint, request, &url, body, |raw, headers| {
                     sglang_response(request, raw, headers)
                 })
                 .await
@@ -686,7 +699,7 @@ impl DecisionModel for RuntimeDecisionModel {
             }
             (_, Some("systemone")) => {
                 let (url, body) = self.systemone_request(request, options)?;
-                support::post(&self.config, request, &url, body, |raw, headers| {
+                support::post(&self.endpoint, request, &url, body, |raw, headers| {
                     self.systemone_response(request, raw, headers)
                 })
                 .await

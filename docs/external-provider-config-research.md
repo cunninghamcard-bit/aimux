@@ -1,6 +1,7 @@
 # 调研:允许外部提供 provider 配置的可行性与设计
 
 > **Status**: 调研报告(非 RFC,供决策)
+> **Historical (RFC-0036)**: 本报告写于 provider 工厂重构之前,下文的 `OpenAIConfig`、provider 配置上的 retry/body 覆盖字段等旧 API 已不存在,仅作决策记录保留;现行形态见 [docs/api/rust.md](api/rust.md#providers)(`create_provider(name, PresetSettings)`、`default_providers()` + `create_provider_registry`、各包 `XxxProviderSettings` + `create_xxx`)。旧 `provider()` / `ProviderOptions` / 注册与 JSON 加载入口只保留在 `aimux_providers::provider` 绑定兼容模块,不再从 Rust crate root 导出。
 > **Date**: 2026-08-05
 > **Scope**: 评估"运行时/宿主应用/配置文件提供 provider 配置"对 aimux 的可行性、形态、成本收益,给出明确建议
 > **Related**: [RFC-0017](../rfc/0017-provider-config-dx.md) 配置 DX、[RFC-0019](../rfc/0019-session-affinity.md) 会话亲和
@@ -134,8 +135,8 @@ a/b/d 三者**共用同一个运行时覆盖层**(见 §4),实现上是同一机
 
 - 新增一个**运行时覆盖层** `OVERLAYS: RwLock<HashMap<String, RegistryEntry>>`(或 `OnceLock<...>` 包 `RwLock`)。
 - `provider()` 查找顺序改为:**覆盖层 → 内置 registry**;找到条目后,后端组装管线(`OpenAIConfig` 构造 + `ProviderOptions` 叠加)完全复用,零改动。
-- 内置 registry 仍是 `include_str!` 编译期嵌入(保留 RFC-0017 的"单一数据源 + 类型派生"不变);覆盖层只承载外部新增/覆盖条目。
-- **这是纯增量改动**:不动 `provider_registry.json`、不动 `gen_provider_names.py`、不动 `ProviderName` 派生(外部名字不属于编译期枚举,走字符串路径即可)。
+- 内置 registry 仍是 `include_str!` 编译期嵌入;覆盖层只承载外部新增/覆盖条目。
+- **这是纯增量改动**:不动 `provider_registry.json`;内置与外部名字都走字符串路径。
 
 ### 4.2 Provider / LanguageModel trait 是否 object-safe(能否动态注册)?
 

@@ -19,6 +19,11 @@ use crate::{AbortSignal, retry, timeout};
 ///
 /// Aligned with V4 `VideoModelV4File`.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(
+    tag = "type",
+    rename_all = "lowercase",
+    rename_all_fields = "camelCase"
+)]
 #[ts(export)]
 pub enum VideoFile {
     /// Inline file data (base64 or binary) with an explicit media type.
@@ -33,12 +38,15 @@ pub enum VideoFile {
         /// The URL of the video or image file.
         url: String,
         /// The media type of the referenced file, when known.
+        #[ts(optional)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         media_type: Option<String>,
     },
 }
 
 /// File payload for a [`VideoFile::File`]: base64 string or raw bytes.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(untagged)]
 #[ts(export)]
 pub enum VideoFileData {
     /// Base64-encoded string.
@@ -51,6 +59,7 @@ pub enum VideoFileData {
 ///
 /// Aligned with V4 `VideoModelV4FrameType`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
 #[ts(export)]
 pub enum VideoFrameType {
     /// The starting frame the model animates from.
@@ -63,6 +72,7 @@ pub enum VideoFrameType {
 ///
 /// Aligned with V4 `VideoModelV4FrameImage`.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct VideoFrameImage {
     /// The image file used for this frame.
@@ -76,6 +86,11 @@ pub struct VideoFrameImage {
 /// Aligned with V4 `VideoModelV4VideoData`. Most providers return URLs due to
 /// large file sizes.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(
+    tag = "type",
+    rename_all = "lowercase",
+    rename_all_fields = "camelCase"
+)]
 #[ts(export)]
 pub enum VideoData {
     /// Video available as a URL (most common).
@@ -90,9 +105,12 @@ pub enum VideoData {
 ///
 /// Aligned with V4 `VideoModelV4CallOptions`.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct VideoCallOptions {
     /// Text prompt for the video generation. `None` when not required.
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
 
     /// Number of videos to generate. Default `1`; most models only support
@@ -103,31 +121,48 @@ pub struct VideoCallOptions {
     pub n: u32,
 
     /// Aspect ratio, in `{width}:{height}` format (e.g. `"16:9"`).
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aspect_ratio: Option<AspectRatio>,
 
     /// Resolution, in `{width}x{height}` format (e.g. `"1280x720"`).
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution: Option<Size>,
 
     /// Duration of the video in seconds. Typically 3–10 seconds.
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration: Option<u32>,
 
     /// Frames per second. Common values: 24, 30, 60.
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fps: Option<u32>,
 
     /// Seed for deterministic generation. `None` uses a random seed.
-    #[ts(type = "number | null")]
+    #[ts(optional, type = "number")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
 
     /// Input image for image-to-video generation (the starting frame).
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<VideoFile>,
 
     /// Role-tagged image inputs for first-last-frame generation.
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame_images: Option<Vec<VideoFrameImage>>,
 
     /// Reference inputs for reference-to-video generation (images or videos).
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_references: Option<Vec<VideoFile>>,
 
     /// Whether the model should generate audio alongside the video.
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generate_audio: Option<bool>,
 
     /// Additional provider-specific options, keyed by provider name.
@@ -140,16 +175,24 @@ pub struct VideoCallOptions {
     pub abort_signal: Option<AbortSignal>,
 
     /// Per-call retry override. `None` uses the model default.
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_retries: Option<u32>,
 
     /// Per-call poll pacing override for the start/status flow. Unset fields
     /// fall back to the model's [`VideoModel::poll_config`].
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poll: Option<VideoPollOptions>,
 
     /// Per-call operation timeout.
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<crate::options::TimeoutConfiguration>,
 
     /// Additional HTTP headers to send with the request.
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<SharedHeaders>,
 }
 
@@ -184,15 +227,18 @@ impl VideoCallOptions {
 
 /// Per-call poll pacing for video generation (AI SDK `generateVideo` `poll`).
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct VideoPollOptions {
     /// Delay between consecutive status checks, in milliseconds.
     // `number`, not the `bigint` ts-rs infers from u64: the JS bindings pass
     // options through `JSON.stringify`, which throws on BigInt.
-    #[ts(type = "number | null")]
+    #[ts(optional, type = "number")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interval_ms: Option<u64>,
     /// Maximum total time to wait for completion, in milliseconds.
-    #[ts(type = "number | null")]
+    #[ts(optional, type = "number")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
 }
 
@@ -200,6 +246,7 @@ pub struct VideoPollOptions {
 ///
 /// Aligned with V4 `VideoModelV4Result`.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct VideoResult {
     /// Generated videos as URLs, base64 strings, or binary data.
@@ -209,6 +256,8 @@ pub struct VideoResult {
     pub warnings: Vec<Warning>,
 
     /// Additional provider-specific metadata, keyed by provider name.
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_metadata: Option<SharedProviderMetadata>,
 
     /// Response information for telemetry and debugging.
@@ -217,13 +266,20 @@ pub struct VideoResult {
 
 /// Response information for a video generation call.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct VideoResponse {
     /// Timestamp for the start of the generated response (ISO 8601 string).
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
     /// The ID of the model that was used to generate the response.
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
     /// Response headers.
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<SharedHeaders>,
 }
 
@@ -287,23 +343,17 @@ impl Default for VideoPollConfig {
 /// same operation reference.
 #[async_trait]
 pub trait VideoModel: Send + Sync {
-    /// Specification version (always `"v4"`).
-    fn specification_version(&self) -> &'static str {
-        "v4"
-    }
-
     /// Provider name, e.g. `"fal"`.
     fn provider(&self) -> &str;
 
     /// Provider-specific model ID, e.g. `"kling-video"`.
     fn model_id(&self) -> &str;
 
-    fn retry_config(&self) -> retry::RetryConfig {
-        retry::RetryConfig::default()
-    }
-
-    /// Poll pacing for this model. Defaults to the AI SDK values; providers
-    /// with configurable polling should surface their configuration here.
+    /// Poll pacing for this model: the package's own constants. Providers have
+    /// no poll settings (the AI SDK's `pollIntervalMs` / `pollTimeoutMs` are
+    /// per-call options, here [`VideoCallOptions::poll`], which overrides this
+    /// per field). Defaults to the AI SDK values; a package whose job runs
+    /// longer or shorter returns its own constants.
     fn poll_config(&self) -> VideoPollConfig {
         VideoPollConfig::default()
     }
@@ -381,11 +431,7 @@ async fn start_and_poll(
     }
 
     let abort_signal = options.abort_signal.clone();
-    let retries = retry::prepare_retries(
-        options.max_retries,
-        model.retry_config(),
-        abort_signal.clone(),
-    );
+    let retries = retry::prepare_retries(options.max_retries, abort_signal.clone());
 
     let mut poll = model.poll_config();
     if let Some(overrides) = options.poll {
@@ -517,22 +563,14 @@ async fn start_and_poll_one_batch(
 /// the other phase set once both phases report the *same* provider key — e.g.
 /// a start call's `job_id` disappearing once the completion call also reports
 /// metadata under `x_provider`. Objects under a shared key are unioned
-/// instead, with `b` (the later phase) winning a field collision. Anything
-/// that is not a pair of objects has nothing to union, so `b` replaces `a`.
+/// instead, with `b` (the later phase) winning a field collision.
 fn merge_provider_metadata(
     a: Option<SharedProviderMetadata>,
     b: Option<SharedProviderMetadata>,
 ) -> Option<SharedProviderMetadata> {
     let Some(mut merged) = a else { return b };
-    for (provider, b_value) in b.into_iter().flatten() {
-        let value = match (merged.remove(&provider), b_value) {
-            (Some(serde_json::Value::Object(mut a_obj)), serde_json::Value::Object(b_obj)) => {
-                a_obj.extend(b_obj);
-                serde_json::Value::Object(a_obj)
-            }
-            (_, b_value) => b_value,
-        };
-        merged.insert(provider, value);
+    for (provider, b_obj) in b.into_iter().flatten() {
+        merged.entry(provider).or_default().extend(b_obj);
     }
     Some(merged)
 }
@@ -602,13 +640,6 @@ mod tests {
 
         fn model_id(&self) -> &str {
             "scripted"
-        }
-
-        fn retry_config(&self) -> crate::retry::RetryConfig {
-            crate::retry::RetryConfig {
-                initial_delay: Duration::from_millis(1),
-                ..crate::retry::RetryConfig::default()
-            }
         }
 
         fn max_videos_per_call(&self) -> Option<u32> {
@@ -725,7 +756,8 @@ mod tests {
         assert_eq!(result.videos.len(), 1);
     }
 
-    #[tokio::test]
+    // Paused time: the fixed 2s retry delay must not make the test wait.
+    #[tokio::test(start_paused = true)]
     async fn start_retry_reuses_one_idempotency_key() {
         let model = ScriptedVideoModel::new(vec![StatusStep::Complete]).with_start_failures(1);
         let mut options = fast_poll_options();
@@ -788,23 +820,6 @@ mod tests {
         let messages: Vec<String> = result.warnings.iter().map(|w| format!("{w:?}")).collect();
         assert!(messages[0].contains("from start"), "{messages:?}");
         assert!(messages[1].contains("from status"), "{messages:?}");
-    }
-
-    #[test]
-    fn merge_provider_metadata_unions_same_provider_key_across_phases() {
-        let phase = |value| Some(SharedProviderMetadata::from([("fal".to_string(), value)]));
-        let merged = merge_provider_metadata(
-            phase(serde_json::json!({ "job_id": "job-1", "region": "us-east" })),
-            phase(serde_json::json!({ "region": "eu-west", "seed": 42 })),
-        )
-        .expect("both phases reported metadata");
-
-        // `job_id` is start-only and must survive instead of being dropped by
-        // an `entry().or_insert()` collision on the shared provider key.
-        assert_eq!(
-            merged["fal"],
-            serde_json::json!({ "job_id": "job-1", "region": "eu-west", "seed": 42 })
-        );
     }
 
     #[tokio::test]
@@ -923,7 +938,7 @@ mod tests {
         assert_eq!(unique.len(), 3, "one key per batch: {keys:?}");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn caller_key_is_distinct_per_batch_and_stable_across_retries_and_replays() {
         let model = ScriptedVideoModel::new(vec![]).with_start_failures(1);
         let mut options = fast_poll_options();

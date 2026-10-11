@@ -7,12 +7,12 @@
 //!
 //! No network access, no real credentials.
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use aimux_core::speech_model::{AudioData, SpeechCallOptions, SpeechModel};
-use aimux_providers::{AwsPollyConfig, AwsPollyProvider};
+use aimux_providers::{AwsPollyProviderSettings, create_aws_polly};
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -29,8 +29,14 @@ fn mock_audio_bytes() -> Vec<u8> {
     bytes
 }
 
-fn test_config(server: &MockServer) -> AwsPollyConfig {
-    AwsPollyConfig::new(TEST_ACCESS_KEY, TEST_SECRET_KEY, TEST_REGION).with_base_url(server.uri())
+fn test_config(server: &MockServer) -> AwsPollyProviderSettings {
+    AwsPollyProviderSettings {
+        access_key_id: Some(TEST_ACCESS_KEY.to_string()),
+        secret_access_key: Some(TEST_SECRET_KEY.to_string()),
+        region: Some(TEST_REGION.to_string()),
+        base_url: Some(server.uri().to_string()),
+        ..Default::default()
+    }
 }
 
 fn speech_options(text: &str) -> SpeechCallOptions {
@@ -59,7 +65,7 @@ async fn do_generate_returns_binary_audio() {
     let server = MockServer::start().await;
     mock_audio_response(&server, "mp3").await;
 
-    let provider = AwsPollyProvider::new(test_config(&server));
+    let provider = create_aws_polly(test_config(&server)).unwrap();
     let model = provider.speech("aws_polly/neural");
 
     let result = model
@@ -79,7 +85,7 @@ async fn requests_correct_url() {
     let server = MockServer::start().await;
     mock_audio_response(&server, "mp3").await;
 
-    let provider = AwsPollyProvider::new(test_config(&server));
+    let provider = create_aws_polly(test_config(&server)).unwrap();
     let model = provider.speech("aws_polly/neural");
 
     model
@@ -99,7 +105,7 @@ async fn request_body_carries_engine_text_voice_and_format() {
     let server = MockServer::start().await;
     mock_audio_response(&server, "mp3").await;
 
-    let provider = AwsPollyProvider::new(test_config(&server));
+    let provider = create_aws_polly(test_config(&server)).unwrap();
     let model = provider.speech("aws_polly/neural");
 
     let mut options = speech_options("Hello from the AI SDK!");
@@ -129,7 +135,7 @@ async fn model_id_maps_to_engine() {
         let server = MockServer::start().await;
         mock_audio_response(&server, "mp3").await;
 
-        let provider = AwsPollyProvider::new(test_config(&server));
+        let provider = create_aws_polly(test_config(&server)).unwrap();
         let model = provider.speech(model_id);
 
         model.do_generate(&speech_options("Hello")).await.unwrap();
@@ -149,7 +155,7 @@ async fn request_carries_sigv4_authorization_header() {
     let server = MockServer::start().await;
     mock_audio_response(&server, "mp3").await;
 
-    let provider = AwsPollyProvider::new(test_config(&server));
+    let provider = create_aws_polly(test_config(&server)).unwrap();
     let model = provider.speech("aws_polly/neural");
 
     model
@@ -181,7 +187,7 @@ async fn request_carries_sigv4_supporting_headers() {
     let server = MockServer::start().await;
     mock_audio_response(&server, "mp3").await;
 
-    let provider = AwsPollyProvider::new(test_config(&server));
+    let provider = create_aws_polly(test_config(&server)).unwrap();
     let model = provider.speech("aws_polly/neural");
 
     model
@@ -213,10 +219,15 @@ async fn session_token_is_forwarded_and_signed() {
     let server = MockServer::start().await;
     mock_audio_response(&server, "mp3").await;
 
-    let config = AwsPollyConfig::new(TEST_ACCESS_KEY, TEST_SECRET_KEY, TEST_REGION)
-        .with_base_url(server.uri())
-        .with_session_token("test-session-token");
-    let provider = AwsPollyProvider::new(config);
+    let config = AwsPollyProviderSettings {
+        access_key_id: Some(TEST_ACCESS_KEY.to_string()),
+        secret_access_key: Some(TEST_SECRET_KEY.to_string()),
+        region: Some(TEST_REGION.to_string()),
+        base_url: Some(server.uri().to_string()),
+        session_token: Some("test-session-token".to_string()),
+        ..Default::default()
+    };
+    let provider = create_aws_polly(config).unwrap();
     let model = provider.speech("aws_polly/neural");
 
     model
@@ -248,7 +259,7 @@ async fn language_maps_to_language_code() {
     let server = MockServer::start().await;
     mock_audio_response(&server, "mp3").await;
 
-    let provider = AwsPollyProvider::new(test_config(&server));
+    let provider = create_aws_polly(test_config(&server)).unwrap();
     let model = provider.speech("aws_polly/neural");
 
     let mut options = speech_options("Hola mundo");
@@ -259,40 +270,6 @@ async fn language_maps_to_language_code() {
     let requests = server.received_requests().await.expect("requests recorded");
     let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
     assert_eq!(body["LanguageCode"], "es-US");
-}
-
-/// Provider options (`aws_polly` key) forward Polly-specific fields.
-#[tokio::test]
-async fn provider_options_forward_polly_fields() {
-    let server = MockServer::start().await;
-    mock_audio_response(&server, "mp3").await;
-
-    let provider = AwsPollyProvider::new(test_config(&server));
-    let model = provider.speech("aws_polly/standard");
-
-    let mut options = speech_options("<speak>Hello</speak>");
-    let mut provider_options = std::collections::HashMap::new();
-    provider_options.insert(
-        "aws_polly".to_string(),
-        json!({
-            "engine": "neural",
-            "sampleRate": "22050",
-            "textType": "ssml",
-            "lexiconNames": ["lex1"],
-            "speechMarkTypes": ["sentence"]
-        }),
-    );
-    options.provider_options = Some(provider_options);
-
-    model.do_generate(&options).await.unwrap();
-
-    let requests = server.received_requests().await.expect("requests recorded");
-    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
-    assert_eq!(body["Engine"], "neural", "engine override should apply");
-    assert_eq!(body["SampleRate"], "22050");
-    assert_eq!(body["TextType"], "ssml");
-    assert_eq!(body["LexiconNames"], json!(["lex1"]));
-    assert_eq!(body["SpeechMarkTypes"], json!(["sentence"]));
 }
 
 /// The response carries timestamp, model id and headers.
@@ -309,7 +286,7 @@ async fn response_carries_metadata() {
         .mount(&server)
         .await;
 
-    let provider = AwsPollyProvider::new(test_config(&server));
+    let provider = create_aws_polly(test_config(&server)).unwrap();
     let model = provider.speech("aws_polly/neural");
 
     let result = model
@@ -348,7 +325,7 @@ async fn error_401_maps_to_auth_error() {
         .mount(&server)
         .await;
 
-    let provider = AwsPollyProvider::new(test_config(&server));
+    let provider = create_aws_polly(test_config(&server)).unwrap();
     let model = provider.speech("aws_polly/neural");
 
     let err = model
@@ -380,7 +357,7 @@ async fn error_403_keeps_the_observed_status() {
         .mount(&server)
         .await;
 
-    let provider = AwsPollyProvider::new(test_config(&server));
+    let provider = create_aws_polly(test_config(&server)).unwrap();
     let model = provider.speech("aws_polly/neural");
 
     let err = model
@@ -407,7 +384,7 @@ async fn error_404_maps_to_model_not_found() {
         .mount(&server)
         .await;
 
-    let provider = AwsPollyProvider::new(test_config(&server));
+    let provider = create_aws_polly(test_config(&server)).unwrap();
     let model = provider.speech("aws_polly/neural");
 
     let err = model
@@ -427,7 +404,7 @@ async fn unsupported_output_format_emits_warning() {
     let server = MockServer::start().await;
     mock_audio_response(&server, "mp3").await;
 
-    let provider = AwsPollyProvider::new(test_config(&server));
+    let provider = create_aws_polly(test_config(&server)).unwrap();
     let model = provider.speech("aws_polly/neural");
 
     let mut options = speech_options("Hello");

@@ -8,12 +8,12 @@
 //!   `POST {base_url}/models/{model}:embedContent` (single value only)
 //! - Others: `POST {base_url}/models/{model}:predict` (batch)
 
-use std::collections::HashMap;
-
 use async_trait::async_trait;
 use serde_json::{Map, Value, json};
 
 use crate::google::google_failed_response_handler;
+use crate::google::options::Namespace;
+use crate::shared::EndpointConfig;
 
 use aimux_core::embedding_model::{
     EmbeddingCallOptions, EmbeddingModel, EmbeddingResponse, EmbeddingResult, EmbeddingUsage,
@@ -21,42 +21,18 @@ use aimux_core::embedding_model::{
 use aimux_core::error::AiMuxError;
 use aimux_core::shared::SharedProviderOptions;
 
-use aimux_provider_utils::HttpRequest;
-
-use super::VertexAuth;
-use super::model::VertexConfig;
-
 /// A Google Vertex AI embedding model (e.g. `"textembedding-gecko@001"`).
 ///
 /// Does **not** hold an HTTP client — the `aimux-provider-utils` API helpers use the process-wide shared
 /// `Client` internally (RFC-0009 §4.1).
 pub struct VertexEmbeddingModel {
     model_id: String,
-    config: VertexConfig,
+    config: EndpointConfig,
 }
 
 impl VertexEmbeddingModel {
-    #[must_use]
-    pub fn new(model_id: String, config: VertexConfig) -> Self {
+    pub(crate) fn from_config(model_id: String, config: EndpointConfig) -> Self {
         Self { model_id, config }
-    }
-
-    fn build_headers(&self, extra: Option<&HashMap<String, String>>) -> Vec<(String, String)> {
-        let mut headers = vec![("Content-Type".to_string(), "application/json".to_string())];
-        match &self.config.auth {
-            VertexAuth::BearerToken(token) => {
-                headers.push(("Authorization".to_string(), format!("Bearer {token}")));
-            }
-            VertexAuth::ApiKey(key) => {
-                headers.push(("x-goog-api-key".to_string(), key.clone()));
-            }
-        }
-        if let Some(extra) = extra {
-            for (k, v) in extra {
-                headers.push((k.clone(), v.clone()));
-            }
-        }
-        headers
     }
 }
 
@@ -69,22 +45,18 @@ fn uses_embed_content_endpoint(model_id: &str) -> bool {
 #[async_trait]
 impl EmbeddingModel for VertexEmbeddingModel {
     fn provider(&self) -> &str {
-        "google.vertex"
+        &self.config.provider
     }
 
     fn model_id(&self) -> &str {
         &self.model_id
     }
 
-    fn retry_config(&self) -> aimux_core::retry::RetryConfig {
-        self.config.retry_config
-    }
-
     fn max_embeddings_per_call(&self) -> Option<u32> {
         if uses_embed_content_endpoint(&self.model_id) {
             Some(1)
         } else {
-            Some(2048)
+            Some(250)
         }
     }
 
@@ -96,10 +68,19 @@ impl EmbeddingModel for VertexEmbeddingModel {
         &self,
         options: &EmbeddingCallOptions,
     ) -> Result<EmbeddingResult, AiMuxError> {
-        // Parse provider options: try "googleVertex", then "vertex", then "google".
-        let vertex_options = parse_vertex_provider_options(options.provider_options.as_ref());
+        // Parse provider options: `googleVertex`, then `google`.
+        let vertex_options = parse_vertex_provider_options(options.provider_options.as_ref())?;
+        let max = self.max_embeddings_per_call().unwrap_or(250);
+        if options.values.len() > max as usize {
+            return Err(AiMuxError::InvalidArgument(format!(
+                "Too many embedding values for {} model {}: maximum {max}, received {}",
+                self.provider(),
+                self.model_id,
+                options.values.len()
+            )));
+        }
 
-        let headers = self.build_headers(options.headers.as_ref());
+        let exchange = self.config.exchange(options.headers.as_ref()).await?;
 
         if uses_embed_content_endpoint(&self.model_id) {
             // gemini-embedding-2: use :embedContent endpoint (single value).
@@ -116,7 +97,7 @@ impl EmbeddingModel for VertexEmbeddingModel {
             );
 
             let mut embed_config = Map::new();
-            if let Some(dim) = vertex_options.output_dimensionality {
+            if let Some(dim) = &vertex_options.output_dimensionality {
                 embed_config.insert("outputDimensionality".to_string(), json!(dim));
             }
             if let Some(task_type) = &vertex_options.task_type {
@@ -136,21 +117,10 @@ impl EmbeddingModel for VertexEmbeddingModel {
                 Value::Object(embed_config),
             );
 
-            let url = format!(
-                "{}/models/{}:embedContent",
-                self.config.base_url, self.model_id
-            );
+            let url = exchange.url(&format!("/models/{}:embedContent", self.model_id));
 
             let resp = aimux_provider_utils::post_json_to_api(
-                HttpRequest {
-                    url,
-                    headers,
-
-                    abort_signal: options.abort_signal.clone(),
-                    call_id: None,
-                    recording_context: None,
-                    ..Default::default()
-                },
+                exchange.request(url, options),
                 Value::Object(body),
                 aimux_provider_utils::create_json_response_handler(),
                 google_failed_response_handler(),
@@ -210,7 +180,7 @@ impl EmbeddingModel for VertexEmbeddingModel {
             .collect();
 
         let mut parameters = Map::new();
-        if let Some(dim) = vertex_options.output_dimensionality {
+        if let Some(dim) = &vertex_options.output_dimensionality {
             parameters.insert("outputDimensionality".to_string(), json!(dim));
         }
         if let Some(auto_truncate) = vertex_options.auto_truncate {
@@ -221,18 +191,10 @@ impl EmbeddingModel for VertexEmbeddingModel {
         body.insert("instances".to_string(), Value::Array(instances));
         body.insert("parameters".to_string(), Value::Object(parameters));
 
-        let url = format!("{}/models/{}:predict", self.config.base_url, self.model_id);
+        let url = exchange.url(&format!("/models/{}:predict", self.model_id));
 
         let resp = aimux_provider_utils::post_json_to_api(
-            HttpRequest {
-                url,
-                headers,
-
-                abort_signal: options.abort_signal.clone(),
-                call_id: None,
-                recording_context: None,
-                ..Default::default()
-            },
+            exchange.request(url, options),
             Value::Object(body),
             aimux_provider_utils::create_json_response_handler(),
             crate::google::google_failed_response_handler(),
@@ -294,7 +256,7 @@ impl EmbeddingModel for VertexEmbeddingModel {
 // ── Provider options parsing ─────────────────────────────────────────────────
 
 struct VertexEmbeddingProviderOptions {
-    output_dimensionality: Option<u32>,
+    output_dimensionality: Option<Value>,
     task_type: Option<String>,
     title: Option<String>,
     auto_truncate: Option<bool>,
@@ -302,22 +264,54 @@ struct VertexEmbeddingProviderOptions {
 
 /// Parse Vertex embedding provider options.
 ///
-/// Tries the `"googleVertex"` key first, then `"vertex"`, then `"google"`
-/// (matching the TS fallback chain).
+/// Tries `googleVertex`, then legacy `vertex`, then `google`.
 fn parse_vertex_provider_options(
     options: Option<&SharedProviderOptions>,
-) -> VertexEmbeddingProviderOptions {
-    let opts = options;
-    let provider_opts = opts
-        .and_then(|o| o.get("googleVertex"))
-        .or_else(|| opts.and_then(|o| o.get("vertex")))
-        .or_else(|| opts.and_then(|o| o.get("google")));
+) -> Result<VertexEmbeddingProviderOptions, AiMuxError> {
+    let provider_opts = Namespace::Vertex.read(options);
+    if let Some(opts) = provider_opts {
+        for (name, valid) in [
+            (
+                "outputDimensionality",
+                opts.get("outputDimensionality")
+                    .is_none_or(Value::is_number),
+            ),
+            ("title", opts.get("title").is_none_or(Value::is_string)),
+            (
+                "autoTruncate",
+                opts.get("autoTruncate").is_none_or(Value::is_boolean),
+            ),
+            (
+                "taskType",
+                opts.get("taskType").is_none_or(|v| {
+                    v.as_str().is_some_and(|v| {
+                        matches!(
+                            v,
+                            "SEMANTIC_SIMILARITY"
+                                | "CLASSIFICATION"
+                                | "CLUSTERING"
+                                | "RETRIEVAL_DOCUMENT"
+                                | "RETRIEVAL_QUERY"
+                                | "QUESTION_ANSWERING"
+                                | "FACT_VERIFICATION"
+                                | "CODE_RETRIEVAL_QUERY"
+                        )
+                    })
+                }),
+            ),
+        ] {
+            if !valid {
+                return Err(AiMuxError::InvalidArgument(format!(
+                    "Invalid Vertex embedding provider option: {name}"
+                )));
+            }
+        }
+    }
 
-    VertexEmbeddingProviderOptions {
+    Ok(VertexEmbeddingProviderOptions {
         output_dimensionality: provider_opts
             .and_then(|o| o.get("outputDimensionality"))
-            .and_then(serde_json::Value::as_u64)
-            .map(|d| d as u32),
+            .cloned(),
         task_type: provider_opts
             .and_then(|o| o.get("taskType"))
             .and_then(|v| v.as_str())
@@ -329,5 +323,5 @@ fn parse_vertex_provider_options(
         auto_truncate: provider_opts
             .and_then(|o| o.get("autoTruncate"))
             .and_then(serde_json::Value::as_bool),
-    }
+    })
 }

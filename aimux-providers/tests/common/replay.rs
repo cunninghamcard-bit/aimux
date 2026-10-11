@@ -58,13 +58,18 @@
 //! ```no_run
 //! # async fn example() {
 //! use wiremock::MockServer;
-//! use aimux_providers::anthropic::AnthropicConfig;
+//! use aimux_providers::anthropic::{AnthropicProviderSettings, create_anthropic};
 //! use reqwest::Client;
 //!
 //! let server = MockServer::start().await;
 //! common::replay::mount_cassettes(&server, "tests/cassettes/anthropic").await;
 //!
-//! let config = AnthropicConfig::new("test-key").with_base_url(server.uri());
+//! let provider = create_anthropic(AnthropicProviderSettings {
+//!     api_key: Some("test-key".to_string()),
+//!     base_url: Some(format!("{}/v1", server.uri())),
+//!     ..Default::default()
+//! })
+//! .unwrap();
 //! // ... build the model, call do_generate / do_stream, assert on the parsed
 //! // result. The provider sees the cassette's real recorded response.
 //! # }
@@ -79,7 +84,7 @@ use std::path::Path;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde_json::Value;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 /// Replay the ordered HTTP exchanges of a unified runtime Recording. Request
@@ -382,7 +387,7 @@ async fn mount_entries(server: &MockServer, cassettes: Vec<Cassette>) -> usize {
 
     for ((m, p), entries) in groups {
         Mock::given(method(m))
-            .and(path(p))
+            .and(move |req: &Request| percent_decode(req.url.path()) == p)
             .respond_with(CassetteRespond { entries })
             .mount(server)
             .await;

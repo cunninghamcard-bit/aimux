@@ -16,6 +16,8 @@
 //! overridden with the mock server's root URI (no `/v1` suffix), so the
 //! resulting request path is `/responses`.
 
+use aimux_core::tool::ToolResult;
+use aimux_core::tool::{FunctionTool, RawToolCall};
 use std::collections::HashMap;
 
 use futures::StreamExt;
@@ -23,20 +25,21 @@ use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use aimux_core::content::ContentPart;
 use aimux_core::error::AiMuxError;
 use aimux_core::generate::{GenerateTextOptions, generate_text};
 use aimux_core::language_model::LanguageModel;
-use aimux_core::language_model_message::{LanguageModelPrompt, LanguageModelPromptMessage};
-use aimux_core::message::Role;
+use aimux_core::language_model_message::{
+    AssistantPart, FilePart, LanguageModelMessage, LanguageModelPrompt, ReasoningPart, TextPart,
+    ToolCallPart, ToolPart, ToolResultOutput, ToolResultPart, UserPart,
+};
 use aimux_core::options::{CallOptions, ResponseFormat, Tool, ToolChoice};
-use aimux_core::result::GenerateContent;
+use aimux_core::result::{GenerateContent, ReasoningOutput, Source};
+use aimux_core::shared::{FileBytes, FileData};
 use aimux_core::stream_part::StreamPart;
-use aimux_core::tool::FunctionTool;
-use aimux_core::types::FinishReasonUnified;
+use aimux_core::types::{FinishReasonUnified, ResponseMetadata};
 
 use aimux_providers::huggingface::responses::convert_to_huggingface_responses_messages;
-use aimux_providers::{HuggingFaceConfig, HuggingFaceProvider};
+use aimux_providers::{HuggingFaceProvider, HuggingFaceProviderSettings, create_huggingface};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared helpers
@@ -44,11 +47,7 @@ use aimux_providers::{HuggingFaceConfig, HuggingFaceProvider};
 
 /// The TS `TEST_PROMPT`: a single user text message "Hello".
 fn test_prompt() -> LanguageModelPrompt {
-    vec![LanguageModelPromptMessage {
-        role: Role::User,
-        content: vec![ContentPart::text("Hello")],
-        ..Default::default()
-    }]
+    vec![LanguageModelMessage::user_text("Hello")]
 }
 
 /// `CallOptions` with only `prompt` set (everything else default/None).
@@ -58,8 +57,12 @@ fn default_options(prompt: LanguageModelPrompt) -> CallOptions {
 
 /// Build a Hugging Face provider whose base URL points at the mock server.
 fn make_provider(server: &MockServer) -> HuggingFaceProvider {
-    let config = HuggingFaceConfig::new("APIKEY").with_base_url(server.uri());
-    HuggingFaceProvider::new(config)
+    create_huggingface(HuggingFaceProviderSettings {
+        api_key: Some("APIKEY".to_string().into()),
+        base_url: Some(server.uri()),
+        ..Default::default()
+    })
+    .expect("valid settings")
 }
 
 /// Mount a JSON response on `/responses`.
@@ -162,7 +165,7 @@ async fn should_generate_text() {
     mock_json(&server, basic_response_body()).await;
 
     let provider = make_provider(&server);
-    let model = provider.responses_model("deepseek-ai/DeepSeek-V3-0324");
+    let model = provider.responses("deepseek-ai/DeepSeek-V3-0324");
 
     let result = model
         .do_generate(&default_options(test_prompt()))
@@ -185,7 +188,7 @@ async fn should_extract_usage() {
     mock_json(&server, basic_response_body()).await;
 
     let provider = make_provider(&server);
-    let model = provider.responses_model("deepseek-ai/DeepSeek-V3-0324");
+    let model = provider.responses("deepseek-ai/DeepSeek-V3-0324");
 
     let result = model
         .do_generate(&default_options(test_prompt()))
@@ -242,7 +245,7 @@ async fn should_extract_text_from_output_array_when_output_text_missing() {
     .await;
 
     let provider = make_provider(&server);
-    let model = provider.responses_model("deepseek-ai/DeepSeek-V3-0324");
+    let model = provider.responses("deepseek-ai/DeepSeek-V3-0324");
 
     let result = model
         .do_generate(&default_options(test_prompt()))
@@ -288,7 +291,7 @@ async fn should_handle_missing_usage_gracefully() {
     .await;
 
     let provider = make_provider(&server);
-    let model = provider.responses_model("deepseek-ai/DeepSeek-V3-0324");
+    let model = provider.responses("deepseek-ai/DeepSeek-V3-0324");
 
     let result = model
         .do_generate(&default_options(test_prompt()))
@@ -313,19 +316,14 @@ async fn should_send_model_id_settings_and_input() {
     mock_json(&server, basic_response_body()).await;
 
     let provider = make_provider(&server);
-    let model = provider.responses_model("deepseek-ai/DeepSeek-V3-0324");
+    let model = provider.responses("deepseek-ai/DeepSeek-V3-0324");
 
     let prompt = vec![
-        LanguageModelPromptMessage {
-            role: Role::System,
-            content: vec![ContentPart::text("You are a helpful assistant.")],
-            ..Default::default()
+        LanguageModelMessage::System {
+            content: "You are a helpful assistant.".into(),
+            provider_options: None,
         },
-        LanguageModelPromptMessage {
-            role: Role::User,
-            content: vec![ContentPart::text("Hello")],
-            ..Default::default()
-        },
+        LanguageModelMessage::user_text("Hello"),
     ];
     let mut options = default_options(prompt);
     options.temperature = Some(0.5);
@@ -333,7 +331,10 @@ async fn should_send_model_id_settings_and_input() {
     options.max_output_tokens = Some(100);
 
     let result = model.do_generate(&options).await.expect("should succeed");
-    let body = result.request_body.expect("body");
+    let body = result
+        .request
+        .and_then(|request| request.body)
+        .expect("body");
 
     assert_eq!(body["model"], json!("deepseek-ai/DeepSeek-V3-0324"));
     assert_eq!(body["temperature"], json!(0.5));
@@ -357,7 +358,7 @@ async fn should_handle_unsupported_settings_with_warnings() {
     mock_json(&server, basic_response_body()).await;
 
     let provider = make_provider(&server);
-    let model = provider.responses_model("deepseek-ai/DeepSeek-V3-0324");
+    let model = provider.responses("deepseek-ai/DeepSeek-V3-0324");
 
     let mut options = default_options(test_prompt());
     options.top_k = Some(10.0);
@@ -436,7 +437,7 @@ async fn should_generate_text_and_sources_from_annotations() {
     .await;
 
     let provider = make_provider(&server);
-    let model = provider.responses_model("deepseek-ai/DeepSeek-V3-0324");
+    let model = provider.responses("deepseek-ai/DeepSeek-V3-0324");
 
     let result = model
         .do_generate(&default_options(test_prompt()))
@@ -452,17 +453,17 @@ async fn should_generate_text_and_sources_from_annotations() {
         other => panic!("expected Text at [0], got {other:?}"),
     }
     match &result.content[1] {
-        GenerateContent::Source { id, url, title, .. } => {
+        GenerateContent::Source(Source::Url { id, url, title, .. }) => {
             assert_eq!(id, "id-0");
-            assert_eq!(url.as_deref(), Some("https://example.com/article1"));
+            assert_eq!(url, "https://example.com/article1");
             assert_eq!(title.as_deref(), Some("AI Developments Article"));
         }
         other => panic!("expected Source at [1], got {other:?}"),
     }
     match &result.content[2] {
-        GenerateContent::Source { id, url, title, .. } => {
+        GenerateContent::Source(Source::Url { id, url, title, .. }) => {
             assert_eq!(id, "id-1");
-            assert_eq!(url.as_deref(), Some("https://test.com/article2"));
+            assert_eq!(url, "https://test.com/article2");
             assert_eq!(title.as_deref(), Some("Industry Trends Report"));
         }
         other => panic!("expected Source at [2], got {other:?}"),
@@ -524,7 +525,7 @@ async fn should_handle_mcp_tools_with_annotations() {
     .await;
 
     let provider = make_provider(&server);
-    let model = provider.responses_model("deepseek-ai/DeepSeek-V3-0324");
+    let model = provider.responses("deepseek-ai/DeepSeek-V3-0324");
 
     let result = model
         .do_generate(&default_options(test_prompt()))
@@ -536,12 +537,12 @@ async fn should_handle_mcp_tools_with_annotations() {
     // emits it as a separate content item too).
     assert_eq!(result.content.len(), 5);
     match &result.content[0] {
-        GenerateContent::ToolCall {
+        GenerateContent::ToolCall(RawToolCall {
             tool_call_id,
             tool_name,
             input,
             ..
-        } => {
+        }) => {
             assert_eq!(tool_call_id, "mcp_search_test");
             assert_eq!(tool_name, "search");
             assert_eq!(
@@ -552,11 +553,11 @@ async fn should_handle_mcp_tools_with_annotations() {
         other => panic!("expected ToolCall at [0], got {other:?}"),
     }
     match &result.content[1] {
-        GenerateContent::ToolResult {
+        GenerateContent::ToolResult(ToolResult {
             tool_call_id,
             tool_name,
             ..
-        } => {
+        }) => {
             assert_eq!(tool_call_id, "mcp_search_test");
             assert_eq!(tool_name, "search");
         }
@@ -567,11 +568,11 @@ async fn should_handle_mcp_tools_with_annotations() {
         other => panic!("expected Text at [2], got {other:?}"),
     }
     match &result.content[3] {
-        GenerateContent::Source { id, .. } => assert_eq!(id, "id-0"),
+        GenerateContent::Source(Source::Url { id, .. }) => assert_eq!(id, "id-0"),
         other => panic!("expected Source at [3], got {other:?}"),
     }
     match &result.content[4] {
-        GenerateContent::Source { id, .. } => assert_eq!(id, "id-1"),
+        GenerateContent::Source(Source::Url { id, .. }) => assert_eq!(id, "id-1"),
         other => panic!("expected Source at [4], got {other:?}"),
     }
 
@@ -620,7 +621,7 @@ async fn should_stream_text_deltas() {
     mock_sse(&server, chunks).await;
 
     let provider = make_provider(&server);
-    let model = provider.responses_model("deepseek-ai/DeepSeek-V3-0324");
+    let model = provider.responses("deepseek-ai/DeepSeek-V3-0324");
 
     let result = model
         .do_stream(&default_options(test_prompt()))
@@ -636,7 +637,7 @@ async fn should_stream_text_deltas() {
     assert!(matches!(&parts[0], StreamPart::StreamStart { warnings } if warnings.is_empty()));
 
     match &parts[1] {
-        StreamPart::ResponseMetadata { id, model_id, .. } => {
+        StreamPart::ResponseMetadata(ResponseMetadata { id, model_id, .. }) => {
             assert_eq!(id.as_deref(), Some("resp_test"));
             assert_eq!(model_id.as_deref(), Some("deepseek-ai/DeepSeek-V3-0324"));
         }
@@ -701,7 +702,7 @@ async fn should_handle_streaming_without_usage() {
     mock_sse(&server, chunks).await;
 
     let provider = make_provider(&server);
-    let model = provider.responses_model("deepseek-ai/DeepSeek-V3-0324");
+    let model = provider.responses("deepseek-ai/DeepSeek-V3-0324");
 
     let result = model
         .do_stream(&default_options(test_prompt()))
@@ -741,7 +742,7 @@ async fn should_handle_non_message_item_types() {
     mock_sse(&server, chunks).await;
 
     let provider = make_provider(&server);
-    let model = provider.responses_model("deepseek-ai/DeepSeek-V3-0324");
+    let model = provider.responses("deepseek-ai/DeepSeek-V3-0324");
 
     let result = model
         .do_stream(&default_options(test_prompt()))
@@ -785,7 +786,7 @@ async fn should_handle_streaming_errors() {
     mock_sse(&server, chunks).await;
 
     let provider = make_provider(&server);
-    let model = provider.responses_model("deepseek-ai/DeepSeek-V3-0324");
+    let model = provider.responses("deepseek-ai/DeepSeek-V3-0324");
 
     let result = model
         .do_stream(&default_options(test_prompt()))
@@ -823,13 +824,16 @@ async fn should_send_correct_streaming_request() {
     mock_sse(&server, chunks).await;
 
     let provider = make_provider(&server);
-    let model = provider.responses_model("deepseek-ai/DeepSeek-V3-0324");
+    let model = provider.responses("deepseek-ai/DeepSeek-V3-0324");
 
     let mut options = default_options(test_prompt());
     options.temperature = Some(0.7);
 
     let result = model.do_stream(&options).await.expect("should succeed");
-    let body = result.request_body.expect("body");
+    let body = result
+        .request
+        .and_then(|request| request.body)
+        .expect("body");
 
     assert_eq!(body["model"], json!("deepseek-ai/DeepSeek-V3-0324"));
     assert_eq!(body["temperature"], json!(0.7));
@@ -879,22 +883,34 @@ async fn should_convert_user_messages_with_images() {
     stub_empty_response(&server).await;
 
     let provider = make_provider(&server);
-    let model = provider.responses_model("deepseek-ai/DeepSeek-V3-0324");
+    let model = provider.responses("deepseek-ai/DeepSeek-V3-0324");
 
-    let prompt = vec![LanguageModelPromptMessage {
-        role: Role::User,
+    let prompt = vec![LanguageModelMessage::User {
         content: vec![
-            ContentPart::text("What do you see?"),
-            ContentPart::file_base64("AQIDBA==", "image/jpeg"),
+            UserPart::Text(TextPart {
+                text: "What do you see?".into(),
+                provider_options: None,
+            }),
+            UserPart::File(FilePart {
+                data: FileData::Data {
+                    data: FileBytes::Base64("AQIDBA==".into()),
+                },
+                media_type: "image/jpeg".into(),
+                filename: None,
+                provider_options: None,
+            }),
         ],
-        ..Default::default()
+        provider_options: None,
     }];
 
     let result = model
         .do_generate(&default_options(prompt))
         .await
         .expect("ok");
-    let body = result.request_body.expect("body");
+    let body = result
+        .request
+        .and_then(|request| request.body)
+        .expect("body");
 
     assert_eq!(
         body["input"][0]["content"],
@@ -913,15 +929,18 @@ async fn should_throw_for_file_parts_with_provider_references() {
     stub_empty_response(&server).await;
 
     let provider = make_provider(&server);
-    let model = provider.responses_model("Qwen/Qwen2.5-VL-32B-Instruct");
+    let model = provider.responses("Qwen/Qwen2.5-VL-32B-Instruct");
 
-    let prompt = vec![LanguageModelPromptMessage {
-        role: Role::User,
-        content: vec![ContentPart::file_reference(
-            "image/jpeg",
-            json!({ "huggingface": "file-ref-123" }),
-        )],
-        ..Default::default()
+    let prompt = vec![LanguageModelMessage::User {
+        content: vec![UserPart::File(FilePart {
+            data: FileData::Reference {
+                reference: [("huggingface".into(), "file-ref-123".into())].into(),
+            },
+            media_type: "image/jpeg".into(),
+            filename: None,
+            provider_options: None,
+        })],
+        provider_options: None,
     }];
 
     let result = model.do_generate(&default_options(prompt)).await;
@@ -942,31 +961,28 @@ async fn should_handle_assistant_messages() {
     stub_empty_response(&server).await;
 
     let provider = make_provider(&server);
-    let model = provider.responses_model("deepseek-ai/DeepSeek-V3-0324");
+    let model = provider.responses("deepseek-ai/DeepSeek-V3-0324");
 
     let prompt = vec![
-        LanguageModelPromptMessage {
-            role: Role::User,
-            content: vec![ContentPart::text("Hello")],
-            ..Default::default()
+        LanguageModelMessage::user_text("Hello"),
+        LanguageModelMessage::Assistant {
+            content: vec![AssistantPart::Text(TextPart {
+                text: "Hi there!".into(),
+                provider_options: None,
+            })],
+            provider_options: None,
         },
-        LanguageModelPromptMessage {
-            role: Role::Assistant,
-            content: vec![ContentPart::text("Hi there!")],
-            ..Default::default()
-        },
-        LanguageModelPromptMessage {
-            role: Role::User,
-            content: vec![ContentPart::text("How are you?")],
-            ..Default::default()
-        },
+        LanguageModelMessage::user_text("How are you?"),
     ];
 
     let result = model
         .do_generate(&default_options(prompt))
         .await
         .expect("ok");
-    let body = result.request_body.expect("body");
+    let body = result
+        .request
+        .and_then(|request| request.body)
+        .expect("body");
 
     assert_eq!(
         body["input"],
@@ -987,16 +1003,34 @@ async fn should_not_warn_about_assistant_content_types() {
     stub_empty_response(&server).await;
 
     let provider = make_provider(&server);
-    let model = provider.responses_model("deepseek-ai/DeepSeek-V3-0324");
+    let model = provider.responses("deepseek-ai/DeepSeek-V3-0324");
 
-    let prompt = vec![LanguageModelPromptMessage {
-        role: Role::Assistant,
+    let prompt = vec![LanguageModelMessage::Assistant {
         content: vec![
-            ContentPart::tool_call("test", "test", json!({})),
-            ContentPart::tool_result("test", json!({ "type": "text", "value": "test" })),
-            ContentPart::reasoning("thinking..."),
+            AssistantPart::ToolCall(ToolCallPart {
+                tool_call_id: "test".into(),
+                tool_name: "test".into(),
+                input: json!({}),
+                provider_executed: None,
+                provider_options: None,
+            }),
+            AssistantPart::ToolResult(ToolResultPart {
+                tool_call_id: "test".into(),
+                tool_name: "test".into(),
+                output: ToolResultOutput::Text {
+                    value: "test".into(),
+                    provider_options: None,
+                },
+
+                provider_options: None,
+            }),
+            AssistantPart::Reasoning(ReasoningPart {
+                text: "thinking...".into(),
+
+                provider_options: None,
+            }),
         ],
-        ..Default::default()
+        provider_options: None,
     }];
 
     let result = model
@@ -1020,15 +1054,20 @@ async fn should_warn_about_tool_messages() {
     stub_empty_response(&server).await;
 
     let provider = make_provider(&server);
-    let model = provider.responses_model("deepseek-ai/DeepSeek-V3-0324");
+    let model = provider.responses("deepseek-ai/DeepSeek-V3-0324");
 
-    let prompt = vec![LanguageModelPromptMessage {
-        role: Role::Tool,
-        content: vec![ContentPart::tool_result(
-            "test",
-            json!({ "type": "text", "value": "test" }),
-        )],
-        ..Default::default()
+    let prompt = vec![LanguageModelMessage::Tool {
+        content: vec![ToolPart::ToolResult(ToolResultPart {
+            tool_call_id: "test".into(),
+            tool_name: "test".into(),
+            output: ToolResultOutput::Text {
+                value: "test".into(),
+                provider_options: None,
+            },
+
+            provider_options: None,
+        })],
+        provider_options: None,
     }];
 
     let result = model
@@ -1099,7 +1138,7 @@ async fn should_handle_function_call_tool_responses() {
     .await;
 
     let provider = make_provider(&server);
-    let model = provider.responses_model("deepseek-ai/DeepSeek-V3-0324");
+    let model = provider.responses("deepseek-ai/DeepSeek-V3-0324");
 
     let result = model
         .do_generate(&default_options(test_prompt()))
@@ -1110,12 +1149,12 @@ async fn should_handle_function_call_tool_responses() {
     // output, so there is no paired ToolResult.
     assert_eq!(result.content.len(), 2);
     match &result.content[0] {
-        GenerateContent::ToolCall {
+        GenerateContent::ToolCall(RawToolCall {
             tool_call_id,
             tool_name,
             input,
             ..
-        } => {
+        }) => {
             assert_eq!(tool_call_id, "call_123");
             assert_eq!(tool_name, "getWeather");
             assert_eq!(input, &Value::String(r#"{"location": "New York"}"#.into()));
@@ -1157,7 +1196,7 @@ async fn should_stream_tool_calls() {
     mock_sse(&server, chunks).await;
 
     let provider = make_provider(&server);
-    let model = provider.responses_model("deepseek-ai/DeepSeek-V3-0324");
+    let model = provider.responses("deepseek-ai/DeepSeek-V3-0324");
 
     let result = model
         .do_stream(&default_options(test_prompt()))
@@ -1173,7 +1212,7 @@ async fn should_stream_tool_calls() {
     assert!(matches!(&parts[0], StreamPart::StreamStart { .. }));
 
     match &parts[1] {
-        StreamPart::ResponseMetadata { id, model_id, .. } => {
+        StreamPart::ResponseMetadata(ResponseMetadata { id, model_id, .. }) => {
             assert_eq!(id.as_deref(), Some("resp_tool_stream"));
             assert_eq!(model_id.as_deref(), Some("deepseek-ai/DeepSeek-V3-0324"));
         }
@@ -1192,12 +1231,12 @@ async fn should_stream_tool_calls() {
         other => panic!("expected ToolInputEnd, got {other:?}"),
     }
     match &parts[4] {
-        StreamPart::ToolCall {
+        StreamPart::ToolCall(RawToolCall {
             tool_call_id,
             tool_name,
             input,
             ..
-        } => {
+        }) => {
             assert_eq!(tool_call_id, "call_456");
             assert_eq!(tool_name, "calculator");
             assert_eq!(
@@ -1208,11 +1247,11 @@ async fn should_stream_tool_calls() {
         other => panic!("expected ToolCall, got {other:?}"),
     }
     match &parts[5] {
-        StreamPart::ToolResult {
+        StreamPart::ToolResult(ToolResult {
             tool_call_id,
             result,
             ..
-        } => {
+        }) => {
             assert_eq!(tool_call_id, "call_456");
             assert_eq!(result, &json!("8"));
         }
@@ -1275,7 +1314,7 @@ async fn should_send_text_format_for_structured_output() {
     .await;
 
     let provider = make_provider(&server);
-    let model = provider.responses_model("moonshotai/Kimi-K2-Instruct");
+    let model = provider.responses("moonshotai/Kimi-K2-Instruct");
 
     let mut options = default_options(test_prompt());
     options.response_format = Some(ResponseFormat::Json {
@@ -1292,7 +1331,10 @@ async fn should_send_text_format_for_structured_output() {
     });
 
     let result = model.do_generate(&options).await.expect("should succeed");
-    let body = result.request_body.expect("body");
+    let body = result
+        .request
+        .and_then(|request| request.body)
+        .expect("body");
 
     assert_eq!(
         body["text"]["format"],
@@ -1347,7 +1389,7 @@ async fn should_handle_structured_output_with_custom_name_and_description() {
     .await;
 
     let provider = make_provider(&server);
-    let model = provider.responses_model("moonshotai/Kimi-K2-Instruct");
+    let model = provider.responses("moonshotai/Kimi-K2-Instruct");
 
     let mut options = default_options(test_prompt());
     options.response_format = Some(ResponseFormat::Json {
@@ -1357,7 +1399,10 @@ async fn should_handle_structured_output_with_custom_name_and_description() {
     });
 
     let result = model.do_generate(&options).await.expect("should succeed");
-    let body = result.request_body.expect("body");
+    let body = result
+        .request
+        .and_then(|request| request.body)
+        .expect("body");
 
     assert_eq!(body["text"]["format"]["name"], json!("person_profile"));
     assert_eq!(
@@ -1416,7 +1461,7 @@ async fn should_handle_reasoning_content_in_responses() {
     .await;
 
     let provider = make_provider(&server);
-    let model = provider.responses_model("deepseek-ai/DeepSeek-R1");
+    let model = provider.responses("deepseek-ai/DeepSeek-R1");
 
     let result = model
         .do_generate(&default_options(test_prompt()))
@@ -1425,14 +1470,20 @@ async fn should_handle_reasoning_content_in_responses() {
 
     assert_eq!(result.content.len(), 2);
     match &result.content[0] {
-        GenerateContent::Reasoning {
+        GenerateContent::Reasoning(ReasoningOutput {
             text,
             provider_metadata,
-        } => {
+        }) => {
             assert_eq!(text, "Let me think about this problem step by step...");
             assert_eq!(
                 provider_metadata.as_ref(),
-                Some(&json!({ "huggingface": { "itemId": "reasoning_1" } }))
+                Some(
+                    &aimux_core::shared::provider_namespace(
+                        "huggingface",
+                        json!({ "itemId": "reasoning_1" })
+                    )
+                    .unwrap()
+                )
             );
         }
         other => panic!("expected Reasoning at [0], got {other:?}"),
@@ -1485,7 +1536,7 @@ async fn should_stream_reasoning_content() {
     mock_sse(&server, chunks).await;
 
     let provider = make_provider(&server);
-    let model = provider.responses_model("deepseek-ai/DeepSeek-R1");
+    let model = provider.responses("deepseek-ai/DeepSeek-R1");
 
     let result = model
         .do_stream(&default_options(test_prompt()))
@@ -1502,7 +1553,7 @@ async fn should_stream_reasoning_content() {
     assert!(matches!(&parts[0], StreamPart::StreamStart { .. }));
 
     match &parts[1] {
-        StreamPart::ResponseMetadata { id, model_id, .. } => {
+        StreamPart::ResponseMetadata(ResponseMetadata { id, model_id, .. }) => {
             assert_eq!(id.as_deref(), Some("resp_reasoning_stream"));
             assert_eq!(model_id.as_deref(), Some("deepseek-ai/DeepSeek-R1"));
         }
@@ -1517,7 +1568,13 @@ async fn should_stream_reasoning_content() {
             assert_eq!(id, "reasoning_stream");
             assert_eq!(
                 provider_metadata.as_ref(),
-                Some(&json!({ "huggingface": { "itemId": "reasoning_stream" } }))
+                Some(
+                    &aimux_core::shared::provider_namespace(
+                        "huggingface",
+                        json!({ "itemId": "reasoning_stream" })
+                    )
+                    .unwrap()
+                )
             );
         }
         other => panic!("expected ReasoningStart, got {other:?}"),
@@ -1609,17 +1666,18 @@ async fn should_send_provider_specific_options() {
     .await;
 
     let provider = make_provider(&server);
-    let model = provider.responses_model("deepseek-ai/DeepSeek-V3-0324");
+    let model = provider.responses("deepseek-ai/DeepSeek-V3-0324");
 
     let mut options = default_options(test_prompt());
     let mut po = HashMap::new();
     po.insert(
         "huggingface".to_string(),
-        json!({
+        serde_json::from_value(json!({
             "metadata": { "key": "value" },
             "instructions": "Be concise",
             "strictJsonSchema": true
-        }),
+        }))
+        .unwrap(),
     );
     options.provider_options = Some(po);
     options.response_format = Some(ResponseFormat::Json {
@@ -1629,7 +1687,10 @@ async fn should_send_provider_specific_options() {
     });
 
     let result = model.do_generate(&options).await.expect("should succeed");
-    let body = result.request_body.expect("body");
+    let body = result
+        .request
+        .and_then(|request| request.body)
+        .expect("body");
 
     assert_eq!(body["metadata"], json!({ "key": "value" }));
     assert_eq!(body["instructions"], json!("Be concise"));
@@ -1669,7 +1730,7 @@ async fn should_prepare_tools_correctly() {
     .await;
 
     let provider = make_provider(&server);
-    let model = provider.responses_model("deepseek-ai/DeepSeek-V3-0324");
+    let model = provider.responses("deepseek-ai/DeepSeek-V3-0324");
 
     let mut options = default_options(test_prompt());
     options.tools = Some(vec![Tool::from(
@@ -1683,12 +1744,15 @@ async fn should_prepare_tools_correctly() {
         )
         .with_description("Get weather information"),
     )]);
-    options.tool_choice = ToolChoice::Tool {
+    options.tool_choice = Some(ToolChoice::Tool {
         tool_name: "getWeather".to_string(),
-    };
+    });
 
     let result = model.do_generate(&options).await.expect("should succeed");
-    let body = result.request_body.expect("body");
+    let body = result
+        .request
+        .and_then(|request| request.body)
+        .expect("body");
 
     assert_eq!(
         body["tools"],
@@ -1738,7 +1802,7 @@ async fn should_handle_auto_and_required_tool_choices() {
     .await;
 
     let provider = make_provider(&server);
-    let model = provider.responses_model("deepseek-ai/DeepSeek-V3-0324");
+    let model = provider.responses("deepseek-ai/DeepSeek-V3-0324");
 
     // Test auto
     let mut options = default_options(test_prompt());
@@ -1746,10 +1810,13 @@ async fn should_handle_auto_and_required_tool_choices() {
         "test",
         json!({ "type": "object" }),
     ))]);
-    options.tool_choice = ToolChoice::Auto;
+    options.tool_choice = Some(ToolChoice::Auto);
 
     let result = model.do_generate(&options).await.expect("should succeed");
-    let body = result.request_body.expect("body");
+    let body = result
+        .request
+        .and_then(|request| request.body)
+        .expect("body");
     assert_eq!(body["tool_choice"], json!("auto"));
 
     // Test required
@@ -1758,10 +1825,13 @@ async fn should_handle_auto_and_required_tool_choices() {
         "test",
         json!({ "type": "object" }),
     ))]);
-    options.tool_choice = ToolChoice::Required;
+    options.tool_choice = Some(ToolChoice::Required);
 
     let result = model.do_generate(&options).await.expect("should succeed");
-    let body = result.request_body.expect("body");
+    let body = result
+        .request
+        .and_then(|request| request.body)
+        .expect("body");
     assert_eq!(body["tool_choice"], json!("required"));
 }
 
@@ -1774,10 +1844,16 @@ const PNG_BASE64: &str = "iVBORw0KGgo=";
 /// TS: "passes full image/png through unchanged for inline data"
 #[test]
 fn passes_full_image_png_through_unchanged_for_inline_data() {
-    let prompt = vec![LanguageModelPromptMessage {
-        role: Role::User,
-        content: vec![ContentPart::file_base64(PNG_BASE64, "image/png")],
-        ..Default::default()
+    let prompt = vec![LanguageModelMessage::User {
+        content: vec![UserPart::File(FilePart {
+            data: FileData::Data {
+                data: FileBytes::Base64(PNG_BASE64.into()),
+            },
+            media_type: "image/png".into(),
+            filename: None,
+            provider_options: None,
+        })],
+        provider_options: None,
     }];
 
     let (input, warnings) =
@@ -1797,10 +1873,16 @@ fn passes_full_image_png_through_unchanged_for_inline_data() {
 /// TS: "detects image subtype from inline bytes for top-level 'image'"
 #[test]
 fn detects_image_subtype_from_inline_bytes_for_top_level_image() {
-    let prompt = vec![LanguageModelPromptMessage {
-        role: Role::User,
-        content: vec![ContentPart::file_base64(PNG_BASE64, "image")],
-        ..Default::default()
+    let prompt = vec![LanguageModelMessage::User {
+        content: vec![UserPart::File(FilePart {
+            data: FileData::Data {
+                data: FileBytes::Base64(PNG_BASE64.into()),
+            },
+            media_type: "image".into(),
+            filename: None,
+            provider_options: None,
+        })],
+        provider_options: None,
     }];
 
     let (input, warnings) =
@@ -1820,10 +1902,17 @@ fn detects_image_subtype_from_inline_bytes_for_top_level_image() {
 /// TS: "passes through URL source for top-level-only image"
 #[test]
 fn passes_through_url_source_for_top_level_only_image() {
-    let prompt = vec![LanguageModelPromptMessage {
-        role: Role::User,
-        content: vec![ContentPart::file_url("https://example.com/x.png", "image")],
-        ..Default::default()
+    let prompt = vec![LanguageModelMessage::User {
+        content: vec![UserPart::File(FilePart {
+            data: FileData::Url {
+                original_url: None,
+                url: "https://example.com/x.png".into(),
+            },
+            media_type: "image".into(),
+            filename: None,
+            provider_options: None,
+        })],
+        provider_options: None,
     }];
 
     let (input, warnings) =
@@ -1843,10 +1932,16 @@ fn passes_through_url_source_for_top_level_only_image() {
 /// TS: "normalizes image/* wildcard via detection"
 #[test]
 fn normalizes_image_wildcard_via_detection() {
-    let prompt = vec![LanguageModelPromptMessage {
-        role: Role::User,
-        content: vec![ContentPart::file_base64(PNG_BASE64, "image/*")],
-        ..Default::default()
+    let prompt = vec![LanguageModelMessage::User {
+        content: vec![UserPart::File(FilePart {
+            data: FileData::Data {
+                data: FileBytes::Base64(PNG_BASE64.into()),
+            },
+            media_type: "image/*".into(),
+            filename: None,
+            provider_options: None,
+        })],
+        provider_options: None,
     }];
 
     let (input, warnings) =

@@ -64,7 +64,7 @@ final class DecisionTests: XCTestCase {
         try server.start()
         defer { server.stop() }
         let provider = try Model.createProvider(name: "openai", apiKey: "test-key",
-            configJson: encode(["base_url": server.baseURL + "/v1"]))
+            configJson: encode(["baseUrl": server.baseURL + "/v1"]))
         let model = try provider.decisionModel("gpt-6-luna")
         defer { model.close() }
         let result = try JSONSerialization.jsonObject(with: Data(model.decide(options: encode(fixture["options"]!)).utf8)) as! [String: Any]

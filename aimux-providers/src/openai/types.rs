@@ -9,12 +9,12 @@ use serde_json::Value;
 
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionResponse {
-    pub id: String,
-    pub model: String,
+    pub id: Option<String>,
+    pub model: Option<String>,
     #[serde(default)]
     pub created: Option<u64>,
     pub choices: Vec<Choice>,
-    pub usage: UsageResponse,
+    pub usage: Option<UsageResponse>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -29,12 +29,14 @@ pub struct Choice {
 
 #[derive(Debug, Deserialize)]
 pub struct MessageResponse {
-    pub role: String,
+    pub role: Option<String>,
     pub content: Option<String>,
-    /// Reasoning text (Groq / OpenAI o-series models).
+    #[serde(default)]
+    pub audio: Option<AudioResponse>,
+    /// Reasoning text (`reasoning` field of OpenAI-shaped servers).
     #[serde(default)]
     pub reasoning: Option<String>,
-    /// DeepSeek / 阿里通义等厂商的 reasoning_content 字段。
+    /// `reasoning_content` field of OpenAI-shaped servers (DashScope and others).
     /// 优先于 `reasoning`（当两者同时存在时）。
     #[serde(default)]
     pub reasoning_content: Option<String>,
@@ -43,6 +45,11 @@ pub struct MessageResponse {
     /// Annotations (e.g. URL citations) — stored as raw JSON.
     #[serde(default)]
     pub annotations: Option<Vec<Value>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AudioResponse {
+    pub transcript: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -58,7 +65,7 @@ pub struct FunctionCallResponse {
     pub arguments: String,
 }
 
-#[derive(Debug, Deserialize, Clone, Serialize)]
+#[derive(Debug, Default, Deserialize, Clone, Serialize)]
 pub struct UsageResponse {
     #[serde(default)]
     pub prompt_tokens: Option<u32>,
@@ -113,16 +120,6 @@ pub struct StreamChunk {
     pub choices: Vec<StreamChoice>,
     #[serde(default)]
     pub usage: Option<UsageResponse>,
-    /// Groq-specific extension: usage is sent in `x_groq.usage` during streaming.
-    #[serde(default)]
-    pub x_groq: Option<XGroq>,
-}
-
-/// Groq streaming extension (`x_groq` field in SSE chunks).
-#[derive(Debug, Deserialize, Default)]
-pub struct XGroq {
-    #[serde(default)]
-    pub usage: Option<UsageResponse>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -140,10 +137,10 @@ pub struct StreamChoice {
 pub struct Delta {
     #[serde(default)]
     pub content: Option<String>,
-    /// Reasoning text delta (Groq / OpenAI o-series).
+    /// Reasoning text delta (`reasoning` field of OpenAI-shaped servers).
     #[serde(default)]
     pub reasoning: Option<String>,
-    /// DeepSeek / 阿里通义等厂商的 reasoning_content delta。
+    /// `reasoning_content` delta of OpenAI-shaped servers (DashScope and others).
     /// 优先于 `reasoning`。
     #[serde(default)]
     pub reasoning_content: Option<String>,
@@ -156,10 +153,13 @@ pub struct Delta {
 
 #[derive(Debug, Deserialize)]
 pub struct DeltaToolCall {
-    #[serde(default)]
+    /// Required, as in `@ai-sdk/openai` (`index: z.number()`); a chunk without
+    /// it fails to parse. Servers that omit it go through `openai_compatible`.
     pub index: usize,
     #[serde(default)]
     pub id: Option<String>,
+    #[serde(default, rename = "type")]
+    pub r#type: Option<String>,
     #[serde(default)]
     pub function: Option<DeltaFunction>,
 }

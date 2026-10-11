@@ -83,11 +83,12 @@ pub(crate) async fn score(
         }
         encoded.push(entry);
     }
-    let base = model.config.base_url.trim_end_matches('/');
+    let base = model.endpoint.base_url()?;
+    let base = base.as_str();
     if model.provider() == "sglang" {
         let body = json!({"model":model.model_id,"query":[],"items":encoded.iter().map(|e| &e.prompt_token_ids).collect::<Vec<_>>(),"label_token_ids":encoded.iter().map(|e| &e.label_token_ids).collect::<Vec<_>>(),"apply_softmax":true,"temperature":temperature,"return_token_logprobs":true});
         return post(
-            &model.config,
+            &model.endpoint,
             request,
             &format!("{base}/score"),
             body,
@@ -125,7 +126,7 @@ pub(crate) async fn score(
             labels.rotate_left(index);
             let body = json!({"model":model.model_id,"query":[],"items":[entry.prompt_token_ids],"label_token_ids":labels,"apply_softmax":true,"add_special_tokens":false});
             let (probability, raw, headers) =
-                post(&model.config, request, &url, body, |raw, headers| {
+                post(&model.endpoint, request, &url, body, |raw, headers| {
                     let data = raw["data"]
                         .as_array()
                         .ok_or_else(|| invalid("vLLM scoring omitted data"))?;

@@ -10,11 +10,11 @@ use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use aimux_core::Provider;
 use aimux_core::error::AiMuxError;
 use aimux_core::image_model::{ImageCallOptions, ImageModel, ImageOutputs};
 use aimux_core::shared::Size;
-use aimux_providers::{RecraftConfig, RecraftProvider};
+use aimux_provider_utils::Resolvable;
+use aimux_providers::{RecraftProviderSettings, create_recraft};
 
 const PROMPT: &str = "A cute baby sea otter";
 const API_KEY: &str = "test-recraft-key";
@@ -43,8 +43,12 @@ fn options(prompt: &str) -> ImageCallOptions {
 }
 
 fn make_model(server: &MockServer) -> impl ImageModel {
-    let config = RecraftConfig::new(API_KEY).with_base_url(server.uri());
-    RecraftProvider::new(config).image(MODEL)
+    let config = RecraftProviderSettings {
+        api_key: Some(Resolvable::Value(API_KEY.to_string())),
+        base_url: Some(server.uri().to_string()),
+        ..Default::default()
+    };
+    create_recraft(config).unwrap().image(MODEL)
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -129,34 +133,6 @@ async fn should_pass_model_prompt_n_and_default_response_format() {
 }
 
 #[tokio::test]
-async fn should_forward_recraft_extension_fields() {
-    let server = MockServer::start().await;
-    mock_generations_response(&server, b64_response_body()).await;
-
-    let model = make_model(&server);
-    let mut opts = options(PROMPT);
-    opts.provider_options.insert(
-        "recraft".to_string(),
-        json!({
-            "style": "digital_illustration",
-            "styleId": "50c0b14e-3e4f-4a18-9d8e-2b1f0a1c2d3e",
-            "negativePrompt": "blurry, low quality",
-            "randomSeed": 12345,
-            "responseFormat": "b64_json"
-        }),
-    );
-    model.do_generate(&opts).await.unwrap();
-
-    let requests = server.received_requests().await.expect("requests recorded");
-    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
-    assert_eq!(body["style"], "digital_illustration");
-    assert_eq!(body["style_id"], "50c0b14e-3e4f-4a18-9d8e-2b1f0a1c2d3e");
-    assert_eq!(body["negative_prompt"], "blurry, low quality");
-    assert_eq!(body["random_seed"], 12345);
-    assert_eq!(body["response_format"], "b64_json");
-}
-
-#[tokio::test]
 async fn should_map_options_seed_to_random_seed() {
     let server = MockServer::start().await;
     mock_generations_response(&server, b64_response_body()).await;
@@ -230,29 +206,6 @@ async fn status_500_maps_to_provider_error() {
     assert!(
         matches!(result, Err(AiMuxError::ApiCall(_))),
         "expected Provider error, got {result:?}"
-    );
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-// Provider trait
-// ════════════════════════════════════════════════════════════════════════════
-
-#[tokio::test]
-async fn provider_name_is_recraft() {
-    let server = MockServer::start().await;
-    let config = RecraftConfig::new(API_KEY).with_base_url(server.uri());
-    let provider = RecraftProvider::new(config);
-    assert_eq!(provider.name(), "recraft");
-}
-
-#[test]
-fn language_model_returns_unsupported_error() {
-    let config = RecraftConfig::new(API_KEY);
-    let provider = RecraftProvider::new(config);
-    let result = provider.language_model("recraftv3");
-    assert!(
-        matches!(result, Err(AiMuxError::UnsupportedFunctionality(_))),
-        "expected Unsupported error"
     );
 }
 

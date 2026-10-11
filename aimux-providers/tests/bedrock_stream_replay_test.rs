@@ -24,13 +24,12 @@ use common::replay::mount_cassettes;
 use futures::StreamExt;
 use wiremock::MockServer;
 
-use aimux_core::content::ContentPart;
 use aimux_core::language_model::LanguageModel;
-use aimux_core::language_model_message::{LanguageModelPrompt, LanguageModelPromptMessage};
-use aimux_core::message::Role;
+use aimux_core::language_model_message::{LanguageModelMessage, LanguageModelPrompt};
 use aimux_core::options::CallOptions;
 use aimux_core::stream_part::StreamPart;
-use aimux_providers::{BedrockProvider, BedrockProviderConfig};
+use aimux_provider_utils::Resolvable;
+use aimux_providers::{AmazonBedrockProviderSettings, create_amazon_bedrock};
 
 /// The one cassette recorded for this model id, so the `(method, path)` group
 /// holds exactly one entry and body-scoring cannot pick a different exchange:
@@ -38,11 +37,9 @@ use aimux_providers::{BedrockProvider, BedrockProviderConfig};
 const MODEL_ID: &str = "us.anthropic.claude-sonnet-4-5-20250929-v1:0";
 
 fn prompt() -> LanguageModelPrompt {
-    vec![LanguageModelPromptMessage {
-        role: Role::User,
-        content: vec![ContentPart::text("What is the capital of France?")],
-        ..Default::default()
-    }]
+    vec![LanguageModelMessage::user_text(
+        "What is the capital of France?",
+    )]
 }
 
 /// Decoded frames must reach the parser and come out as text plus a finish.
@@ -64,9 +61,14 @@ async fn body_base64_cassette_decodes_and_parses_into_stream_parts() {
         "no bedrock cassettes mounted — the replay directory moved or is empty"
     );
 
-    let config = BedrockProviderConfig::with_bearer_token("test-token", "us-east-1")
-        .with_base_url(server.uri());
-    let model = BedrockProvider::new(config).model(MODEL_ID);
+    let model = create_amazon_bedrock(AmazonBedrockProviderSettings {
+        api_key: Some(Resolvable::Value("test-token".to_string())),
+        region: Some("us-east-1".to_string()),
+        base_url: Some(server.uri()),
+        ..Default::default()
+    })
+    .expect("valid settings")
+    .chat(MODEL_ID);
 
     // No error tolerance on purpose. A failed base64 decode, or frames the
     // eventstream parser rejects, surfaces here — and must fail the test rather

@@ -88,7 +88,7 @@ class AimuxExceptionTest {
 
     @Test
     void ffiInvalidWireJsonIsBindingInvariant() {
-        Pointer eh = AimuxFFI.INSTANCE.aimux_register_providers("{not json");
+        Pointer eh = AimuxFFI.INSTANCE.aimux_init_proxy("{not json");
         assertThat(eh).isNotNull();
         assertThat(AimuxFFI.INSTANCE.aimux_error_code(eh)).isEqualTo(202);
         RuntimeException e = AimuxResult.expectAimuxError(eh, "ctx");
@@ -112,19 +112,19 @@ class AimuxExceptionTest {
 
     @Test
     void trailingGarbageJsonIsIllegalArgument() {
-        assertThatThrownBy(() -> Aimux.registerProviders("{} garbage"))
+        assertThatThrownBy(() -> Aimux.initProxy("{} garbage"))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("configJson");
-        assertThatThrownBy(() -> Aimux.registerProviders(""))
+        assertThatThrownBy(() -> Aimux.initProxy(""))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("configJson: invalid JSON: empty");
-        assertThatThrownBy(() -> Aimux.registerProviders(null))
+        assertThatThrownBy(() -> Aimux.initProxy(null))
             .isInstanceOf(NullPointerException.class);
     }
 
     @Test
     void malformedConfigJsonIsIllegalArgument() {
-        assertThatThrownBy(() -> Aimux.registerProviders("{not json"))
+        assertThatThrownBy(() -> Aimux.initProxy("{not json"))
             .isInstanceOf(IllegalArgumentException.class)
             .isNotInstanceOf(AimuxException.class)
             .hasMessageContaining("configJson");
@@ -226,16 +226,35 @@ class AimuxExceptionTest {
             .isInstanceOf(AimuxException.OtherError.class);
         assertThat(AimuxException.of(AimuxException.AIMUX_E_RETRY, "m"))
             .isInstanceOf(AimuxException.RetryError.class);
+        assertThat(AimuxException.of(AimuxException.AIMUX_E_LOAD_API_KEY, "m"))
+            .isInstanceOf(AimuxException.LoadAPIKeyError.class);
+        assertThat(AimuxException.of(AimuxException.AIMUX_E_LOAD_SETTING, "m"))
+            .isInstanceOf(AimuxException.LoadSettingError.class);
+    }
+
+    @Test
+    void loadErrorsHaveTheirOwnCodesNamesAndNoEnvVarLocally() {
+        assertThat(AimuxException.AIMUX_E_LOAD_API_KEY).isEqualTo(18);
+        assertThat(AimuxException.AIMUX_E_LOAD_SETTING).isEqualTo(19);
+        assertThat(AimuxException.codeName(18)).isEqualTo("LoadApiKey");
+        assertThat(AimuxException.codeName(19)).isEqualTo("LoadSetting");
+        AimuxException key = AimuxException.of(AimuxException.AIMUX_E_LOAD_API_KEY, "no key");
+        assertThat(key.getCode()).isEqualTo(18);
+        assertThat(((AimuxException.LoadAPIKeyError) key).getEnvVar()).isNull();
+        AimuxException setting = AimuxException.of(AimuxException.AIMUX_E_LOAD_SETTING, "no region");
+        assertThat(setting.getCode()).isEqualTo(19);
+        assertThat(((AimuxException.LoadSettingError) setting).getEnvVar()).isNull();
     }
 
     @Test
     void codesOutsideTheRustEnumAreRejected() {
-        // Tool errors occupy 15..17; retired code 4 and values beyond 17 are
+        // Tool errors occupy 15..17, 18 / 19 are the missing key / setting and 20
+        // is NoOutputGenerated; retired code 4 and values beyond 20 are
         // header/library mismatches.
         assertThat(AimuxException.of(15, "")).isInstanceOf(AimuxException.NoSuchToolError.class);
         assertThatThrownBy(() -> AimuxException.of(4, ""))
             .isInstanceOf(IllegalStateException.class);
-        assertThatThrownBy(() -> AimuxException.of(18, ""))
+        assertThatThrownBy(() -> AimuxException.of(21, ""))
             .isInstanceOf(IllegalStateException.class);
         assertThatThrownBy(() -> AimuxException.of(999, "m"))
             .isInstanceOf(IllegalStateException.class);

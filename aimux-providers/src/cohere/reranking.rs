@@ -3,8 +3,6 @@
 //! Aligned with Vercel AI SDK `CohereRerankingModel`
 //! (`reference/ai/packages/cohere/src/reranking/cohere-reranking-model.ts`).
 
-use std::collections::HashMap;
-
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -14,37 +12,35 @@ use aimux_core::reranking_model::{
     RerankingCallOptions, RerankingDocuments, RerankingModel, RerankingRank, RerankingResponse,
     RerankingResult,
 };
+use aimux_core::shared::SharedProviderOptions;
 use aimux_core::types::Warning;
 
-use aimux_provider_utils::HttpRequest;
-
-use super::CohereConfig;
+use crate::shared::EndpointConfig;
 
 /// Cohere provider-specific reranking options.
 #[derive(Debug, Clone, Default)]
 struct CohereRerankingOptions {
-    max_tokens_per_doc: Option<u64>,
-    priority: Option<u64>,
+    max_tokens_per_doc: Option<serde_json::Number>,
+    priority: Option<serde_json::Number>,
 }
 
 fn parse_cohere_reranking_options(
-    provider_options: Option<&HashMap<String, Value>>,
-) -> CohereRerankingOptions {
-    let mut opts = CohereRerankingOptions::default();
-    if let Some(po) = provider_options
-        && let Some(cohere) = po.get("cohere")
-    {
-        if let Some(v) = cohere
-            .get("maxTokensPerDoc")
-            .and_then(serde_json::Value::as_u64)
-        {
-            opts.max_tokens_per_doc = Some(v);
-        }
-        if let Some(v) = cohere.get("priority").and_then(serde_json::Value::as_u64) {
-            opts.priority = Some(v);
-        }
-    }
-    opts
+    provider_options: Option<&SharedProviderOptions>,
+) -> Result<CohereRerankingOptions, AiMuxError> {
+    let cohere = super::options::cohere_options(provider_options);
+    let number_option = |key: &str| -> Result<Option<serde_json::Number>, AiMuxError> {
+        cohere
+            .and_then(|options| options.get(key))
+            .map(|value| match value {
+                Value::Number(number) => Ok(number.clone()),
+                _ => Err(AiMuxError::InvalidArgument(format!("Invalid cohere.{key}"))),
+            })
+            .transpose()
+    };
+    Ok(CohereRerankingOptions {
+        max_tokens_per_doc: number_option("maxTokensPerDoc")?,
+        priority: number_option("priority")?,
+    })
 }
 
 /// The response from the Cohere `/rerank` endpoint.
@@ -64,53 +60,30 @@ struct CohereRerankingResult {
 /// A Cohere reranking model.
 pub struct CohereRerankingModel {
     model_id: String,
-    config: CohereConfig,
+    config: EndpointConfig,
 }
 
 impl CohereRerankingModel {
-    #[must_use]
-    pub fn new(model_id: String, config: CohereConfig) -> Self {
+    pub(crate) fn from_config(model_id: String, config: EndpointConfig) -> Self {
         Self { model_id, config }
-    }
-
-    fn build_headers(&self, extra: Option<&HashMap<String, String>>) -> HashMap<String, String> {
-        let mut headers = HashMap::new();
-        headers.insert(
-            "Authorization".to_string(),
-            format!("Bearer {}", self.config.api_key),
-        );
-        if let Some(extra) = extra {
-            for (k, v) in extra {
-                headers.insert(k.clone(), v.clone());
-            }
-        }
-        headers
-    }
-
-    fn endpoint(&self) -> String {
-        format!("{}/rerank", self.config.base_url)
     }
 }
 
 #[async_trait]
 impl RerankingModel for CohereRerankingModel {
     fn provider(&self) -> &str {
-        "cohere"
+        &self.config.provider
     }
 
     fn model_id(&self) -> &str {
         &self.model_id
     }
 
-    fn retry_config(&self) -> aimux_core::retry::RetryConfig {
-        self.config.retry_config
-    }
-
     async fn do_rerank(
         &self,
         options: &RerankingCallOptions,
     ) -> Result<RerankingResult, AiMuxError> {
-        let cohere_options = parse_cohere_reranking_options(options.provider_options.as_ref());
+        let cohere_options = parse_cohere_reranking_options(options.provider_options.as_ref())?;
 
         let mut warnings = Vec::new();
 
@@ -133,9 +106,11 @@ impl RerankingModel for CohereRerankingModel {
             "model": self.model_id,
             "query": options.query,
             "documents": documents,
-            "top_n": options.top_n,
         });
 
+        if let Some(top_n) = options.top_n {
+            body["top_n"] = json!(top_n);
+        }
         if let Some(max_tokens) = cohere_options.max_tokens_per_doc {
             body["max_tokens_per_doc"] = json!(max_tokens);
         }
@@ -143,15 +118,10 @@ impl RerankingModel for CohereRerankingModel {
             body["priority"] = json!(priority);
         }
 
-        let headers = self.build_headers(options.headers.as_ref());
-        let mut header_list: Vec<(String, String)> = headers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        header_list.push(("Content-Type".to_string(), "application/json".to_string()));
+        let exchange = self.config.exchange(options.headers.as_ref()).await?;
 
         let resp = aimux_provider_utils::post_json_to_api(
-            HttpRequest::new(self.endpoint(), header_list, options),
+            exchange.request(exchange.url("/rerank"), options),
             body.clone(),
             aimux_provider_utils::create_json_response_handler::<CohereRerankingResponse>(),
             super::cohere_failed_response_handler(),

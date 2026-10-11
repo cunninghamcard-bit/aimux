@@ -2,7 +2,7 @@
 import type { DecisionDescription } from "./DecisionDescription";
 import type { DecisionValue } from "./DecisionValue";
 
-export type DecisionOption = { label: string,
+export type DecisionOption = { label: string, 
 /**
  * Native value; when omitted, the label is sent as the value.
  */

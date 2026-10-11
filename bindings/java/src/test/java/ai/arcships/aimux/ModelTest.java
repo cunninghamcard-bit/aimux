@@ -60,21 +60,12 @@ class ModelTest {
         }
     }
 
-    @Test
-    void providerCreatesModelWithProviderNameConstant() {
-        // Recommended typed spelling: ProviderName.GROQ constant (key is
-        // validated on the first API call, not construction).
-        try (Model model = Model.provider(ProviderName.GROQ, "sk-test-fake-key", "llama-3.3-70b", null)) {
-            assertThat(model).isNotNull();
-        }
-    }
-
     // ── generation ──────────────────────────────────────────────────────────
 
     @Test
     void generateTextReturnsJsonString() {
         try (MockProviderServer server = new MockProviderServer();
-             Model model = Model.openaiWithBase("sk-test-fake-key", "gpt-4o-mini", server.baseUrl())) {
+             Model model = Model.provider("deepseek", "sk-test-fake-key", "gpt-4o-mini", server.chatConfig())) {
             server.setResponseBody(plainOpenAiResponse());
 
             String resultJson = model.generateText("\"Hello\"");
@@ -114,7 +105,7 @@ class ModelTest {
     @Test
     void streamTextInvokesOnDone() {
         try (MockProviderServer server = new MockProviderServer();
-             Model model = Model.openaiWithBase("sk-test-fake-key", "gpt-4o-mini", server.baseUrl())) {
+             Model model = Model.provider("deepseek", "sk-test-fake-key", "gpt-4o-mini", server.chatConfig())) {
             server.setContentType("text/event-stream");
             server.setResponseBody(openAiSseResponse());
 
@@ -155,7 +146,7 @@ class ModelTest {
     @Test
     void streamTextStreamIteratesParts() {
         try (MockProviderServer server = new MockProviderServer();
-             Model model = Model.openaiWithBase("sk-test-fake-key", "gpt-4o-mini", server.baseUrl())) {
+             Model model = Model.provider("deepseek", "sk-test-fake-key", "gpt-4o-mini", server.chatConfig())) {
             server.setContentType("text/event-stream");
             server.setResponseBody(openAiSseResponse());
 
@@ -193,7 +184,7 @@ class ModelTest {
     @Test
     void concurrentCloseAndGenerateDoesNotCrash() throws InterruptedException {
         try (MockProviderServer server = new MockProviderServer();
-             Model model = Model.openaiWithBase("sk-test-fake-key", "gpt-4o-mini", server.baseUrl())) {
+             Model model = Model.provider("deepseek", "sk-test-fake-key", "gpt-4o-mini", server.chatConfig())) {
             server.setResponseBody(plainOpenAiResponse());
 
             final int iterations = 300;

@@ -7,8 +7,6 @@
 //! - Single value: `POST {base_url}/models/{model}:embedContent`
 //! - Multiple values: `POST {base_url}/models/{model}:batchEmbedContents`
 
-use std::collections::HashMap;
-
 use async_trait::async_trait;
 use serde_json::{Map, Value, json};
 
@@ -16,11 +14,9 @@ use aimux_core::embedding_model::{
     EmbeddingCallOptions, EmbeddingModel, EmbeddingResponse, EmbeddingResult,
 };
 use aimux_core::error::AiMuxError;
-use aimux_core::shared::SharedProviderOptions;
 
-use aimux_provider_utils::HttpRequest;
-
-use super::GoogleConfig;
+use super::options::google_options;
+use crate::shared::EndpointConfig;
 
 /// A Google Gemini embedding model (e.g. `"gemini-embedding-001"`).
 ///
@@ -28,49 +24,23 @@ use super::GoogleConfig;
 /// `Client` internally (RFC-0009 §4.1).
 pub struct GoogleEmbeddingModel {
     model_id: String,
-    config: GoogleConfig,
+    config: EndpointConfig,
 }
 
 impl GoogleEmbeddingModel {
-    #[must_use]
-    pub fn new(model_id: String, config: GoogleConfig) -> Self {
+    pub(crate) fn from_config(model_id: String, config: EndpointConfig) -> Self {
         Self { model_id, config }
     }
-
-    fn build_headers(&self, extra: Option<&HashMap<String, String>>) -> HashMap<String, String> {
-        let mut headers = HashMap::new();
-        headers.insert("x-goog-api-key".to_string(), self.config.api_key.clone());
-        if let Some(extra) = extra {
-            for (k, v) in extra {
-                headers.insert(k.clone(), v.clone());
-            }
-        }
-        headers
-    }
-}
-
-/// Build the header list for a JSON POST: auth/extra headers + `Content-Type`.
-fn build_header_list(headers: &HashMap<String, String>) -> Vec<(String, String)> {
-    let mut list: Vec<(String, String)> = headers
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    list.push(("Content-Type".to_string(), "application/json".to_string()));
-    list
 }
 
 #[async_trait]
 impl EmbeddingModel for GoogleEmbeddingModel {
     fn provider(&self) -> &str {
-        "google.generative-ai"
+        &self.config.provider
     }
 
     fn model_id(&self) -> &str {
         &self.model_id
-    }
-
-    fn retry_config(&self) -> aimux_core::retry::RetryConfig {
-        self.config.retry_config
     }
 
     fn max_embeddings_per_call(&self) -> Option<u32> {
@@ -85,196 +55,181 @@ impl EmbeddingModel for GoogleEmbeddingModel {
         &self,
         options: &EmbeddingCallOptions,
     ) -> Result<EmbeddingResult, AiMuxError> {
-        let google_options = parse_google_provider_options(options.provider_options.as_ref());
-
-        let headers = self.build_headers(options.headers.as_ref());
-        let header_list = build_header_list(&headers);
-
-        // For single embeddings, use the single endpoint.
-        if options.values.len() == 1 {
-            let value = &options.values[0];
-            let mut parts = Map::new();
-            parts.insert("text".to_string(), json!(value));
-
-            let mut content = Map::new();
-            content.insert(
-                "parts".to_string(),
-                Value::Array(vec![Value::Object(parts)]),
-            );
-
-            let mut body = Map::new();
-            body.insert(
-                "model".to_string(),
-                json!(format!("models/{}", self.model_id)),
-            );
-            body.insert("content".to_string(), Value::Object(content));
-            if let Some(dim) = google_options.output_dimensionality {
-                body.insert("outputDimensionality".to_string(), json!(dim));
+        let provider_options = google_options(options.provider_options.as_ref());
+        let mut settings = Map::new();
+        if let Some(opts) = provider_options {
+            if let Some(dimension) = opts.get("outputDimensionality") {
+                if !dimension.is_number() {
+                    return Err(AiMuxError::InvalidArgument(
+                        "outputDimensionality must be a number".into(),
+                    ));
+                }
+                settings.insert("outputDimensionality".into(), dimension.clone());
             }
-            if let Some(task_type) = google_options.task_type {
-                body.insert("taskType".to_string(), json!(task_type));
+            if let Some(task) = opts.get("taskType") {
+                if !matches!(
+                    task.as_str(),
+                    Some(
+                        "SEMANTIC_SIMILARITY"
+                            | "CLASSIFICATION"
+                            | "CLUSTERING"
+                            | "RETRIEVAL_DOCUMENT"
+                            | "RETRIEVAL_QUERY"
+                            | "QUESTION_ANSWERING"
+                            | "FACT_VERIFICATION"
+                            | "CODE_RETRIEVAL_QUERY"
+                    )
+                ) {
+                    return Err(AiMuxError::InvalidArgument(
+                        "Invalid Google embedding taskType".into(),
+                    ));
+                }
+                settings.insert("taskType".into(), task.clone());
             }
-
-            let url = format!(
-                "{}/models/{}:embedContent",
-                self.config.base_url, self.model_id
-            );
-
-            let resp = aimux_provider_utils::post_json_to_api(
-                HttpRequest {
-                    url,
-                    headers: header_list,
-
-                    abort_signal: options.abort_signal.clone(),
-                    call_id: None,
-                    recording_context: None,
-                    ..Default::default()
-                },
-                Value::Object(body),
-                aimux_provider_utils::create_json_response_handler(),
-                super::google_failed_response_handler(),
-            )
-            .await?;
-
-            let response_headers = resp.response_headers;
-
-            let raw_value: Value = resp.value;
-
-            // Single embedding: response.embedding.values
-            let embedding = raw_value
-                .get("embedding")
-                .and_then(|e| e.get("values"))
-                .and_then(|v| v.as_array())
-                .map(|vals| {
-                    vals.iter()
-                        .filter_map(|v| v.as_f64().map(|f| f as f32))
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            return Ok(EmbeddingResult {
-                embeddings: vec![embedding],
-                usage: None,
-                provider_metadata: None,
-                response: Some(EmbeddingResponse {
-                    headers: Some(response_headers),
-                    body: Some(raw_value),
-                }),
-                warnings: Vec::new(),
-            });
         }
-
-        // For multiple values, use the batch endpoint.
+        if options.values.len() > 100 {
+            return Err(AiMuxError::InvalidArgument(format!(
+                "Too many values for a single embedding call. The {} model \"{}\" can only embed up to 100 values per call, but {} values were provided.",
+                self.provider(),
+                self.model_id,
+                options.values.len()
+            )));
+        }
+        let multimodal = provider_options.and_then(|o| o.get("content"));
+        let multimodal = multimodal
+            .map(|v| {
+                v.as_array().ok_or_else(|| {
+                    AiMuxError::InvalidArgument("Google embedding content must be an array".into())
+                })
+            })
+            .transpose()?;
+        if let Some(content) = multimodal {
+            if content.len() != options.values.len() {
+                return Err(AiMuxError::InvalidArgument(format!(
+                    "The number of multimodal content entries ({}) must match the number of values ({}).",
+                    content.len(),
+                    options.values.len()
+                )));
+            }
+            for entry in content.iter().filter(|v| !v.is_null()) {
+                let parts = entry.as_array().filter(|p| !p.is_empty()).ok_or_else(|| {
+                    AiMuxError::InvalidArgument(
+                        "Google embedding content entries must be nonempty arrays or null".into(),
+                    )
+                })?;
+                for part in parts {
+                    let valid = part.get("text").is_some_and(Value::is_string)
+                        || part.get("inlineData").is_some_and(|p| {
+                            p.get("mimeType").is_some_and(Value::is_string)
+                                && p.get("data").is_some_and(Value::is_string)
+                        })
+                        || part.get("fileData").is_some_and(|p| {
+                            p.get("mimeType").is_some_and(Value::is_string)
+                                && p.get("fileUri").is_some_and(Value::is_string)
+                        });
+                    if !valid {
+                        return Err(AiMuxError::InvalidArgument(
+                            "Invalid Google embedding content part".into(),
+                        ));
+                    }
+                }
+            }
+        }
+        let single = options.values.len() == 1;
         let requests: Vec<Value> = options
             .values
             .iter()
-            .map(|value| {
-                let mut parts = Map::new();
-                parts.insert("text".to_string(), json!(value));
-
-                let mut content = Map::new();
-                content.insert("role".to_string(), json!("user"));
-                content.insert(
-                    "parts".to_string(),
-                    Value::Array(vec![Value::Object(parts)]),
-                );
-
-                let mut req = Map::new();
-                req.insert(
-                    "model".to_string(),
-                    json!(format!("models/{}", self.model_id)),
-                );
-                req.insert("content".to_string(), Value::Object(content));
-                if let Some(dim) = google_options.output_dimensionality {
-                    req.insert("outputDimensionality".to_string(), json!(dim));
+            .enumerate()
+            .map(|(index, value)| {
+                let extras = multimodal.and_then(|entries| entries[index].as_array());
+                let mut parts = Vec::new();
+                if extras.is_none() || !value.is_empty() {
+                    parts.push(json!({"text": value}));
                 }
-                if let Some(task_type) = google_options.task_type.clone() {
-                    req.insert("taskType".to_string(), json!(task_type));
+                if let Some(extras) = extras {
+                    parts.extend(extras.iter().map(|part| {
+                        if let Some(text) = part.get("text").and_then(Value::as_str) { json!({"text": text}) }
+                        else if let Some(inline) = part.get("inlineData").filter(|v| v.get("mimeType").is_some_and(Value::is_string) && v.get("data").is_some_and(Value::is_string)) {
+                            json!({"inlineData": {"mimeType": inline["mimeType"], "data": inline["data"]}})
+                        } else { json!({"fileData": {"mimeType": part["fileData"]["mimeType"], "fileUri": part["fileData"]["fileUri"]}}) }
+                    }));
                 }
-                Value::Object(req)
+                let mut content = json!({"parts": parts});
+                if !single {
+                    content["role"] = json!("user");
+                }
+                let mut request = settings.clone();
+                request.insert("model".into(), json!(format!("models/{}", self.model_id)));
+                request.insert("content".into(), content);
+                Value::Object(request)
             })
             .collect();
-
-        let mut body = Map::new();
-        body.insert("requests".to_string(), Value::Array(requests));
-
-        let url = format!(
-            "{}/models/{}:batchEmbedContents",
-            self.config.base_url, self.model_id
-        );
-
+        let body = if single {
+            requests[0].clone()
+        } else {
+            json!({"requests": requests})
+        };
+        let endpoint = if single {
+            "embedContent"
+        } else {
+            "batchEmbedContents"
+        };
+        let exchange = self.config.exchange(options.headers.as_ref()).await?;
         let resp = aimux_provider_utils::post_json_to_api(
-            HttpRequest {
-                url,
-                headers: header_list,
-
-                abort_signal: options.abort_signal.clone(),
-                call_id: None,
-                recording_context: None,
-                ..Default::default()
-            },
-            Value::Object(body),
-            aimux_provider_utils::create_json_response_handler(),
+            exchange.request(
+                exchange.url(&format!("/models/{}:{endpoint}", self.model_id)),
+                options,
+            ),
+            body,
+            aimux_provider_utils::create_json_response_handler::<Value>(),
             super::google_failed_response_handler(),
         )
         .await?;
-
-        let response_headers = resp.response_headers;
-
-        let raw_value: Value = resp.value;
-
-        // Batch embeddings: response.embeddings[].values
-        let embeddings: Vec<Vec<f32>> = raw_value
-            .get("embeddings")
-            .and_then(|e| e.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .map(|item| {
-                        item.get("values")
-                            .and_then(|v| v.as_array())
-                            .map(|vals| {
-                                vals.iter()
-                                    .filter_map(|v| v.as_f64().map(|f| f as f32))
-                                    .collect()
-                            })
-                            .unwrap_or_default()
+        let raw_value = resp.value;
+        let items = if single {
+            vec![
+                raw_value
+                    .get("embedding")
+                    .ok_or_else(|| AiMuxError::InvalidResponseData("Missing embedding".into()))?,
+            ]
+        } else {
+            raw_value
+                .get("embeddings")
+                .and_then(Value::as_array)
+                .ok_or_else(|| AiMuxError::InvalidResponseData("Missing embeddings".into()))?
+                .iter()
+                .collect()
+        };
+        let embeddings = items
+            .into_iter()
+            .map(|item| {
+                let values = item
+                    .get("values")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| {
+                        AiMuxError::InvalidResponseData("Missing embedding values".into())
+                    })?;
+                values
+                    .iter()
+                    .map(|v| {
+                        v.as_f64().map(|v| v as f32).ok_or_else(|| {
+                            AiMuxError::InvalidResponseData(
+                                "Embedding values must be numbers".into(),
+                            )
+                        })
                     })
-                    .collect()
+                    .collect::<Result<Vec<_>, _>>()
             })
-            .unwrap_or_default();
-
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(EmbeddingResult {
             embeddings,
             usage: None,
             provider_metadata: None,
             response: Some(EmbeddingResponse {
-                headers: Some(response_headers),
+                headers: Some(resp.response_headers),
                 body: Some(raw_value),
             }),
             warnings: Vec::new(),
         })
-    }
-}
-
-// ── Provider options parsing ─────────────────────────────────────────────────
-
-struct GoogleEmbeddingProviderOptions {
-    output_dimensionality: Option<u32>,
-    task_type: Option<String>,
-}
-
-fn parse_google_provider_options(
-    options: Option<&SharedProviderOptions>,
-) -> GoogleEmbeddingProviderOptions {
-    let provider_opts = options.and_then(|opts| opts.get("google"));
-    GoogleEmbeddingProviderOptions {
-        output_dimensionality: provider_opts
-            .and_then(|o| o.get("outputDimensionality"))
-            .and_then(serde_json::Value::as_u64)
-            .map(|d| d as u32),
-        task_type: provider_opts
-            .and_then(|o| o.get("taskType"))
-            .and_then(|v| v.as_str())
-            .map(std::string::ToString::to_string),
     }
 }

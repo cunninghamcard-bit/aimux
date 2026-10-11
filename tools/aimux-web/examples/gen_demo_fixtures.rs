@@ -9,9 +9,7 @@
 //!
 //! The rest only enrich the Traces / Sessions listing.
 
-use aimux_core::content::ContentPart;
-use aimux_core::language_model_message::LanguageModelPromptMessage;
-use aimux_core::message::Role;
+use aimux_core::language_model_message::{AssistantPart, LanguageModelMessage, TextPart};
 use aimux_core::options::CallOptions;
 use aimux_core::recording::{
     HttpExchange, HttpRecord, InputRecord, OutcomeRecord, OutcomeStatus, ProviderRecord, Recording,
@@ -21,21 +19,13 @@ use aimux_core::recording::{
 const AGENT_SYSTEM: &str =
     "You are a helpful assistant. Always use the calculator tool for arithmetic, then answer.";
 
-fn msg(role: Role, text: &str) -> LanguageModelPromptMessage {
-    LanguageModelPromptMessage {
-        role,
-        content: vec![ContentPart::text(text)],
-        provider_options: None,
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn recording(
     call_id: &str,
     recorded_at: &str,
     provider: &str,
     model_id: &str,
-    prompt: Vec<LanguageModelPromptMessage>,
+    prompt: Vec<LanguageModelMessage>,
     session: Option<&str>,
     step: Option<u32>,
     status: OutcomeStatus,
@@ -55,18 +45,12 @@ fn recording(
         call_id: call_id.into(),
         recorded_at: recorded_at.into(),
         input: InputRecord {
+            decision_capabilities: None,
             operation: Default::default(),
             prompt: prompt.clone(),
             options: serde_json::to_value(&options).unwrap(),
         },
-        provider: ProviderRecord {
-            provider: provider.into(),
-            model_id: model_id.into(),
-            base_url: None,
-            api_key_source: "none".into(),
-            profile: None,
-            provider_options: None,
-        },
+        provider: ProviderRecord::from_model(provider, model_id),
         exchanges: vec![HttpExchange {
             step: None,
             attempt: 0,
@@ -115,7 +99,7 @@ fn main() {
         .nth(1)
         .unwrap_or_else(|| "demo.jsonl".to_string());
 
-    // OpenAI chat.completions SSE bodies so mock streaming emits TextDelta.
+    // OpenAI chat.completions SSE bodies so mock streaming emits text-delta parts.
     let sse_pg = r#"data: {"id":"chatcmpl-demo-pg","model":"gpt-4o-mini"}
 
 data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"1 + 1 = 2"}}]}
@@ -140,7 +124,7 @@ data: [DONE]"#;
             "2026-08-14T09:31:10.000Z",
             "openai",
             "gpt-4o",
-            vec![msg(Role::User, "what is 1 + 1?")],
+            vec![LanguageModelMessage::user_text("what is 1 + 1?")],
             Some("sess-playground"),
             Some(0),
             OutcomeStatus::Success,
@@ -148,8 +132,8 @@ data: [DONE]"#;
             sse_pg,
             320,
             serde_json::json!({
-                "input_tokens": { "total": 12, "cache_read": 0 },
-                "output_tokens": { "total": 5 }
+                "inputTokens": { "total": 12, "cacheRead": 0 },
+                "outputTokens": { "total": 5 }
             }),
         ),
         // Agent mock target: [system (agent), user] — matches the Agent page's default def.
@@ -159,8 +143,11 @@ data: [DONE]"#;
             "openai",
             "gpt-4o",
             vec![
-                msg(Role::System, AGENT_SYSTEM),
-                msg(Role::User, "what is 17 * 19?"),
+                LanguageModelMessage::System {
+                    content: AGENT_SYSTEM.into(),
+                    provider_options: None,
+                },
+                LanguageModelMessage::user_text("what is 17 * 19?"),
             ],
             Some("sess-agent"),
             Some(0),
@@ -169,8 +156,8 @@ data: [DONE]"#;
             sse_agent,
             412,
             serde_json::json!({
-                "input_tokens": { "total": 64, "cache_read": 0 },
-                "output_tokens": { "total": 9 }
+                "inputTokens": { "total": 64, "cacheRead": 0 },
+                "outputTokens": { "total": 9 }
             }),
         ),
         // Enrichment: a multi-step session (steps 1 & 2) on deepseek.
@@ -180,8 +167,11 @@ data: [DONE]"#;
             "deepseek",
             "deepseek-chat",
             vec![
-                msg(Role::System, "You are a careful technical analyst."),
-                msg(Role::User, "Explain how prefix caching works."),
+                LanguageModelMessage::System {
+                    content: "You are a careful technical analyst.".into(),
+                    provider_options: None,
+                },
+                LanguageModelMessage::user_text("Explain how prefix caching works."),
             ],
             Some("sess-deepseek"),
             Some(0),
@@ -190,8 +180,8 @@ data: [DONE]"#;
             "{\"choices\":[{\"message\":{\"content\":\"Prefix caching reuses the KV cache...\"}}]}",
             810,
             serde_json::json!({
-                "input_tokens": { "total": 2300, "cache_read": 0 },
-                "output_tokens": { "total": 210 }
+                "inputTokens": { "total": 2300, "cacheRead": 0 },
+                "outputTokens": { "total": 210 }
             }),
         ),
         recording(
@@ -200,10 +190,19 @@ data: [DONE]"#;
             "deepseek",
             "deepseek-chat",
             vec![
-                msg(Role::System, "You are a careful technical analyst."),
-                msg(Role::User, "Explain how prefix caching works."),
-                msg(Role::Assistant, "Prefix caching reuses the KV cache..."),
-                msg(Role::User, "What is the hit rate formula?"),
+                LanguageModelMessage::System {
+                    content: "You are a careful technical analyst.".into(),
+                    provider_options: None,
+                },
+                LanguageModelMessage::user_text("Explain how prefix caching works."),
+                LanguageModelMessage::Assistant {
+                    content: vec![AssistantPart::Text(TextPart {
+                        text: "Prefix caching reuses the KV cache...".into(),
+                        provider_options: None,
+                    })],
+                    provider_options: None,
+                },
+                LanguageModelMessage::user_text("What is the hit rate formula?"),
             ],
             Some("sess-deepseek"),
             Some(1),
@@ -212,8 +211,8 @@ data: [DONE]"#;
             "{\"choices\":[{\"message\":{\"content\":\"cache_read / input_total\"}}]}",
             796,
             serde_json::json!({
-                "input_tokens": { "total": 2650, "cache_read": 2300 },
-                "output_tokens": { "total": 18 }
+                "inputTokens": { "total": 2650, "cacheRead": 2300 },
+                "outputTokens": { "total": 18 }
             }),
         ),
         // Enrichment: an errored call (shows the error badge).
@@ -222,14 +221,14 @@ data: [DONE]"#;
             "2026-08-14T09:25:15.000Z",
             "groq",
             "llama-3.3-70b-versatile",
-            vec![msg(Role::User, "hi")],
+            vec![LanguageModelMessage::user_text("hi")],
             Some("sess-err"),
             Some(0),
             OutcomeStatus::Error,
             None,
             "{}",
             1200,
-            serde_json::json!({ "input_tokens": null, "output_tokens": null }),
+            serde_json::json!({ "inputTokens": null, "outputTokens": null }),
         ),
         // Enrichment: an older successful call on a different model.
         recording(
@@ -237,7 +236,7 @@ data: [DONE]"#;
             "2026-08-14T09:10:05.000Z",
             "anthropic",
             "claude-3-5-sonnet-latest",
-            vec![msg(Role::User, "Write a haiku about Rust.")],
+            vec![LanguageModelMessage::user_text("Write a haiku about Rust.")],
             None,
             None,
             OutcomeStatus::Success,
@@ -245,8 +244,8 @@ data: [DONE]"#;
             "{\"choices\":[{\"message\":{\"content\":\"Ownership, borrowing — memory safe by design...\"}}]}",
             540,
             serde_json::json!({
-                "input_tokens": { "total": 42, "cache_read": 0 },
-                "output_tokens": { "total": 24 }
+                "inputTokens": { "total": 42, "cacheRead": 0 },
+                "outputTokens": { "total": 24 }
             }),
         ),
     ];

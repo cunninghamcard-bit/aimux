@@ -41,6 +41,29 @@ fn model(provider: &str, server: &MockServer) -> Box<dyn DecisionModel> {
     })
     .unwrap()
 }
+/// Type adaptation (stack): provider options are keyed objects.
+fn provider_options(
+    provider: &str,
+    options: Value,
+) -> Option<HashMap<String, serde_json::Map<String, Value>>> {
+    let Value::Object(options) = options else {
+        panic!("provider options must be an object");
+    };
+    Some(HashMap::from([(provider.to_string(), options)]))
+}
+/// Replay takes endpoint and credential from the caller's registry (RFC-0036
+/// stack): register the rebuilt connection under the recorded provider id.
+fn registry_with(
+    provider_id: &str,
+    provider: Box<dyn Provider>,
+) -> aimux_core::provider_registry::ProviderRegistry {
+    aimux_core::create_provider_registry(
+        [(provider_id.to_string(), std::sync::Arc::from(provider))]
+            .into_iter()
+            .collect(),
+        Default::default(),
+    )
+}
 struct Stop;
 impl Drop for Stop {
     fn drop(&mut self) {
@@ -79,9 +102,20 @@ async fn replay(
     );
     let server = MockServer::start().await;
     common::replay::mount_recording(&server, &recordings[0]).await;
-    let mut snapshot = recordings[0].provider.clone();
-    snapshot.base_url = Some(format!("{}/v1", server.uri()));
-    let rebuilt = aimux_providers::rebuild_decision_provider(&snapshot, Some("new-key")).unwrap();
+    let snapshot = recordings[0].provider.clone();
+    let registry = registry_with(
+        &snapshot.provider_id,
+        provider_handle(
+            provider,
+            Some("new-key".into()),
+            Some(ProviderOptions {
+                base_url: Some(format!("{}/v1", server.uri())),
+                ..Default::default()
+            }),
+        )
+        .unwrap(),
+    );
+    let rebuilt = aimux_providers::rebuild_decision_provider(&snapshot, &registry).unwrap();
     let again = replay_decision_with_model(&recordings[0], rebuilt.as_ref())
         .await
         .unwrap();
@@ -182,20 +216,18 @@ async fn conditional_skips_and_abstention_do_not_become_false_answers() {
         let mut response = fixture()["response"].clone();
         let mut expected = fixture()["request"].clone();
         if provider == "vllm" {
-            request.provider_options = Some(HashMap::from([(
-                "vllm".into(),
+            request.provider_options = provider_options(
+                "vllm",
                 json!({"samples":"auto","steps":4,"questions":{"severity":{"ask_if":{"team":["billing"]}}}}),
-            )]));
+            );
             expected["samples"] = json!("auto");
             expected["steps"] = json!(4);
             expected["questions"]["severity"]["ask_if"] = json!({"team":["billing"]});
             response["answers"]["severity"] = Value::Null;
             response["diagnostics"] = json!({"skipped":{"severity":{"because":"team","was":"support","wanted":["billing"]}}});
         } else {
-            request.provider_options = Some(HashMap::from([(
-                "laya".into(),
-                json!({"min_confidence":0.8,"lang":"en"}),
-            )]));
+            request.provider_options =
+                provider_options("laya", json!({"min_confidence":0.8,"lang":"en"}));
             expected["min_confidence"] = json!(0.8);
             expected["lang"] = json!("en");
             response["answers"]["severity"]["abstention"] = json!("abstained");
@@ -218,10 +250,10 @@ async fn conditional_skips_and_abstention_do_not_become_false_answers() {
 async fn sglang_native_decisions_keeps_label_mass_separate_from_confidence() {
     let server = MockServer::start().await;
     let mut request = options();
-    request.provider_options = Some(HashMap::from([(
-        "sglang".into(),
+    request.provider_options = provider_options(
+        "sglang",
         json!({"protocol":"decisions","temperature":0.7,"return_prompt_token_ids":true,"prompt_format_version":1}),
-    )]));
+    );
     let response = json!({"object":"decisions","model":"served-decision","prompt_format_version":1,"answers":{
         "urgent":{"type":"yes_no","probabilities":{"yes":0.75,"no":0.25},"label_mass":0.1},
         "team":{"type":"choice","choice":"support","probabilities":{"billing":0.25,"support":0.75},"label_mass":0.15,"prompt_token_ids":[1,2],"label_token_ids":[3,4]},
@@ -299,14 +331,14 @@ async fn sglang_systemone_reports_the_actual_readout_source_through_replay() {
 
 fn scoring_options(provider: &str) -> DecisionCallOptions {
     let mut request = options();
-    request.provider_options = Some(HashMap::from([(
-        provider.into(),
+    request.provider_options = provider_options(
+        provider,
         json!({"protocol":if provider=="sglang" {"score"} else {"generative_scoring"},"model_revision":"weights-commit","tokenizer_revision":"tokenizer-commit","prompt_format_version":"test-v1","encoded":{
             "urgent":{"prompt_token_ids":[11,12],"label_token_ids":[1,2]},
             "team":{"prompt_token_ids":[21,22],"label_token_ids":[3,4]},
             "severity":{"prompt_token_ids":[31,32],"label_token_ids":[5,6,7]}
         }}),
-    )]));
+    );
     request
 }
 
@@ -498,17 +530,14 @@ async fn unsupported_fields_and_bad_encodings_fail_before_http() {
         }
     }
     let mut request = options();
-    request.provider_options = Some(HashMap::from([(
-        "ollama".into(),
-        json!({"temperature":0.7}),
-    )]));
+    request.provider_options = provider_options("ollama", json!({"temperature":0.7}));
     assert!(
         decide(model("ollama", &server).as_ref(), request)
             .await
             .is_err()
     );
     let mut request = options();
-    request.provider_options = Some(HashMap::from([("vllm".into(), json!({"ask":["urgent"]}))]));
+    request.provider_options = provider_options("vllm", json!({"ask":["urgent"]}));
     assert!(
         decide(model("vllm", &server).as_ref(), request)
             .await
@@ -563,7 +592,6 @@ async fn retry_and_cancellation_use_shared_transport() {
 
 #[test]
 fn local_factories_and_wrapper_factories_preserve_credentials_for_replay() {
-    use aimux_core::Provider;
     for provider in ["ollama", "llamacpp", "localai", "laya", "sglang", "vllm"] {
         let handle = provider_handle(
             provider,
@@ -577,14 +605,21 @@ fn local_factories_and_wrapper_factories_preserve_credentials_for_replay() {
         let model = handle.decision_model("served-alias").unwrap();
         assert_eq!(model.provider(), provider);
         let record = model.config_snapshot();
-        let rebuilt = aimux_providers::rebuild_decision_provider(&record, None).unwrap();
+        assert_eq!(record.api_key_source.as_deref(), Some("none"));
+        let registry = registry_with(&record.provider_id, handle);
+        let rebuilt = aimux_providers::rebuild_decision_provider(&record, &registry).unwrap();
         assert_eq!(rebuilt.provider(), provider);
     }
-    let provider =
-        aimux_providers::VllmProvider::new(aimux_providers::VllmConfig::new("explicit-key"));
+    let provider = provider_handle("vllm", Some("explicit-key".into()), None).unwrap();
     let model = provider.decision_model("served-alias").unwrap();
-    assert_eq!(model.config_snapshot().api_key_source, "explicit");
-    assert!(aimux_providers::rebuild_decision_provider(&model.config_snapshot(), None).is_err());
+    assert_eq!(
+        model.config_snapshot().api_key_source.as_deref(),
+        Some("explicit")
+    );
+    // The explicit key is not in the recording: without a caller registration
+    // the model cannot be rebuilt.
+    let empty = aimux_core::create_provider_registry(Default::default(), Default::default());
+    assert!(aimux_providers::rebuild_decision_provider(&model.config_snapshot(), &empty).is_err());
 }
 
 #[tokio::test]

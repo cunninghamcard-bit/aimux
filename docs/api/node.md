@@ -1,6 +1,6 @@
 # aimux · Node.js API
 
-> Unified LLM service access layer — one API to access 325 AI providers
+> Unified LLM service access layer — one API to access AI providers
 
 Shared reference — parameter tables, result shapes, factory functions, and the
 feature coverage matrix — lives in the [API overview](../API.md).
@@ -21,31 +21,33 @@ console.log(result.text)
 
 ## Providers
 
-All 251 built-in OpenAI-compatible providers are registry-backed. Look them up
-by name; the `ProviderName` type is a string-literal union generated from
-`provider-registry.json`, so your IDE autocompletes and typo'd names fail
-type-checking:
+The vendor packages and 281 registry-backed OpenAI-compatible providers are
+reachable by string name; see [providers.md](providers.md) for the provider list:
 
 ```typescript
-import { provider, generateText, ProviderName } from '@arcships/aimux'
+import { provider, generateText } from '@arcships/aimux'
 
-// 推荐:ProviderName.groq 写法(IDE 补全 + 类型检查)
-const model = await provider(ProviderName.groq, undefined, 'llama-3.3-70b')
-// 字符串形式同样可用:
+const model = await provider('groq', undefined, 'llama-3.3-70b')
 const relay = await provider('groq', 'sk-...', 'llama-3.3-70b', {
   baseUrl: 'https://relay.example/v1',
-  maxRetries: 0,
 })
 const result = await generateText(model, 'Hello')
 ```
 
-`openai` / `anthropic` / `deepseek` factories remain (deepseek is now
-registry-backed). For custom providers not in the registry, build from the
-base classes with `createProvider`-style config via the base-URL override.
+`openai` / `anthropic` / `deepseek` factories remain; DeepSeek uses its own vendor
+chat model. Custom endpoints use a base-URL override with a compatible provider.
+`openai` and by-name `provider('openai', …)` select the Responses API.
 
-> **Scope:** `provider(name)` covers only the 251 registry OpenAI-compatible
-> providers; Anthropic/Google/multimodal/local → typed factories
-> (`anthropic(apiKey, model)`); custom endpoints → `baseUrl` override.
+The 3rd argument of every constructor is a base URL string or a
+`ProviderConfig` (`baseUrl`, `headers` as a JSON string, `organization`,
+`project`, and `params` — a `Record<string, string>` filling a preset's template
+parameters, e.g. `{ account_id: '…' }` for `cloudflare_workers_ai`).
+`maxRetries` and `bodyOverrides` are kept in the type only so that passing them
+throws `InvalidArgumentError`; retry is a per-call option
+(`maxRetries` in the call options).
+
+> **Scope:** `provider(name)` reaches vendor packages and the 281 preset rows;
+> typed factories remain available. Custom endpoints use the `baseUrl` override.
 > Full list: [providers.md](providers.md).
 
 ## Desktop and Electron compatibility
@@ -94,6 +96,7 @@ Error
       ├── JSONParseError / InvalidResponseDataError
       ├── NoSuchToolError / InvalidToolInputError / ToolCallRepairError  // tool-contract errors
       ├── InvalidArgumentError / InvalidPromptError
+      ├── LoadAPIKeyError / LoadSettingError   // no API key / required setting: envVar (+ description / settingName)
       ├── TokenExpiredError
       ├── UnsupportedFunctionalityError
       ├── NoSuchModelError / NoSuchProviderError
@@ -135,8 +138,9 @@ that carries them: `APICallError` adds `retryable` and optional `status` /
 error — or `'errorNotRetryable'` — a later attempt failed non-retryably),
 `errors` — the per-attempt history, oldest first, each itself an error from
 this hierarchy — and `lastError`; `TokenExpiredError` carries `status: 401`;
-`NoSuchModelError` adds `modelId` / `modelType`; and `NoSuchProviderError`
-adds `providerId`. Missing HTTP status and retry hints are absent rather than
+`NoSuchModelError` adds `modelId` / `modelType`; `NoSuchProviderError`
+adds `providerId`, `modelId`, `modelType` and `availableProviders`; and `LoadAPIKeyError` / `LoadSettingError` add `envVar`
+(the environment variable consulted) plus `description` / `settingName`. Missing HTTP status and retry hints are absent rather than
 represented by `-1`.
 
 ```typescript
@@ -163,7 +167,7 @@ try {
 ```
 
 The ts-rs wire type `AiMuxError` is only for payload unions inside
-`StreamPart`, not for throws.
+`TextStreamPart`, not for throws.
 
 ## Text Generation
 
@@ -174,16 +178,16 @@ const { openai, generateText } = require('@arcships/aimux')
 
 const model = await openai('sk-...', 'gpt-4o', 'https://api.openai.com/v1')
 const result = await generateText(model, 'Explain Rust ownership.', {
-  max_output_tokens: 100,
+  maxOutputTokens: 100,
   temperature: 0.7,
-  max_retries: 0,                          // disable retries for this call
-  timeout: { total_ms: 30_000, first_chunk_ms: 5_000, chunk_ms: 2_000 },
+  maxRetries: 0,                           // disable retries for this call
+  timeout: { totalMs: 30_000, firstChunkMs: 5_000, chunkMs: 2_000 },
 })
 
 console.log(result.text)           // generated text
 console.log(result.usage)          // token usage
-console.log(result.finish_reason)  // finish reason
-console.log(result.tool_calls)     // tool calls (if any)
+console.log(result.finishReason)   // finish reason
+console.log(result.toolCalls)      // tool calls (if any)
 ```
 
 Cancellation via `AbortSignal` (4th argument — works for both
@@ -207,8 +211,8 @@ optional `AbortBridge` (wrap a JS `AbortSignal`) as their last argument:
 // access structured content
 const result = await generateText(model, "...", { tools })
 const rawContent = result.raw.content
-const toolCallPart = rawContent.find(c => c.ToolCall)
-const reasoningPart = rawContent.find(c => c.Reasoning)
+const toolCallPart = rawContent.find(c => c.type === 'tool-call')
+const reasoningPart = rawContent.find(c => c.type === 'reasoning')
 ```
 
 ## Streaming Generation
@@ -220,10 +224,10 @@ const { openai, streamText } = require('@arcships/aimux')
 
 const model = await openai('sk-...', 'gpt-4o')
 for await (const part of streamText(model, 'Write a haiku about Rust.')) {
-  if (part.TextDelta) {
-    process.stdout.write(part.TextDelta.delta)
+  if (part.type === 'text-delta') {
+    process.stdout.write(part.delta)
   }
-  if (part.Finish) {
+  if (part.type === 'finish') {
     console.log('\n[done]')
   }
 }
@@ -243,7 +247,7 @@ const tools = [{
   type: 'function',
   name: 'get_weather',
   description: 'Get current weather',
-  input_schema: {
+  inputSchema: {
     type: 'object',
     properties: {
       location: { type: 'string', description: 'City name' }
@@ -253,9 +257,9 @@ const tools = [{
 }]
 
 const result = await generateText(model, "What's the weather in Tokyo?", { tools })
-if (result.tool_calls.length > 0) {
-  const call = result.tool_calls[0]
-  console.log(call.tool_name)     // get_weather
+if (result.toolCalls.length > 0) {
+  const call = result.toolCalls[0]
+  console.log(call.toolName)     // get_weather
   console.log(call.input)         // { location: "Tokyo" }
 }
 ```
@@ -273,13 +277,13 @@ JavaScript, after the model call and before the result is decoded, so it can
 ```typescript
 const result = await generateText(model, "What's the weather in Tokyo?", {
   tools,
-  repairToolCall: async ({ tool_call, error, input_schema, messages }) => {
-    // tool_call.input is the model's raw argument TEXT, not a parsed object.
+  repairToolCall: async ({ toolCall, error, inputSchema, messages }) => {
+    // toolCall.input is the model's raw argument TEXT, not a parsed object.
     const fixed = await generateText(model, [
       ...messages,
-      { role: 'user', content: `Rewrite these arguments to match ${JSON.stringify(input_schema)}: ${tool_call.input}` },
+      { role: 'user', content: `Rewrite these arguments to match ${JSON.stringify(inputSchema)}: ${toolCall.input}` },
     ])
-    return { ...tool_call, input: fixed.text }   // null → leave the call invalid
+    return { ...toolCall, input: fixed.text }   // null → leave the call invalid
   },
 })
 ```
@@ -291,7 +295,7 @@ Each invalid call is repaired at most once, and a call made without a tool set
 is never repaired.
 
 Both `generateText` and `streamText` support it — in the stream, the settled
-`ToolCall` part is replaced, while `ToolInputDelta` parts are the provider's raw
+`tool-call` part is replaced, while `tool-input-delta` parts are the provider's raw
 text and pass through untouched. `generateTextAsOpenai` supports it too: the
 OpenAI shape carries no `invalid` marker, so it repairs the native result and
 converts it (`Model.generateTextResultAsOpenai`). `streamTextAsOpenai` does not
@@ -303,7 +307,7 @@ reflect repair — its argument deltas are the provider's text, as in the AI SDK
 ```typescript
 const opts = {
   tools,
-  tool_choice: 'auto'        // 'auto' | 'none' | 'required' | { type: 'tool', toolName: 'get_weather' }
+  toolChoice: 'auto'         // 'auto' | 'none' | 'required' | { type: 'tool', toolName: 'get_weather' }
 }
 ```
 
@@ -316,12 +320,12 @@ const opts = {
 const result = await generateText(model, [
   { role: 'user', content: "What's the weather in Tokyo?" },
   { role: 'assistant', content: [{
-    type: 'tool_call', tool_call_id: 'call_abc',
-    tool_name: 'get_weather', input: { location: 'Tokyo' },
+    type: 'tool-call', toolCallId: 'call_abc',
+    toolName: 'get_weather', input: { location: 'Tokyo' },
   }] },
   { role: 'tool', content: [{
-    type: 'tool_result', tool_call_id: 'call_abc', tool_name: 'get_weather',
-    result: { temperature: 22, condition: 'sunny' },
+    type: 'tool-result', toolCallId: 'call_abc', toolName: 'get_weather',
+    output: { type: 'json', value: { temperature: 22, condition: 'sunny' } },
   }] },
 ], { tools })
 ```
@@ -354,14 +358,13 @@ const speaker = await openaiSpeech('sk-...', 'tts-1')
 const resultJson = await speaker.generate(JSON.stringify({
   text: 'Hello world!',
   voice: 'alloy',
-  output_format: 'mp3',
+  outputFormat: 'mp3',
 }))
 const result = JSON.parse(resultJson)
 
-// audio is in result.audio (base64 or binary)
-if (result.audio.Base64) {
-  fs.writeFileSync('out.mp3', Buffer.from(result.audio.Base64, 'base64'))
-}
+// result.audio is a base64 string or an array of byte values
+const audio = result.audio
+fs.writeFileSync('out.mp3', typeof audio === 'string' ? Buffer.from(audio, 'base64') : Buffer.from(audio))
 ```
 
 ## Speech to Text (STT)
@@ -392,13 +395,13 @@ const imager = await openaiImage('sk-...', 'dall-e-3')
 const resultJson = await imager.generate(JSON.stringify({
   prompt: 'A cute baby sea otter',
   n: 1,
-  provider_options: {},
+  providerOptions: {},
 }))
 const result = JSON.parse(resultJson)
 
-if (result.images.Base64) {
-  fs.writeFileSync('out.png', Buffer.from(result.images.Base64[0], 'base64'))
-}
+// result.images is an array of base64 strings, or an array of byte arrays
+const image = result.images[0]
+fs.writeFileSync('out.png', typeof image === 'string' ? Buffer.from(image, 'base64') : Buffer.from(image))
 ```
 
 Multimodal calls accept an optional `AbortBridge` as their last argument —
@@ -407,7 +410,7 @@ wrap the JS `AbortSignal` in one:
 ```typescript
 const controller = new AbortController()
 const resultJson = await imager.generate(
-  JSON.stringify({ prompt: 'A cute baby sea otter', n: 1, provider_options: {} }),
+  JSON.stringify({ prompt: 'A cute baby sea otter', n: 1, providerOptions: {} }),
   new AbortBridge(controller.signal),
 )
 controller.abort() // cancels the image call
@@ -424,14 +427,14 @@ const videor = await googleVideo('sk-...', 'veo-3.0')
 const resultJson = await videor.generate(JSON.stringify({
   prompt: 'A cat playing piano',
   n: 1,
-  poll: { interval_ms: 1_000, timeout_ms: 120_000 },
-  provider_options: {},
+  poll: { intervalMs: 1_000, timeoutMs: 120_000 },
+  providerOptions: {},
 }))
 const result = JSON.parse(resultJson)
 
-// result.videos is usually [{ Url: { url, media_type } }]
-if (result.videos[0].Url) {
-  console.log('Video URL:', result.videos[0].Url.url)
+// result.videos is usually [{ type: 'url', url, mediaType }]
+if (result.videos[0].type === 'url') {
+  console.log('Video URL:', result.videos[0].url)
 }
 ```
 
@@ -448,17 +451,17 @@ const { cohereReranking } = require('@arcships/aimux/raw')
 const reranker = await cohereReranking('sk-...', 'rerank-v3.0')
 const resultJson = await reranker.rerank(
   'What is Rust?',
-  // docs_json is the externally-tagged `RerankingDocuments` enum —
-  // `{ Object: { values } }` for JSON documents, `{ Text: { values } }` for plain strings
-  JSON.stringify({ Object: { values: [
+  // docs_json is the `type`-tagged `RerankingDocuments` enum —
+  // `{ type: 'object', values }` for JSON documents, `{ type: 'text', values }` for plain strings
+  JSON.stringify({ type: 'object', values: [
     { text: 'Rust is a systems programming language.' },
     { text: 'Rust is a chemical element.' },
-  ] } }),
+  ] }),
 )
 const result = JSON.parse(resultJson)
 
-// result.ranking sorted by relevance (each rank: { index, relevance_score })
-result.ranking.forEach(r => console.log(r.index, r.relevance_score))
+// result.ranking sorted by relevance (each rank: { index, relevanceScore })
+result.ranking.forEach(r => console.log(r.index, r.relevanceScore))
 ```
 
 ## Search
@@ -487,7 +490,7 @@ const fileBase64 = fs.readFileSync('doc.pdf').toString('base64')
 const resultJson = await files.uploadFile(fileBase64, 'application/pdf')
 const result = JSON.parse(resultJson)
 
-console.log(result.provider_reference)  // { openai: 'file-xxx' }
+console.log(result.providerReference)  // { openai: 'file-xxx' }
 ```
 
 ## API Surface
@@ -512,7 +515,7 @@ The `@arcships/aimux` package has two layers:
 | `RerankingModel` | `cohereReranking` | `rerank(query, docsJson, optsJson?)` |
 | `SearchModel` | `tavilySearch` | `search(query, optsJson?)` |
 | `Files` | `openaiFiles(apiKey, baseUrl?)` | `uploadFile(dataBase64, mediaType, optsJson?)` |
-| `StreamTextGenerator` | returned by `Model.streamText` | async iterable of `StreamPart` JSON strings |
+| `StreamTextGenerator` | returned by `Model.streamText` | async iterable of `TextStreamPart` JSON strings |
 
 All factories return a `Promise` and accept an optional `baseUrl` as the last
 parameter. All native methods take and return JSON strings — the typed wrapper
@@ -527,7 +530,7 @@ them, not a local copy):
 
 ```typescript
 import type {
-  GenerateTextOptions, GenerateTextResult, StreamPart, ModelMessage,
+  GenerateTextOptions, GenerateTextResult, TextStreamPart, ModelMessage,
   Tool, ToolChoice, ToolCall, ToolResult, Usage, FinishReason, Warning,
   Role, MessageContent, ContentPart, ResponseFormat, ReasoningEffort,
   GenerateResult, FunctionTool,
@@ -537,37 +540,42 @@ import type {
 ```typescript
 // bindings/node/src/types/GenerateTextResult.ts (ts-rs generated)
 export type GenerateTextResult = {
-  text: string                            // generated text (all Text variants concatenated)
-  tool_calls: Array<ToolCall>             // tool call list (extracted from content)
-  finish_reason: FinishReason             // finish reason
+  text: string                            // generated text (all text parts concatenated)
+  toolCalls: Array<ToolCall>              // tool call list (extracted from content)
+  finishReason: FinishReason              // finish reason
   usage: Usage                            // token usage
   warnings: Array<Warning>                // warnings
   raw: GenerateResult                     // raw provider result (includes full content)
   reasoning: Array<ReasoningPart>         // reasoning / thinking segments
-  reasoning_text: string                  // the reasoning segments concatenated
-  sources: Array<SourcePart>              // sources / citations (search-preview models)
-  files: Array<FilePart>                  // files generated by the model
-  response_messages: Array<ModelMessage>  // assistant messages ready for the next turn
-  raw_finish_reason: string | null        // provider's own finish-reason string
-  provider_metadata: JsonValue | null     // mirrored from raw.provider_metadata
-  response: ResponseMetadata              // mirrored from raw.response (id, timestamp, model_id)
-  total_usage: Usage                      // usage across all steps (equals usage in single-step mode)
+  reasoningText: string                   // the reasoning segments concatenated
+  sources: Array<Source>                  // sources / citations (search-preview models)
+  files: Array<GeneratedFile>             // files generated by the model
+  responseMessages: Array<ModelMessage>   // assistant messages ready for the next turn
+  rawFinishReason?: string                // provider's own finish-reason string
+  providerMetadata?: Record<string, Record<string, JsonValue>>  // mirrored from raw.providerMetadata
+  request: RequestInfo                    // sent request body
+  response: ResponseInfo                  // id, timestamp, modelId, headers and body
+  totalUsage: Usage                       // usage across all steps (equals usage in single-step mode)
 }
 ```
 
-`StreamPart` is an external-tagged union of 18 variants (each is a one-key
-object — type narrowing via `part.TextDelta` etc. works out of the box):
+`streamText` emits `TextStreamPart`, a union tagged by `type` (type narrowing via
+`part.type === 'text-delta'` etc. works out of the box):
 
 ```typescript
-// bindings/node/src/types/StreamPart.ts (variants, abridged)
-export type StreamPart =
-  | { StreamStart: ... } | { TextStart: ... } | { TextDelta: ... } | { TextEnd: ... }
-  | { ToolInputStart: ... } | { ToolInputDelta: ... } | { ToolInputEnd: ... }
-  | { ToolCall: ... } | { ToolResult: ... }
-  | { ReasoningStart: ... } | { ReasoningDelta: ... } | { ReasoningEnd: ... }
-  | { ResponseMetadata: ... } | { Source: ... } | { Finish: ... }
-  | { Error: ... } | { Raw: ... } | { File: ... }
+// bindings/node/src/types/TextStreamPart.ts (variants, abridged)
+export type TextStreamPart =
+  | { type: 'stream-start', ... } | { type: 'text-start', ... } | { type: 'text-delta', ... } | { type: 'text-end', ... }
+  | { type: 'tool-input-start', ... } | { type: 'tool-input-delta', ... } | { type: 'tool-input-end', ... }
+  | { type: 'tool-call', ... } | { type: 'tool-result', ... }
+  | { type: 'reasoning-start', ... } | { type: 'reasoning-delta', ... } | { type: 'reasoning-end', ... }
+  | { type: 'source', ... } | { type: 'finish', ... } | { type: 'finish-step', ... }
+  | { type: 'error', ... } | { type: 'raw', ... } | { type: 'file', ... }
+  | { type: 'reasoning-file', ... } | { type: 'custom', ... } | { type: 'tool-approval-request', ... }
 ```
+
+Provider-layer `StreamPart` also has `ResponseMetadata`; the call layer
+consumes those events internally.
 
 The full declarations live in `bindings/node/src/types/` — `GenerateTextOptions.ts`,
 `ModelMessage.ts`, `Tool.ts`, `ToolChoice.ts`, `ContentPart.ts`,

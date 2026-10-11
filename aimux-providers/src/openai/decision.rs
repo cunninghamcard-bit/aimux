@@ -3,38 +3,44 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use aimux_core::AiMuxError;
 use aimux_core::decision_model::*;
-use aimux_core::recording::ProviderRecord;
-use aimux_core::types::{TokenUsage, Usage};
+use aimux_core::types::{InputTokenUsage, OutputTokenUsage, Usage};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::OpenAIConfig;
+use super::config::OpenAIModelConfig;
+use crate::decision_support::DecisionEndpoint;
 
 pub struct OpenAIDecisionModel {
-    config: OpenAIConfig,
+    endpoint: DecisionEndpoint,
     model_id: String,
+    retry_config: aimux_core::retry::RetryConfig,
 }
 
 impl OpenAIDecisionModel {
-    /// Create a native Decisions handle. The server validates model availability.
+    /// Create a native Decisions handle over the provider's connection config.
+    /// The server validates model availability. Public construction goes
+    /// through [`OpenAIProvider::decision`](super::OpenAIProvider::decision).
     /// # Errors
-    /// Rejects an empty ID, another provider's config, and generation overrides.
-    pub fn new(model_id: &str, config: OpenAIConfig) -> Result<Self, AiMuxError> {
+    /// Rejects an empty ID.
+    pub(crate) fn new(model_id: &str, config: OpenAIModelConfig) -> Result<Self, AiMuxError> {
         if model_id.trim().is_empty() {
             return Err(AiMuxError::InvalidArgument(
                 "decision model ID cannot be empty".into(),
             ));
         }
-        if config.provider != "openai" || config.body_overrides.is_some() {
-            return Err(AiMuxError::UnsupportedFunctionality(
-                "native OpenAI decisions require an OpenAI config without body_overrides".into(),
-            ));
-        }
         Ok(Self {
-            config,
+            endpoint: DecisionEndpoint::OpenAI(config),
             model_id: model_id.into(),
+            retry_config: aimux_core::retry::RetryConfig::default(),
         })
+    }
+
+    /// Replace the retry settings [`decide`] uses for this model (#226).
+    #[must_use]
+    pub fn with_retry_config(mut self, retry_config: aimux_core::retry::RetryConfig) -> Self {
+        self.retry_config = retry_config;
+        self
     }
 }
 
@@ -182,9 +188,10 @@ fn request_body(model: &str, options: &DecisionCallOptions) -> Result<Value, AiM
         .as_ref()
         .and_then(|p| p.get("openai"))
     {
-        let parsed: ProviderOptions = serde_json::from_value(openai.clone()).map_err(|error| {
-            AiMuxError::InvalidArgument(format!("OpenAI decision options: {error}"))
-        })?;
+        let parsed: ProviderOptions = serde_json::from_value(Value::Object(openai.clone()))
+            .map_err(|error| {
+                AiMuxError::InvalidArgument(format!("OpenAI decision options: {error}"))
+            })?;
         if let Some(identifier) = parsed.safety_identifier {
             if identifier.chars().count() > 128 {
                 return Err(AiMuxError::InvalidArgument(
@@ -349,7 +356,7 @@ fn convert_response(
         let written = count(&raw["input_tokens_details"]["cache_write_tokens"]);
         let reasoning = count(&raw["output_tokens_details"]["reasoning_tokens"]);
         Usage {
-            input_tokens: TokenUsage {
+            input_tokens: InputTokenUsage {
                 total: input,
                 no_cache: input
                     .zip(cached)
@@ -357,17 +364,15 @@ fn convert_response(
                     .and_then(|((total, read), write)| total.checked_sub(read)?.checked_sub(write)),
                 cache_read: cached,
                 cache_write: written,
-                ..Default::default()
             },
-            output_tokens: TokenUsage {
+            output_tokens: OutputTokenUsage {
                 total: output,
                 text: output
                     .zip(reasoning)
                     .and_then(|(total, reasoning)| total.checked_sub(reasoning)),
                 reasoning,
-                ..Default::default()
             },
-            raw: Some(raw),
+            raw: raw.as_object().cloned(),
         }
     });
     let result = DecisionResult {
@@ -379,7 +384,12 @@ fn convert_response(
         probability_source: DecisionProbabilitySource::Native,
         usage,
         latency_ms: None,
-        provider_metadata: Some(HashMap::from([("openai".into(), raw.clone())])),
+        provider_metadata: Some(HashMap::from([(
+            "openai".into(),
+            raw.as_object().cloned().ok_or_else(|| {
+                AiMuxError::InvalidResponseData("decision response must be an object".into())
+            })?,
+        )])),
         response: Some(DecisionResponse {
             headers: Some(headers),
             body: Some(raw),
@@ -398,7 +408,15 @@ impl DecisionModel for OpenAIDecisionModel {
         &self.model_id
     }
     fn retry_config(&self) -> aimux_core::retry::RetryConfig {
-        self.config.retry_config
+        self.retry_config
+    }
+    fn config_snapshot(&self) -> aimux_core::recording::ProviderRecord {
+        self.endpoint.snapshot(
+            self.provider(),
+            self.model_id(),
+            self.retry_config,
+            json!({"decision_protocol":"openai_decisions", "decision_capabilities":self.capabilities()}),
+        )
     }
     fn capabilities(&self) -> DecisionCapabilities {
         DecisionCapabilities {
@@ -417,18 +435,10 @@ impl DecisionModel for OpenAIDecisionModel {
             max_score_levels: None,
         }
     }
-    fn config_snapshot(&self) -> ProviderRecord {
-        let mut record =
-            super::config_snapshot_from_config(self.provider(), self.model_id(), &self.config);
-        record.profile = Some(
-            json!({"decision_protocol":"openai_decisions", "decision_capabilities":self.capabilities()}),
-        );
-        record
-    }
     async fn do_decide(&self, options: &DecisionCallOptions) -> Result<DecisionResult, AiMuxError> {
         let body = request_body(&self.model_id, options)?;
-        let url = format!("{}/decisions", self.config.base_url.trim_end_matches('/'));
-        crate::decision_support::post(&self.config, options, &url, body, |raw, headers| {
+        let url = format!("{}/decisions", self.endpoint.base_url()?);
+        crate::decision_support::post(&self.endpoint, options, &url, body, |raw, headers| {
             let data = serde_json::from_value(raw.clone())
                 .map_err(|e| crate::decision_support::invalid(format!("OpenAI decisions: {e}")))?;
             convert_response(data, raw, headers, options)

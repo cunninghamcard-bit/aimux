@@ -163,24 +163,18 @@ impl TraceLayer {
             .session_id
             .clone()
             .or_else(|| self.default_session.clone());
-        // B1: scope_key isolates by (provider, base_url, model_id) — not just
-        // model_id — so two TraceLayers over the same model_id but different
-        // providers (or base_urls) sharing one RingTraceStore never cross-match
-        // their LCP history. `base_url` comes from the inner model's config
-        // snapshot; providers that only report a minimal snapshot omit it, in
-        // which case provider + model_id still isolate the scope. The default
-        // `scope_salt` stays process-level (set in `new` / `with_default_session`).
+        // B1: scope_key isolates by (provider, model_id), so two TraceLayers
+        // over the same model_id but different providers sharing one
+        // RingTraceStore never cross-match their LCP history. A model's
+        // `provider()` string already carries the settings-level name, so two
+        // endpoints of one vendor stay apart when they are given different
+        // provider names. The default `scope_salt` stays process-level (set in
+        // `new` / `with_default_session`).
         let provider = self.inner.provider();
         let model_id = self.inner.model_id();
-        let base_url = self.inner.config_snapshot().base_url;
-        let mut scope_bytes = Vec::with_capacity(
-            provider.len() + model_id.len() + base_url.as_deref().map_or(0, str::len),
-        );
+        let mut scope_bytes = Vec::with_capacity(provider.len() + model_id.len());
         scope_bytes.extend_from_slice(provider.as_bytes());
         scope_bytes.extend_from_slice(model_id.as_bytes());
-        if let Some(b) = &base_url {
-            scope_bytes.extend_from_slice(b.as_bytes());
-        }
         let scope_key = hash::hash64(self.scope_salt, &scope_bytes);
         let sent_at_unix_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -226,7 +220,7 @@ impl RecordCtx {
             output_total: usage.output_tokens.total.map(u64::from),
             output_text: usage.output_tokens.text.map(u64::from),
             output_reasoning: usage.output_tokens.reasoning.map(u64::from),
-            raw: usage.raw.clone(),
+            raw: usage.raw.clone().map(serde_json::Value::Object),
         }
     }
 
@@ -505,10 +499,6 @@ impl<S> Drop for TraceRecordingStream<S> {
 
 #[async_trait]
 impl LanguageModel for TraceLayer {
-    fn specification_version(&self) -> &'static str {
-        "v4"
-    }
-
     fn provider(&self) -> &str {
         self.inner.provider()
     }
@@ -517,24 +507,27 @@ impl LanguageModel for TraceLayer {
         self.inner.model_id()
     }
 
-    fn retry_config(&self) -> crate::retry::RetryConfig {
-        self.inner.retry_config()
-    }
-
-    /// RFC-0023 §3.3: transparent decorators must forward the inner snapshot
-    /// (otherwise recording sees the decorator's minimal record).
-    fn config_snapshot(&self) -> crate::recording::ProviderRecord {
-        self.inner.config_snapshot()
+    fn supported_urls(&self) -> crate::language_model::SupportedUrls {
+        self.inner.supported_urls()
     }
 
     async fn do_generate(&self, options: &CallOptions) -> Result<GenerateResult, AiMuxError> {
         let ctx = self.make_record_ctx(options, None, None, Arc::new(AtomicU64::new(u64::MAX)));
         match self.inner.do_generate(options).await {
             Ok(result) => {
-                let request_id = result.response.id.clone();
+                let request_id = result
+                    .response
+                    .as_ref()
+                    .and_then(|response| response.id.clone());
                 let mut rec_ctx = ctx;
-                rec_ctx.request_body = result.request_body.clone();
-                rec_ctx.response_headers = result.response_headers.clone();
+                rec_ctx.request_body = result
+                    .request
+                    .as_ref()
+                    .and_then(|request| request.body.clone());
+                rec_ctx.response_headers = result
+                    .response
+                    .as_ref()
+                    .and_then(|response| response.headers.clone());
                 rec_ctx.record(&result.usage, None, request_id);
                 Ok(result)
             }
@@ -558,8 +551,14 @@ impl LanguageModel for TraceLayer {
         };
 
         let rec_ctx = Arc::new(RecordCtx {
-            request_body: result.request_body.clone(),
-            response_headers: result.response_headers.clone(),
+            request_body: result
+                .request
+                .as_ref()
+                .and_then(|request| request.body.clone()),
+            response_headers: result
+                .response
+                .as_ref()
+                .and_then(|response| response.headers.clone()),
             ..ctx
         });
         let ttft_obs = ttft.clone();
@@ -573,7 +572,9 @@ impl LanguageModel for TraceLayer {
                     &item,
                     Ok(StreamPart::TextDelta { .. })
                         | Ok(StreamPart::ReasoningDelta { .. })
-                        | Ok(StreamPart::ToolCall { .. })
+                        | Ok(StreamPart::ToolCall(_))
+                        | Ok(StreamPart::File(_))
+                        | Ok(StreamPart::ReasoningFile(_))
                 );
                 if is_model_output {
                     ttft_obs.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
@@ -595,8 +596,8 @@ impl LanguageModel for TraceLayer {
 
         Ok(StreamResult {
             stream: Box::pin(guarded),
-            request_body: result.request_body,
-            response_headers: result.response_headers,
+            request: result.request,
+            response: result.response,
         })
     }
 }

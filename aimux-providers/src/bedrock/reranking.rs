@@ -5,7 +5,7 @@
 //!
 //! Uses the Bedrock Agent Runtime `/rerank` endpoint.
 
-use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -16,11 +16,13 @@ use aimux_core::reranking_model::{
     RerankingCallOptions, RerankingDocuments, RerankingModel, RerankingRank, RerankingResponse,
     RerankingResult,
 };
+use aimux_core::shared::SharedProviderOptions;
 
-use aimux_provider_utils::{HttpBody, HttpRequest, RetryConfig};
+use aimux_provider_utils::HttpBody;
 
-use super::BedrockAuth;
-use super::sigv4::sign_request;
+use super::Auth;
+use super::options;
+use crate::shared::EndpointConfig;
 
 /// Bedrock provider-specific reranking options.
 #[derive(Debug, Clone, Default)]
@@ -30,13 +32,21 @@ struct BedrockRerankingOptions {
 }
 
 fn parse_bedrock_reranking_options(
-    provider_options: Option<&HashMap<String, Value>>,
-) -> BedrockRerankingOptions {
+    provider_options: Option<&SharedProviderOptions>,
+) -> Result<BedrockRerankingOptions, AiMuxError> {
     let mut opts = BedrockRerankingOptions::default();
     if let Some(po) = provider_options {
-        // Prefer "amazonBedrock"; fall back to "bedrock".
-        let bedrock = po.get("amazonBedrock").or_else(|| po.get("bedrock"));
+        let bedrock = options::read(Some(po));
         if let Some(bedrock) = bedrock {
+            if bedrock.get("nextToken").is_some_and(|v| !v.is_string())
+                || bedrock
+                    .get("additionalModelRequestFields")
+                    .is_some_and(|v| !v.is_object())
+            {
+                return Err(AiMuxError::InvalidArgument(
+                    "invalid amazonBedrock provider options".into(),
+                ));
+            }
             if let Some(token) = bedrock.get("nextToken").and_then(|v| v.as_str()) {
                 opts.next_token = Some(token.to_string());
             }
@@ -45,7 +55,7 @@ fn parse_bedrock_reranking_options(
             }
         }
     }
-    opts
+    Ok(opts)
 }
 
 /// The response from the Bedrock `/rerank` endpoint.
@@ -67,60 +77,17 @@ struct BedrockRerankingResult {
 /// `Client` internally (RFC-0009 §4.1).
 pub struct BedrockRerankingModel {
     model_id: String,
-    base_url: String,
-    region: String,
-    auth: BedrockAuth,
-    retry_config: RetryConfig,
+    config: EndpointConfig,
+    /// The region of a request (the model ARN names it), resolved per request.
+    auth: Arc<Auth>,
 }
 
 impl BedrockRerankingModel {
-    #[must_use]
-    pub fn new(model_id: String, base_url: String, region: String, auth: BedrockAuth) -> Self {
+    pub(crate) fn from_config(model_id: String, config: EndpointConfig, auth: Arc<Auth>) -> Self {
         Self {
             model_id,
-            base_url,
-            region,
+            config,
             auth,
-            retry_config: RetryConfig::default(),
-        }
-    }
-
-    pub(crate) fn with_retry_config(mut self, retry_config: RetryConfig) -> Self {
-        self.retry_config = retry_config;
-        self
-    }
-
-    fn endpoint(&self) -> String {
-        format!("{}/rerank", self.base_url)
-    }
-
-    fn build_headers(
-        &self,
-        body: &str,
-        url: &str,
-        extra: Option<&HashMap<String, String>>,
-    ) -> Result<Vec<(String, String)>, AiMuxError> {
-        let mut extra_headers: Vec<(String, String)> = Vec::new();
-        if let Some(extra) = extra {
-            for (k, v) in extra {
-                extra_headers.push((k.clone(), v.clone()));
-            }
-        }
-
-        match &self.auth {
-            BedrockAuth::BearerToken(token) => {
-                let mut headers = vec![("Authorization".to_string(), format!("Bearer {token}"))];
-                headers.extend(extra_headers);
-                Ok(headers)
-            }
-            BedrockAuth::SigV4(creds) => {
-                let signed = sign_request(creds, "bedrock", "POST", url, body, &extra_headers);
-                let mut headers: Vec<(String, String)> = Vec::new();
-                for (k, v) in &signed.headers {
-                    headers.push((k.clone(), v.clone()));
-                }
-                Ok(headers)
-            }
         }
     }
 }
@@ -128,26 +95,23 @@ impl BedrockRerankingModel {
 #[async_trait]
 impl RerankingModel for BedrockRerankingModel {
     fn provider(&self) -> &str {
-        "amazon-bedrock"
+        &self.config.provider
     }
 
     fn model_id(&self) -> &str {
         &self.model_id
     }
 
-    fn retry_config(&self) -> aimux_core::retry::RetryConfig {
-        self.retry_config
-    }
-
     async fn do_rerank(
         &self,
         options: &RerankingCallOptions,
     ) -> Result<RerankingResult, AiMuxError> {
-        let bedrock_options = parse_bedrock_reranking_options(options.provider_options.as_ref());
+        let bedrock_options = parse_bedrock_reranking_options(options.provider_options.as_ref())?;
 
+        let region = self.auth.region()?;
         let model_arn = format!(
-            "arn:aws:bedrock:{}::foundation-model/{}",
-            self.region, self.model_id
+            "arn:aws:bedrock:{region}::foundation-model/{}",
+            self.model_id
         );
 
         // Build sources array.
@@ -190,12 +154,16 @@ impl RerankingModel for BedrockRerankingModel {
                     "modelConfiguration": {
                         "modelArn": model_arn
                     },
-                    "numberOfResults": options.top_n
                 },
                 "type": "BEDROCK_RERANKING_MODEL"
             },
             "sources": sources
         });
+
+        if let Some(top_n) = options.top_n {
+            body["rerankingConfiguration"]["bedrockRerankingConfiguration"]["numberOfResults"] =
+                json!(top_n);
+        }
 
         if let Some(ref token) = bedrock_options.next_token {
             body["nextToken"] = json!(token);
@@ -205,20 +173,12 @@ impl RerankingModel for BedrockRerankingModel {
                 ["additionalModelRequestFields"] = fields.clone();
         }
 
+        let exchange = self.config.exchange(options.headers.as_ref()).await?;
         let body_str = serde_json::to_string(&body).unwrap_or_default();
-        let url = self.endpoint();
-        let headers = self.build_headers(&body_str, &url, options.headers.as_ref())?;
+        let url = exchange.url("/rerank");
 
         let resp = aimux_provider_utils::post_to_api(
-            HttpRequest {
-                url,
-                headers,
-
-                abort_signal: options.abort_signal.clone(),
-                call_id: None,
-                recording_context: None,
-                ..Default::default()
-            },
+            exchange.request(url, options),
             HttpBody::Bytes(body_str.into_bytes(), "application/json".to_string()),
             aimux_provider_utils::create_json_response_handler::<BedrockRerankingResponse>(),
             super::bedrock_failed_response_handler(),

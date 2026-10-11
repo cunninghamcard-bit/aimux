@@ -5,8 +5,6 @@
 //!
 //! Endpoint: `POST {base_url}/embeddings`
 
-use std::collections::HashMap;
-
 use async_trait::async_trait;
 use serde_json::{Map, Value, json};
 
@@ -16,53 +14,28 @@ use aimux_core::embedding_model::{
 use aimux_core::error::AiMuxError;
 use aimux_core::shared::SharedProviderOptions;
 
-use aimux_provider_utils::HttpRequest;
-
-use super::MistralConfig;
+use crate::shared::EndpointConfig;
 
 /// A Mistral embedding model (e.g. `"mistral-embed"`).
 pub struct MistralEmbeddingModel {
     model_id: String,
-    config: MistralConfig,
+    config: EndpointConfig,
 }
 
 impl MistralEmbeddingModel {
-    #[must_use]
-    pub fn new(model_id: String, config: MistralConfig) -> Self {
+    pub(crate) fn from_config(model_id: String, config: EndpointConfig) -> Self {
         Self { model_id, config }
-    }
-
-    fn build_headers(&self, extra: Option<&HashMap<String, String>>) -> HashMap<String, String> {
-        let mut headers = HashMap::new();
-        headers.insert(
-            "Authorization".to_string(),
-            format!("Bearer {}", self.config.api_key),
-        );
-        if let Some(extra) = extra {
-            for (k, v) in extra {
-                headers.insert(k.clone(), v.clone());
-            }
-        }
-        headers
-    }
-
-    fn endpoint(&self) -> String {
-        format!("{}/embeddings", self.config.base_url)
     }
 }
 
 #[async_trait]
 impl EmbeddingModel for MistralEmbeddingModel {
     fn provider(&self) -> &str {
-        "mistral"
+        &self.config.provider
     }
 
     fn model_id(&self) -> &str {
         &self.model_id
-    }
-
-    fn retry_config(&self) -> aimux_core::retry::RetryConfig {
-        self.config.retry_config
     }
 
     fn max_embeddings_per_call(&self) -> Option<u32> {
@@ -77,7 +50,15 @@ impl EmbeddingModel for MistralEmbeddingModel {
         &self,
         options: &EmbeddingCallOptions,
     ) -> Result<EmbeddingResult, AiMuxError> {
-        let mistral_options = parse_mistral_provider_options(options.provider_options.as_ref());
+        if options.values.len() > 32 {
+            return Err(AiMuxError::InvalidArgument(format!(
+                "{} model {} supports at most 32 embeddings per call; received {}",
+                self.provider(),
+                self.model_id,
+                options.values.len()
+            )));
+        }
+        let mistral_options = parse_mistral_provider_options(options.provider_options.as_ref())?;
 
         let mut body = Map::new();
         body.insert("model".to_string(), json!(self.model_id));
@@ -93,16 +74,10 @@ impl EmbeddingModel for MistralEmbeddingModel {
         }
         body.insert("encoding_format".to_string(), json!("float"));
 
-        let headers = self.build_headers(options.headers.as_ref());
-
-        let mut header_list: Vec<(String, String)> = headers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        header_list.push(("Content-Type".to_string(), "application/json".to_string()));
+        let exchange = self.config.exchange(options.headers.as_ref()).await?;
 
         let resp = aimux_provider_utils::post_json_to_api(
-            HttpRequest::new(self.endpoint(), header_list, options),
+            exchange.request(exchange.url("/embeddings"), options),
             Value::Object(body),
             aimux_provider_utils::create_json_response_handler(),
             super::mistral_failed_response_handler(),
@@ -156,23 +131,46 @@ impl EmbeddingModel for MistralEmbeddingModel {
 
 struct MistralEmbeddingProviderOptions {
     metadata: Option<Value>,
-    output_dimension: Option<u32>,
+    output_dimension: Option<Value>,
     output_dtype: Option<String>,
 }
 
 fn parse_mistral_provider_options(
     options: Option<&SharedProviderOptions>,
-) -> MistralEmbeddingProviderOptions {
-    let provider_opts = options.and_then(|opts| opts.get("mistral"));
-    MistralEmbeddingProviderOptions {
-        metadata: provider_opts.and_then(|o| o.get("metadata")).cloned(),
-        output_dimension: provider_opts
-            .and_then(|o| o.get("outputDimension"))
-            .and_then(serde_json::Value::as_u64)
-            .map(|d| d as u32),
-        output_dtype: provider_opts
-            .and_then(|o| o.get("outputDtype"))
-            .and_then(|d| d.as_str())
-            .map(std::string::ToString::to_string),
+) -> Result<MistralEmbeddingProviderOptions, AiMuxError> {
+    let provider_opts = super::options::mistral_options(options);
+    let metadata = provider_opts.and_then(|o| o.get("metadata")).cloned();
+    let output_dimension = provider_opts
+        .and_then(|o| o.get("outputDimension"))
+        .cloned();
+    let output_dtype = provider_opts.and_then(|o| o.get("outputDtype"));
+    if metadata.as_ref().is_some_and(|value| !value.is_object()) {
+        return Err(AiMuxError::InvalidArgument(
+            "mistral.metadata must be a record".into(),
+        ));
     }
+    if output_dimension.as_ref().is_some_and(|value| {
+        !value.as_f64().is_some_and(|number| {
+            number > 0.0 && number.fract() == 0.0 && number <= 9_007_199_254_740_991.0
+        })
+    }) {
+        return Err(AiMuxError::InvalidArgument(
+            "mistral.outputDimension must be a positive integer".into(),
+        ));
+    }
+    if output_dtype.is_some_and(|value| {
+        !matches!(
+            value.as_str(),
+            Some("float" | "int8" | "uint8" | "binary" | "ubinary")
+        )
+    }) {
+        return Err(AiMuxError::InvalidArgument(
+            "mistral.outputDtype must be float, int8, uint8, binary, or ubinary".into(),
+        ));
+    }
+    Ok(MistralEmbeddingProviderOptions {
+        metadata,
+        output_dimension,
+        output_dtype: output_dtype.and_then(Value::as_str).map(str::to_owned),
+    })
 }

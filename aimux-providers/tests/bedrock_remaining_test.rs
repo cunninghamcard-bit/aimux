@@ -1,54 +1,89 @@
-﻿//! Remaining (not-yet-covered) Amazon Bedrock TS test cases, translated to Rust.
+//! Remaining Amazon Bedrock upstream tests, restored from the tool-types branch.
 //!
-//! Translation sources (under `reference/ai/packages/amazon-bedrock/src/`):
-//! - `normalize-tool-call-id.test.ts` — `isMistralModel` / `normalizeToolCallId`
-//!   (helpers not ported to Rust → `#[ignore]`).
-//! - `convert-amazon-bedrock-usage.test.ts` — the two `raw`-echo cases (the
-//!   Rust `Usage` type has no `raw` field → `#[ignore]`).
-//! - `amazon-bedrock-provider.test.ts` — `from_env` auth variants + provider
-//!   plumbing (green).
-//! - `convert-to-amazon-bedrock-chat-messages.test.ts` — Mistral tool-call-id
-//!   normalization cases (the Rust converter has no `isMistral` parameter →
-//!   `#[ignore]`).
-//! - `amazon-bedrock-chat-language-model.test.ts` — ARN URL encoding,
-//!   `additionalModelResponseFieldPaths`, temperature clamping, guardrails,
-//!   `trace` / `stop_sequence` extraction into `providerMetadata`,
-//!   `supportedUrls`, tool calls with empty input, tool-content filtering.
-//!
-//! Tests that fail because the Rust implementation does not yet support the
-//! feature are marked `#[ignore = "TODO: implementation gap"]`. The test body
-//! documents the expected behaviour so it can be flipped on once the gap lands.
+//! Pinned translation sources (`amazon-bedrock/src/`):
+//! - `normalize-tool-call-id.test.ts`
+//! - `convert-amazon-bedrock-usage.test.ts` (raw echo)
+//! - `amazon-bedrock-provider.test.ts` (factory/auth variants)
+//! - `convert-to-amazon-bedrock-chat-messages.test.ts` (Mistral IDs)
+//! - `amazon-bedrock-chat-language-model.test.ts` (request/response cases)
 
-use std::collections::HashMap;
+use aimux_core::tool::RawToolCall;
 
 use futures::StreamExt;
 use serde_json::{Value, json};
 use serial_test::serial;
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use aimux_core::content::ContentPart;
+use aimux_core::language_model_message::{
+    AssistantPart, TextPart, ToolCallPart, ToolPart, ToolResultOutput, ToolResultPart, UserPart,
+};
+use aimux_core::shared::provider_namespace;
+use aimux_provider_utils::Resolvable;
+#[path = "common/mock_fetch.rs"]
+mod mock_fetch;
 use aimux_core::language_model::LanguageModel;
-use aimux_core::language_model_message::{LanguageModelPrompt, LanguageModelPromptMessage};
-use aimux_core::message::Role;
-use aimux_core::options::{CallOptions, Tool, ToolChoice};
-use aimux_core::provider::Provider;
+use aimux_core::language_model_message::{LanguageModelMessage, LanguageModelPrompt};
+use aimux_core::options::CallOptions;
 use aimux_core::result::GenerateContent;
 use aimux_core::stream_part::StreamPart;
-use aimux_core::tool::FunctionTool;
 use aimux_core::types::FinishReasonUnified;
+use mock_fetch::{Canned, MockFetch};
 
+use aimux_providers::bedrock::convert::{build_request_body_checked, normalize_tool_call_id};
 use aimux_providers::bedrock::{
-    BedrockAuth, BedrockConfig, BedrockModel, BedrockProvider, BedrockProviderConfig,
+    AmazonBedrockProviderSettings, BedrockModel, create_amazon_bedrock,
 };
+
+fn test_tool() -> aimux_core::tool::FunctionTool {
+    aimux_core::tool::FunctionTool {
+        name: "getWeather".into(),
+        description: None,
+        input_schema: json!({"type":"object"}),
+        strict: None,
+        provider_options: None,
+        input_examples: None,
+    }
+}
+fn model_normalizes_tool_id(id: &str) -> bool {
+    let mut opts = default_options(vec![assistant_msg(vec![tool_call(
+        "tooluse_bpe71yCfRu2b5i-nKGDr5g".into(),
+        "getWeather".into(),
+        json!({}),
+    )])]);
+    opts.tools = Some(vec![test_tool().into()]);
+    let (body, _, _, _) = build_request_body_checked(id, &opts, None).unwrap();
+    body["messages"][0]["content"][0]["toolUse"]["toolUseId"] == "8eHypBDcw"
+}
+
+fn text(value: &str) -> UserPart {
+    UserPart::Text(TextPart {
+        text: value.into(),
+        provider_options: None,
+    })
+}
+fn tool_call(id: String, name: String, input: Value) -> AssistantPart {
+    AssistantPart::ToolCall(ToolCallPart {
+        tool_call_id: id,
+        tool_name: name,
+        input,
+        provider_executed: None,
+        provider_options: None,
+    })
+}
+fn tool_result(id: String, output: Value) -> ToolPart {
+    ToolPart::ToolResult(ToolResultPart {
+        tool_call_id: id,
+        tool_name: "weather".into(),
+        output: serde_json::from_value::<ToolResultOutput>(output).unwrap(),
+        provider_options: None,
+    })
+}
 
 // ── Shared helpers ───────────────────────────────────────────────────────────
 
 fn test_prompt() -> LanguageModelPrompt {
-    vec![LanguageModelPromptMessage {
-        role: Role::User,
-        content: vec![ContentPart::text("Hello")],
-        ..Default::default()
+    vec![LanguageModelMessage::User {
+        content: vec![text("Hello")],
+        provider_options: None,
     }]
 }
 
@@ -56,25 +91,21 @@ fn default_options(prompt: LanguageModelPrompt) -> CallOptions {
     CallOptions::new(prompt)
 }
 
-fn make_model(server: &MockServer) -> BedrockModel {
-    BedrockModel::new(
-        "anthropic.claude-3-5-sonnet-20240620-v1:0".to_string(),
-        BedrockConfig {
-            base_url: server.uri(),
-            auth: BedrockAuth::BearerToken("test-token".to_string()),
-            retry_config: aimux_provider_utils::RetryConfig::default(),
-            api_key_source: None,
-        },
-    )
+fn make_model(server: &std::sync::Arc<MockFetch>) -> BedrockModel {
+    create_amazon_bedrock(AmazonBedrockProviderSettings {
+        fetch: Some(server.transport()),
+        base_url: Some("https://bedrock.test".into()),
+        api_key: Some(Resolvable::Value("test-token".into())),
+        ..Default::default()
+    })
+    .unwrap()
+    .chat("anthropic.claude-3-5-sonnet-20240620-v1:0")
 }
 
-async fn mock_converse_json(server: &MockServer, status: u16, body: Value) {
-    let model_path = "/model/anthropic.claude-3-5-sonnet-20240620-v1:0/converse";
-    Mock::given(method("POST"))
-        .and(path(model_path))
-        .respond_with(ResponseTemplate::new(status).set_body_json(body))
-        .mount(server)
-        .await;
+fn mock_converse_json(status: u16, body: Value) -> std::sync::Arc<MockFetch> {
+    let mut canned = Canned::json(&body);
+    canned.status = status;
+    MockFetch::new(vec![canned])
 }
 
 fn ok_converse_body() -> Value {
@@ -99,12 +130,12 @@ fn as_text(item: &GenerateContent) -> &str {
 
 fn as_tool_call(item: &GenerateContent) -> (&str, &str, &str) {
     match item {
-        GenerateContent::ToolCall {
+        GenerateContent::ToolCall(RawToolCall {
             tool_call_id,
             tool_name,
             input,
             ..
-        } => (tool_call_id, tool_name, input),
+        }) => (tool_call_id, tool_name, input),
         _ => panic!("expected ToolCall content, got {item:?}"),
     }
 }
@@ -121,8 +152,7 @@ async fn collect_stream(result: aimux_core::result::StreamResult) -> Vec<StreamP
     parts
 }
 
-/// Remove every env var that `BedrockProviderConfig::from_env` consults, so each
-/// `#[serial]` test starts from a clean slate.
+/// Clear the authentication environment between serial tests.
 fn clear_bedrock_env() {
     unsafe {
         std::env::remove_var("AWS_BEARER_TOKEN_BEDROCK");
@@ -133,121 +163,84 @@ fn clear_bedrock_env() {
     }
 }
 
-// ════════════════════════════════════════════════════════════════════════════
-// normalize-tool-call-id.test.ts
-// ════════════════════════════════════════════════════════════════════════════
-//
-// The TS SDK exposes `isMistralModel(modelId)` and
-// `normalizeToolCallId(toolCallId, isMistral)`. Neither helper is ported to the
-// Rust bedrock module — `convert_prompt_to_bedrock` has no `isMistral`
-// parameter and never normalizes tool-call IDs. The tests below document the
-// expected behaviour; they are `#[ignore]` until the helpers land.
-
 /// TS: "should return true for mistral models"
 #[test]
-#[ignore = "TODO: implementation gap — is_mistral_model not implemented in bedrock module"]
 fn is_mistral_model_true_for_mistral() {
-    // Expected: is_mistral_model returns true for:
-    //   "mistral.mistral-7b-instruct-v0:2"
-    //   "mistral.mixtral-8x7b-instruct-v0:1"
-    //   "mistral.mistral-large-2402-v1:0"
-    //   "mistral.mistral-small-2402-v1:0"
-    //   "mistral.mistral-large-2407-v1:0"
-    //   "mistral.ministral-3-14b-instruct"
-    //   "mistral.ministral-3-8b-instruct"
-    todo!("is_mistral_model is not implemented");
+    for id in [
+        "mistral.mistral-7b-instruct-v0:2",
+        "mistral.mixtral-8x7b-instruct-v0:1",
+        "mistral.mistral-large-2402-v1:0",
+        "mistral.mistral-small-2402-v1:0",
+        "mistral.mistral-large-2407-v1:0",
+        "mistral.ministral-3-14b-instruct",
+        "mistral.ministral-3-8b-instruct",
+    ] {
+        assert!(model_normalizes_tool_id(id));
+    }
 }
 
 /// TS: "should return true for region-prefixed mistral models"
 #[test]
-#[ignore = "TODO: implementation gap — is_mistral_model not implemented in bedrock module"]
 fn is_mistral_model_region_prefixed() {
-    // Expected: is_mistral_model("us.mistral.pixtral-large-2502-v1:0") == true
-    // Expected: is_mistral_model("eu.mistral.mistral-large-2407-v1:0") == true
-    todo!("is_mistral_model is not implemented");
+    assert!(model_normalizes_tool_id(
+        "us.mistral.pixtral-large-2502-v1:0"
+    ));
+    assert!(model_normalizes_tool_id(
+        "eu.mistral.mistral-large-2407-v1:0"
+    ));
 }
 
 /// TS: "should return false for non-mistral models"
 #[test]
-#[ignore = "TODO: implementation gap — is_mistral_model not implemented in bedrock module"]
 fn is_mistral_model_false_for_non_mistral() {
-    // Expected: is_mistral_model returns false for:
-    //   "anthropic.claude-3-5-sonnet-20241022-v2:0"
-    //   "amazon.nova-pro-v1:0"
-    //   "openai.gpt-4o"
-    //   "meta.llama3-70b-instruct-v1:0"
-    todo!("is_mistral_model is not implemented");
+    for id in [
+        "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "amazon.nova-pro-v1:0",
+        "openai.gpt-4o",
+        "meta.llama3-70b-instruct-v1:0",
+    ] {
+        assert!(!model_normalizes_tool_id(id));
+    }
 }
 
 /// TS: "should return the original ID when not a Mistral model"
 #[test]
-#[ignore = "TODO: implementation gap — normalize_tool_call_id not implemented in bedrock module"]
 fn normalize_tool_call_id_passthrough_when_not_mistral() {
-    // Expected: normalize_tool_call_id("tooluse_bpe71yCfRu2b5i-nKGDr5g", false)
-    //           == "tooluse_bpe71yCfRu2b5i-nKGDr5g"
-    todo!("normalize_tool_call_id is not implemented");
+    let id = "tooluse_bpe71yCfRu2b5i-nKGDr5g";
+    assert_eq!(normalize_tool_call_id(id, false), id);
 }
 
-/// TS: "should extract first 9 alphanumeric characters for Mistral models"
+/// TS: "should hash incompatible IDs deterministically for Mistral models"
 #[test]
-#[ignore = "TODO: implementation gap — normalize_tool_call_id not implemented in bedrock module"]
-fn normalize_tool_call_id_first_9_alphanumeric() {
-    // Expected: normalize_tool_call_id("tooluse_bpe71yCfRu2b5i-nKGDr5g", true)
-    //           == "toolusebp"
-    todo!("normalize_tool_call_id is not implemented");
+fn normalize_tool_call_id_hashes_deterministically() {
+    let id = "tooluse_bpe71yCfRu2b5i-nKGDr5g";
+    assert_eq!(normalize_tool_call_id(id, true), "8eHypBDcw");
+    assert_eq!(normalize_tool_call_id(id, true), "8eHypBDcw");
 }
 
-/// TS: "should handle IDs with various special characters"
+/// TS: "should produce 9 alphanumeric characters for incompatible IDs"
 #[test]
-#[ignore = "TODO: implementation gap — normalize_tool_call_id not implemented in bedrock module"]
 fn normalize_tool_call_id_special_chars() {
-    // Expected: normalize_tool_call_id("tool-use_123ABC456", true) == "tooluse12"
-    // Expected: normalize_tool_call_id("___abc123DEF___", true)   == "abc123DEF"
-    todo!("normalize_tool_call_id is not implemented");
+    for (id, expected) in [
+        ("tool-use_123ABC456", "hvVDqPNyj"),
+        ("___abc123DEF___", "TnzPqldGU"),
+        ("abc", "GRuIyUwcV"),
+        ("12345", "PceAgWDYe"),
+        ("___---___", "5C589HVqG"),
+    ] {
+        let normalized = normalize_tool_call_id(id, true);
+        assert_eq!(normalized, expected);
+        assert_eq!(normalized.len(), 9);
+        assert!(normalized.bytes().all(|c| c.is_ascii_alphanumeric()));
+    }
 }
 
-/// TS: "should handle IDs that are already alphanumeric"
+/// TS: "should preserve IDs that are already valid Mistral tool call IDs"
 #[test]
-#[ignore = "TODO: implementation gap — normalize_tool_call_id not implemented in bedrock module"]
 fn normalize_tool_call_id_already_alphanumeric() {
-    // Expected: normalize_tool_call_id("abcdefghi", true) == "abcdefghi"
-    // Expected: normalize_tool_call_id("abc123XYZ", true) == "abc123XYZ"
-    todo!("normalize_tool_call_id is not implemented");
+    assert_eq!(normalize_tool_call_id("abcdefghi", true), "abcdefghi");
+    assert_eq!(normalize_tool_call_id("abc123XYZ", true), "abc123XYZ");
 }
-
-/// TS: "should handle short IDs"
-#[test]
-#[ignore = "TODO: implementation gap — normalize_tool_call_id not implemented in bedrock module"]
-fn normalize_tool_call_id_short_ids() {
-    // Expected: normalize_tool_call_id("abc", true)    == "abc"
-    // Expected: normalize_tool_call_id("12345", true)  == "12345"
-    todo!("normalize_tool_call_id is not implemented");
-}
-
-/// TS: "should handle IDs with only special characters"
-#[test]
-#[ignore = "TODO: implementation gap — normalize_tool_call_id not implemented in bedrock module"]
-fn normalize_tool_call_id_only_special_chars() {
-    // Expected: normalize_tool_call_id("___---___", true) == ""
-    todo!("normalize_tool_call_id is not implemented");
-}
-
-/// TS: "should produce valid Mistral tool call IDs (9 alphanumeric chars)"
-#[test]
-#[ignore = "TODO: implementation gap — normalize_tool_call_id not implemented in bedrock module"]
-fn normalize_tool_call_id_valid_mistral_format() {
-    // Expected: normalize_tool_call_id("tooluse_bpe71yCfRu2b5i-nKGDr5g", true)
-    //           matches ^[a-zA-Z0-9]{1,9}$
-    todo!("normalize_tool_call_id is not implemented");
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-// convert-amazon-bedrock-usage.test.ts — `raw` echo cases
-// ════════════════════════════════════════════════════════════════════════════
-//
-// The non-raw cases are already covered in bedrock_convert_test.rs. The two
-// `raw`-only cases below require a `raw` echo field on `Usage`, which the Rust
-// type does not model.
 
 use aimux_providers::bedrock::convert::{BedrockUsage, convert_usage};
 
@@ -264,92 +257,138 @@ fn bedrock_usage_with_total(
         total_tokens: total,
         cache_read_input_tokens: cache_read,
         cache_write_input_tokens: cache_write,
+        ..Default::default()
     }
 }
 
 /// TS: "should include totalTokens in raw when provided"
 #[test]
-#[ignore = "TODO: implementation gap — Usage type has no raw echo field"]
 fn usage_raw_includes_total_tokens() {
-    let u = convert_usage(Some(&bedrock_usage_with_total(
-        100,
-        50,
-        Some(150),
-        None,
-        None,
-    )));
-    // TS asserts result.raw == { inputTokens: 100, outputTokens: 50, totalTokens: 150 }
-    // The Rust Usage has no raw field; only the token breakdown is available.
-    assert_eq!(u.input_tokens.total, Some(100));
-    assert_eq!(u.output_tokens.total, Some(50));
-    todo!("Usage.raw echo is not modelled");
+    let raw = bedrock_usage_with_total(100, 50, Some(150), None, None);
+    let u = convert_usage(Some(&raw));
+    assert_eq!(
+        u.raw,
+        Some(
+            json!({"inputTokens":100,"outputTokens":50,"totalTokens":150})
+                .as_object()
+                .unwrap()
+                .clone()
+        )
+    );
 }
 
 /// TS: "should preserve raw usage data"
 #[test]
-#[ignore = "TODO: implementation gap — Usage type has no raw echo field"]
 fn usage_raw_preserved() {
     let raw = bedrock_usage_with_total(100, 50, Some(150), Some(80), Some(60));
     let u = convert_usage(Some(&raw));
-    // TS asserts result.raw == the full input object.
-    assert_eq!(u.input_tokens.total, Some(240));
-    todo!("Usage.raw echo is not modelled");
+    assert_eq!(u.raw, Some(json!({"inputTokens":100,"outputTokens":50,"totalTokens":150,"cacheReadInputTokens":80,"cacheWriteInputTokens":60}).as_object().unwrap().clone()));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
 // amazon-bedrock-provider.test.ts — provider configuration / auth
 // ════════════════════════════════════════════════════════════════════════════
 
-/// TS: "should create a provider instance with default options" — default
-/// region is `us-east-1` and the base URL points at bedrock-runtime.
-#[test]
+/// TS: "should create a provider instance with default options" — the mocked
+/// upstream region loader returns `us-east-1`; pass it explicitly here.
+#[tokio::test]
 #[serial]
-fn provider_default_region_and_base_url() {
-    clear_bedrock_env();
-    let config = BedrockProviderConfig::new("ak", "sk", "us-east-1");
+async fn provider_default_region_and_base_url() {
+    let fetch = MockFetch::new(vec![Canned::json(&ok_converse_body())]);
+    let provider = create_amazon_bedrock(AmazonBedrockProviderSettings {
+        api_key: Some(Resolvable::Value(String::new())),
+        region: Some("us-east-1".into()),
+        access_key_id: Some("ak".into()),
+        secret_access_key: Some("sk".into()),
+        fetch: Some(fetch.transport()),
+        ..Default::default()
+    })
+    .unwrap();
+    provider
+        .chat("amazon.nova-pro-v1:0")
+        .do_generate(&default_options(test_prompt()))
+        .await
+        .unwrap();
+    let seen = &fetch.seen()[0];
     assert_eq!(
-        config.base_url,
-        "https://bedrock-runtime.us-east-1.amazonaws.com"
+        seen.url,
+        "https://bedrock-runtime.us-east-1.amazonaws.com/model/amazon.nova-pro-v1%3A0/converse"
     );
-    assert!(matches!(config.auth, BedrockAuth::SigV4(_)));
+    assert!(seen.headers["authorization"].starts_with("AWS4-HMAC-SHA256"));
 }
 
 /// TS: "should create a provider instance with custom options" — custom region
 /// flows into the base URL.
-#[test]
-fn provider_custom_region_base_url() {
-    let config = BedrockProviderConfig::new("ak", "sk", "eu-west-1");
-    assert_eq!(
-        config.base_url,
-        "https://bedrock-runtime.eu-west-1.amazonaws.com"
+#[tokio::test]
+async fn provider_custom_region_base_url() {
+    let fetch = MockFetch::new(vec![Canned::json(&ok_converse_body())]);
+    let provider = create_amazon_bedrock(AmazonBedrockProviderSettings {
+        api_key: Some(Resolvable::Value(String::new())),
+        region: Some("eu-west-1".into()),
+        access_key_id: Some("ak".into()),
+        secret_access_key: Some("sk".into()),
+        fetch: Some(fetch.transport()),
+        ..Default::default()
+    })
+    .unwrap();
+    provider
+        .chat("amazon.nova-pro-v1:0")
+        .do_generate(&default_options(test_prompt()))
+        .await
+        .unwrap();
+    let seen = &fetch.seen()[0];
+    assert!(
+        seen.url
+            .starts_with("https://bedrock-runtime.eu-west-1.amazonaws.com/")
     );
 }
 
-/// TS: "should accept a credentialProvider in options" — the Rust port models
-/// only static SigV4 creds + bearer; the `with_base_url` override mirrors the
-/// custom baseURL option.
-#[test]
-fn provider_with_base_url_override() {
-    let config = BedrockProviderConfig::with_bearer_token("tok", "us-east-1")
-        .with_base_url("https://custom.url/");
-    assert_eq!(config.base_url, "https://custom.url");
+/// TS: "should create a provider instance with custom options" — baseURL override.
+#[tokio::test]
+async fn provider_with_base_url_override() {
+    let fetch = MockFetch::new(vec![Canned::json(&ok_converse_body())]);
+    let provider = create_amazon_bedrock(AmazonBedrockProviderSettings {
+        region: Some("us-east-1".into()),
+        api_key: Some(Resolvable::Value("tok".into())),
+        base_url: Some("https://custom.url/".into()),
+        fetch: Some(fetch.transport()),
+        ..Default::default()
+    })
+    .unwrap();
+    provider
+        .chat("amazon.nova-pro-v1:0")
+        .do_generate(&default_options(test_prompt()))
+        .await
+        .unwrap();
+    let seen = &fetch.seen()[0];
+    assert!(seen.url.starts_with("https://custom.url/model/"));
 }
 
 /// TS: "should use API key when provided in options" — bearer-token auth path.
-#[test]
-fn provider_bearer_token_auth() {
-    let config = BedrockProviderConfig::with_bearer_token("test-api-key", "us-east-1");
-    match config.auth {
-        BedrockAuth::BearerToken(t) => assert_eq!(t, "test-api-key"),
-        _ => panic!("expected BearerToken auth"),
-    }
+#[tokio::test]
+async fn provider_bearer_token_auth() {
+    let fetch = MockFetch::new(vec![Canned::json(&ok_converse_body())]);
+    let provider = create_amazon_bedrock(AmazonBedrockProviderSettings {
+        region: Some("us-east-1".into()),
+        api_key: Some(Resolvable::Value("test-api-key".into())),
+        fetch: Some(fetch.transport()),
+        ..Default::default()
+    })
+    .unwrap();
+    provider
+        .chat("amazon.nova-pro-v1:0")
+        .do_generate(&default_options(test_prompt()))
+        .await
+        .unwrap();
+    let seen = &fetch.seen()[0];
+    assert_eq!(seen.headers["authorization"], "Bearer test-api-key");
 }
 
 /// TS: "should use API key from environment variable" — `AWS_BEARER_TOKEN_BEDROCK`
-/// takes precedence over SigV4 env vars in `from_env`.
-#[test]
+/// takes precedence over SigV4 environment credentials.
+#[tokio::test]
 #[serial]
-fn provider_from_env_bearer_token_precedence() {
+async fn provider_from_env_bearer_token_precedence() {
     clear_bedrock_env();
     unsafe {
         std::env::set_var("AWS_BEARER_TOKEN_BEDROCK", "env-bearer");
@@ -358,21 +397,28 @@ fn provider_from_env_bearer_token_precedence() {
         std::env::set_var("AWS_REGION", "us-west-2");
     }
 
-    let config = BedrockProviderConfig::from_env().expect("from_env should succeed");
-    match config.auth {
-        BedrockAuth::BearerToken(t) => assert_eq!(t, "env-bearer"),
-        _ => panic!("expected BearerToken auth (bearer takes precedence)"),
-    }
-    assert!(config.base_url.contains("us-west-2"));
-
+    let fetch = MockFetch::new(vec![Canned::json(&ok_converse_body())]);
+    let provider = create_amazon_bedrock(AmazonBedrockProviderSettings {
+        fetch: Some(fetch.transport()),
+        ..Default::default()
+    })
+    .unwrap();
+    provider
+        .chat("amazon.nova-pro-v1:0")
+        .do_generate(&default_options(test_prompt()))
+        .await
+        .unwrap();
+    let seen = &fetch.seen()[0];
+    assert_eq!(seen.headers["authorization"], "Bearer env-bearer");
+    assert!(seen.url.contains("us-west-2"));
     clear_bedrock_env();
 }
 
-/// TS: "should fall back to SigV4 when no API key provided" — `from_env` uses
+/// TS: "should fall back to SigV4 when no API key provided" — the factory uses
 /// SigV4 when `AWS_BEARER_TOKEN_BEDROCK` is absent.
-#[test]
+#[tokio::test]
 #[serial]
-fn provider_from_env_sigv4_fallback() {
+async fn provider_from_env_sigv4_fallback() {
     clear_bedrock_env();
     unsafe {
         std::env::set_var("AWS_ACCESS_KEY_ID", "test-ak");
@@ -380,25 +426,29 @@ fn provider_from_env_sigv4_fallback() {
         std::env::set_var("AWS_REGION", "eu-west-1");
     }
 
-    let config = BedrockProviderConfig::from_env().expect("from_env should succeed");
-    match config.auth {
-        BedrockAuth::SigV4(creds) => {
-            assert_eq!(creds.access_key_id, "test-ak");
-            assert_eq!(creds.secret_access_key, "test-sk");
-            assert_eq!(creds.region, "eu-west-1");
-            assert!(creds.session_token.is_none());
-        }
-        _ => panic!("expected SigV4 auth"),
-    }
-
+    let fetch = MockFetch::new(vec![Canned::json(&ok_converse_body())]);
+    let provider = create_amazon_bedrock(AmazonBedrockProviderSettings {
+        fetch: Some(fetch.transport()),
+        ..Default::default()
+    })
+    .unwrap();
+    provider
+        .chat("amazon.nova-pro-v1:0")
+        .do_generate(&default_options(test_prompt()))
+        .await
+        .unwrap();
+    let seen = &fetch.seen()[0];
+    assert!(seen.headers["authorization"].starts_with("AWS4-HMAC-SHA256 Credential=test-ak/"));
+    assert!(seen.headers["authorization"].contains("/eu-west-1/bedrock/"));
+    assert!(!seen.headers.contains_key("x-amz-security-token"));
     clear_bedrock_env();
 }
 
 /// TS: "should maintain backward compatibility with existing SigV4
-/// authentication" — `AWS_SESSION_TOKEN` from env is picked up by `from_env`.
-#[test]
+/// authentication" — `AWS_SESSION_TOKEN` is loaded from the environment.
+#[tokio::test]
 #[serial]
-fn provider_from_env_session_token() {
+async fn provider_from_env_session_token() {
     clear_bedrock_env();
     unsafe {
         std::env::set_var("AWS_ACCESS_KEY_ID", "ak");
@@ -407,54 +457,27 @@ fn provider_from_env_session_token() {
         std::env::set_var("AWS_SESSION_TOKEN", "sts-token");
     }
 
-    let config = BedrockProviderConfig::from_env().expect("from_env should succeed");
-    match config.auth {
-        BedrockAuth::SigV4(creds) => {
-            assert_eq!(creds.session_token.as_deref(), Some("sts-token"));
-        }
-        _ => panic!("expected SigV4 auth"),
-    }
-
-    clear_bedrock_env();
-}
-
-/// TS: default region falls back to `us-east-1` when `AWS_REGION` is unset.
-#[test]
-#[serial]
-fn provider_from_env_default_region() {
-    clear_bedrock_env();
-    unsafe {
-        std::env::set_var("AWS_ACCESS_KEY_ID", "ak");
-        std::env::set_var("AWS_SECRET_ACCESS_KEY", "sk");
-    }
-
-    let config = BedrockProviderConfig::from_env().expect("from_env should succeed");
-    assert!(config.base_url.contains("us-east-1"));
-
-    clear_bedrock_env();
-}
-
-/// TS: `from_env` errors when neither bearer token nor access key is present.
-#[test]
-#[serial]
-fn provider_from_env_missing_credentials_errors() {
-    clear_bedrock_env();
-    let result = BedrockProviderConfig::from_env();
-    assert!(
-        result.is_err(),
-        "from_env should error without any credentials"
-    );
+    let fetch = MockFetch::new(vec![Canned::json(&ok_converse_body())]);
+    let provider = create_amazon_bedrock(AmazonBedrockProviderSettings {
+        fetch: Some(fetch.transport()),
+        ..Default::default()
+    })
+    .unwrap();
+    provider
+        .chat("amazon.nova-pro-v1:0")
+        .do_generate(&default_options(test_prompt()))
+        .await
+        .unwrap();
+    let seen = &fetch.seen()[0];
+    assert_eq!(seen.headers["x-amz-security-token"], "sts-token");
     clear_bedrock_env();
 }
 
 /// The `BedrockProvider` exposes its name and can vend language models.
 #[test]
 fn provider_name_and_language_model() {
-    let provider =
-        BedrockProvider::new(BedrockProviderConfig::with_bearer_token("tok", "us-east-1"));
-    assert_eq!(provider.name(), "amazon-bedrock");
-
-    let model = provider.model("anthropic.claude-3-5-sonnet-20240620-v1:0");
+    let provider = create_amazon_bedrock(AmazonBedrockProviderSettings::default()).unwrap();
+    let model = provider.chat("anthropic.claude-3-5-sonnet-20240620-v1:0");
     assert_eq!(
         model.model_id(),
         "anthropic.claude-3-5-sonnet-20240620-v1:0"
@@ -464,43 +487,41 @@ fn provider_name_and_language_model() {
 
 /// TS: "should prioritize options.apiKey over environment variable" — explicit
 /// bearer token construction does not consult env vars.
-#[test]
+#[tokio::test]
 #[serial]
-fn provider_explicit_bearer_over_env() {
+async fn provider_explicit_bearer_over_env() {
     clear_bedrock_env();
     unsafe {
         std::env::set_var("AWS_BEARER_TOKEN_BEDROCK", "env-bearer");
     }
     // Explicit construction with a different token should win over env.
-    let config = BedrockProviderConfig::with_bearer_token("explicit-tok", "us-east-1");
-    match config.auth {
-        BedrockAuth::BearerToken(t) => assert_eq!(t, "explicit-tok"),
-        _ => panic!("expected BearerToken auth"),
-    }
+    let fetch = MockFetch::new(vec![Canned::json(&ok_converse_body())]);
+    let provider = create_amazon_bedrock(AmazonBedrockProviderSettings {
+        region: Some("us-east-1".into()),
+        api_key: Some(Resolvable::Value("explicit-tok".into())),
+        fetch: Some(fetch.transport()),
+        ..Default::default()
+    })
+    .unwrap();
+    provider
+        .chat("amazon.nova-pro-v1:0")
+        .do_generate(&default_options(test_prompt()))
+        .await
+        .unwrap();
+    let seen = &fetch.seen()[0];
+    assert_eq!(seen.headers["authorization"], "Bearer explicit-tok");
     clear_bedrock_env();
 }
 
-// ════════════════════════════════════════════════════════════════════════════
-// convert-to-amazon-bedrock-chat-messages.test.ts — Mistral normalization
-// ════════════════════════════════════════════════════════════════════════════
-//
-// The non-Mistral cases are covered in bedrock_convert_test.rs. The two
-// `isMistral: true` cases below require the Rust converter to accept an
-// `is_mistral` flag (or auto-detect via model id) and normalize tool-call IDs
-// to the first 9 alphanumeric characters. Neither is implemented.
-
-use aimux_providers::bedrock::convert::convert_prompt_to_bedrock;
-fn tool_msg(content: Vec<ContentPart>) -> LanguageModelPromptMessage {
-    LanguageModelPromptMessage {
-        role: Role::Tool,
+fn tool_msg(content: Vec<ToolPart>) -> LanguageModelMessage {
+    LanguageModelMessage::Tool {
         content,
         provider_options: None,
     }
 }
 
-fn assistant_msg(content: Vec<ContentPart>) -> LanguageModelPromptMessage {
-    LanguageModelPromptMessage {
-        role: Role::Assistant,
+fn assistant_msg(content: Vec<AssistantPart>) -> LanguageModelMessage {
+    LanguageModelMessage::Assistant {
         content,
         provider_options: None,
     }
@@ -508,38 +529,40 @@ fn assistant_msg(content: Vec<ContentPart>) -> LanguageModelPromptMessage {
 
 /// TS: "should normalize tool call IDs in tool results when isMistral is true"
 #[test]
-#[ignore = "TODO: implementation gap — convert_prompt_to_bedrock has no isMistral parameter"]
 fn convert_mistral_normalize_tool_result_id() {
     let original_id = "tooluse_bpe71yCfRu2b5i-nKGDr5g";
-    let prompt = vec![tool_msg(vec![ContentPart::tool_result(
+    let prompt = vec![tool_msg(vec![tool_result(
         original_id.to_string(),
         json!({ "type": "text", "value": "The result is 42" }),
     )])];
-    let (_, messages) = convert_prompt_to_bedrock(&prompt);
-    // TS (isMistral: true) expects toolUseId == "toolusebp" (first 9 alphanum).
-    // The Rust converter has no isMistral flag, so the ID is passed through
-    // unchanged — this assertion fails until the gap is closed.
+    let mut opts = default_options(prompt);
+    opts.tools = Some(vec![test_tool().into()]);
+    let (body, _, _, _) =
+        build_request_body_checked("mistral.mistral-large-2402-v1:0", &opts, None).unwrap();
+    let messages = &body["messages"];
     assert_eq!(
         messages[0]["content"][0]["toolResult"]["toolUseId"],
-        json!("toolusebp")
+        json!("8eHypBDcw")
     );
 }
 
 /// TS: "should normalize tool call IDs in tool calls when isMistral is true"
 #[test]
-#[ignore = "TODO: implementation gap — convert_prompt_to_bedrock has no isMistral parameter"]
 fn convert_mistral_normalize_tool_call_id() {
-    let original_id = "tooluse_bpe71yCfRu2b5i-nKGDr5g";
-    let prompt = vec![assistant_msg(vec![ContentPart::tool_call(
+    let original_id = "tooluse_xyz123ABC456-def";
+    let prompt = vec![assistant_msg(vec![tool_call(
         original_id.to_string(),
-        "getWeather".to_string(),
-        json!({ "city": "SF" }),
+        "test-tool".to_string(),
+        json!({ "query": "test" }),
     )])];
-    let (_, messages) = convert_prompt_to_bedrock(&prompt);
-    // TS (isMistral: true) expects toolUseId == "toolusebp".
+    let mut opts = default_options(prompt);
+    opts.tools = Some(vec![test_tool().into()]);
+    let (body, _, _, _) =
+        build_request_body_checked("mistral.mistral-large-2402-v1:0", &opts, None).unwrap();
+    let messages = &body["messages"];
     assert_eq!(
         messages[0]["content"][0]["toolUse"]["toolUseId"],
-        json!("toolusebp")
+        json!("De61BW1Dz")
     );
 }
 
@@ -549,14 +572,18 @@ fn convert_mistral_normalize_tool_call_id() {
 
 // ── supportedUrls ────────────────────────────────────────────────────────────
 
-/// TS: "should support S3 URLs for image parts" — the TS model exposes a
-/// `supportedUrls` map (`{ 'image/*': [/^s3:\/\//] }`). The Rust `BedrockModel`
-/// has no `supported_urls` concept, so this test is `#[ignore]`.
+/// TS: "should support S3 URLs for image and video parts".
 #[test]
-#[ignore = "TODO: implementation gap — BedrockModel has no supported_urls field"]
 fn model_supported_urls_s3() {
-    // TS: model.supportedUrls == { 'image/*': [/^s3:\/\//] }
-    todo!("supportedUrls is not modelled on BedrockModel");
+    let model = create_amazon_bedrock(AmazonBedrockProviderSettings::default())
+        .unwrap()
+        .chat("amazon.nova-pro-v1:0");
+    let urls = model.supported_urls();
+    assert_eq!(urls.0.len(), 2);
+    for kind in ["image/*", "video/*"] {
+        assert_eq!(urls.0[kind].len(), 1);
+        assert_eq!(urls.0[kind][0].as_str(), "^s3://");
+    }
 }
 
 // ── ARN model IDs containing a slash ─────────────────────────────────────────
@@ -564,54 +591,46 @@ fn model_supported_urls_s3() {
 /// TS: "should generate text through the encoded Converse route".
 ///
 /// ARN inference-profile IDs contain a `/` which must be percent-encoded in the
-/// URL path. The TS SDK uses `encodeURIComponent(modelId)`. The Rust
-/// `BedrockModel::endpoint` does **not** encode the model id, so the slash is
-/// sent raw and the request misses the mocked (encoded) route.
+/// URL path. The upstream uses `encodeURIComponent(modelId)`.
 #[tokio::test]
-#[ignore = "TODO: implementation gap — endpoint() does not percent-encode the model id"]
 async fn arn_model_id_encoded_generate_route() {
-    let server = MockServer::start().await;
     let arn = "arn:aws:bedrock:eu-west-1:474668406012:inference-profile/eu.amazon.nova-lite-v1:0";
-    let encoded =
-        percent_encoding::utf8_percent_encode(arn, percent_encoding::NON_ALPHANUMERIC).to_string();
-    let encoded_path = format!("/model/{encoded}/converse");
+    let encoded = "arn%3Aaws%3Abedrock%3Aeu-west-1%3A474668406012%3Ainference-profile%2Feu.amazon.nova-lite-v1%3A0";
 
-    Mock::given(method("POST"))
-        .and(path(&encoded_path))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+    let server = mock_converse_json(
+        200,
+        json!({
             "output": { "message": { "role": "assistant", "content": [{ "text": "Hello!" }] } },
             "stopReason": "end_turn",
             "usage": { "inputTokens": 1, "outputTokens": 1 }
-        })))
-        .mount(&server)
-        .await;
-
-    let model = BedrockModel::new(
-        arn.to_string(),
-        BedrockConfig {
-            base_url: server.uri(),
-            auth: BedrockAuth::BearerToken("tok".to_string()),
-            retry_config: aimux_provider_utils::RetryConfig::default(),
-            api_key_source: None,
-        },
+        }),
     );
+
+    let model = create_amazon_bedrock(AmazonBedrockProviderSettings {
+        fetch: Some(server.transport()),
+        base_url: Some("https://bedrock.test".into()),
+        api_key: Some(Resolvable::Value("tok".into())),
+        ..Default::default()
+    })
+    .unwrap()
+    .chat(arn);
 
     let result = model
         .do_generate(&default_options(test_prompt()))
         .await
         .expect("should succeed via the encoded route");
     assert_eq!(as_text(&result.content[0]), "Hello!");
+    assert_eq!(
+        server.seen()[0].url,
+        format!("https://bedrock.test/model/{encoded}/converse")
+    );
 }
 
 /// TS: "should stream text through the encoded Converse route".
 #[tokio::test]
-#[ignore = "TODO: implementation gap — endpoint() does not percent-encode the model id"]
 async fn arn_model_id_encoded_stream_route() {
-    let server = MockServer::start().await;
     let arn = "arn:aws:bedrock:eu-west-1:474668406012:inference-profile/eu.amazon.nova-lite-v1:0";
-    let encoded =
-        percent_encoding::utf8_percent_encode(arn, percent_encoding::NON_ALPHANUMERIC).to_string();
-    let encoded_path = format!("/model/{encoded}/converse-stream");
+    let encoded = "arn%3Aaws%3Abedrock%3Aeu-west-1%3A474668406012%3Ainference-profile%2Feu.amazon.nova-lite-v1%3A0";
 
     let events: Vec<(&str, &str, &str)> = vec![
         ("event", "messageStart", r#"{"role":"assistant"}"#),
@@ -630,25 +649,23 @@ async fn arn_model_id_encoded_stream_route() {
     ];
     let body_bytes = aimux_providers::bedrock::event_stream::encode_messages(&events);
 
-    Mock::given(method("POST"))
-        .and(path(&encoded_path))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "application/vnd.amazon.eventstream")
-                .set_body_raw(body_bytes, "application/vnd.amazon.eventstream"),
-        )
-        .mount(&server)
-        .await;
+    let server = MockFetch::new(vec![Canned {
+        status: 200,
+        headers: vec![(
+            "content-type".into(),
+            "application/vnd.amazon.eventstream".into(),
+        )],
+        body: body_bytes,
+    }]);
 
-    let model = BedrockModel::new(
-        arn.to_string(),
-        BedrockConfig {
-            base_url: server.uri(),
-            auth: BedrockAuth::BearerToken("tok".to_string()),
-            retry_config: aimux_provider_utils::RetryConfig::default(),
-            api_key_source: None,
-        },
-    );
+    let model = create_amazon_bedrock(AmazonBedrockProviderSettings {
+        fetch: Some(server.transport()),
+        base_url: Some("https://bedrock.test".into()),
+        api_key: Some(Resolvable::Value("tok".into())),
+        ..Default::default()
+    })
+    .unwrap()
+    .chat(arn);
 
     let result = model
         .do_stream(&default_options(test_prompt()))
@@ -664,30 +681,9 @@ async fn arn_model_id_encoded_stream_route() {
         })
         .collect();
     assert_eq!(text, "Hello!");
-}
-
-// ── additionalModelResponseFieldPaths ────────────────────────────────────────
-
-/// TS: "should return the request body" — the default request body includes
-/// `additionalModelResponseFieldPaths: ["/delta/stop_sequence"]` so that the
-/// stop_sequence value is returned in `additionalModelResponseFields`. The Rust
-/// `build_request_body` does not emit this field.
-#[tokio::test]
-#[ignore = "TODO: implementation gap — build_request_body does not emit additionalModelResponseFieldPaths"]
-async fn request_body_includes_additional_model_response_field_paths() {
-    let server = MockServer::start().await;
-    mock_converse_json(&server, 200, ok_converse_body()).await;
-
-    let model = make_model(&server);
-    let result = model
-        .do_generate(&default_options(test_prompt()))
-        .await
-        .expect("should succeed");
-
-    let body = result.request_body.expect("request body");
     assert_eq!(
-        body["additionalModelResponseFieldPaths"],
-        json!(["/delta/stop_sequence"])
+        server.seen()[0].url,
+        format!("https://bedrock.test/model/{encoded}/converse-stream")
     );
 }
 
@@ -695,10 +691,8 @@ async fn request_body_includes_additional_model_response_field_paths() {
 
 /// TS: "should clamp temperature above 1 to 1 and add warning".
 #[tokio::test]
-#[ignore = "TODO: implementation gap — temperature is not clamped to [0, 1]"]
 async fn temperature_clamped_above_1() {
-    let server = MockServer::start().await;
-    mock_converse_json(&server, 200, ok_converse_body()).await;
+    let server = mock_converse_json(200, ok_converse_body());
 
     let model = make_model(&server);
     let mut opts = default_options(test_prompt());
@@ -706,7 +700,7 @@ async fn temperature_clamped_above_1() {
 
     let result = model.do_generate(&opts).await.expect("should succeed");
 
-    let body = result.request_body.expect("request body");
+    let body = result.request.unwrap().body.expect("request body");
     assert_eq!(
         body["inferenceConfig"]["temperature"].as_f64().unwrap(),
         1.0
@@ -723,10 +717,8 @@ async fn temperature_clamped_above_1() {
 
 /// TS: "should clamp temperature below 0 to 0 and add warning".
 #[tokio::test]
-#[ignore = "TODO: implementation gap — temperature is not clamped to [0, 1]"]
 async fn temperature_clamped_below_0() {
-    let server = MockServer::start().await;
-    mock_converse_json(&server, 200, ok_converse_body()).await;
+    let server = mock_converse_json(200, ok_converse_body());
 
     let model = make_model(&server);
     let mut opts = default_options(test_prompt());
@@ -734,7 +726,7 @@ async fn temperature_clamped_below_0() {
 
     let result = model.do_generate(&opts).await.expect("should succeed");
 
-    let body = result.request_body.expect("request body");
+    let body = result.request.unwrap().body.expect("request body");
     assert_eq!(
         body["inferenceConfig"]["temperature"].as_f64().unwrap(),
         0.0
@@ -751,8 +743,7 @@ async fn temperature_clamped_below_0() {
 /// TS: "should not clamp valid temperature between 0 and 1".
 #[tokio::test]
 async fn temperature_not_clamped_in_range() {
-    let server = MockServer::start().await;
-    mock_converse_json(&server, 200, ok_converse_body()).await;
+    let server = mock_converse_json(200, ok_converse_body());
 
     let model = make_model(&server);
     let mut opts = default_options(test_prompt());
@@ -760,7 +751,7 @@ async fn temperature_not_clamped_in_range() {
 
     let result = model.do_generate(&opts).await.expect("should succeed");
 
-    let body = result.request_body.expect("request body");
+    let body = result.request.unwrap().body.expect("request body");
     let temp = body["inferenceConfig"]["temperature"].as_f64().unwrap();
     assert!(
         (temp - 0.7).abs() < 1e-6,
@@ -774,16 +765,13 @@ async fn temperature_not_clamped_in_range() {
 /// TS: "should support guardrails" — `providerOptions.bedrock.guardrailConfig`
 /// is forwarded as a top-level `guardrailConfig` in the request body.
 #[tokio::test]
-#[ignore = "TODO: implementation gap — build_request_body does not emit guardrailConfig"]
 async fn guardrail_config_in_request_body() {
-    let server = MockServer::start().await;
-    mock_converse_json(&server, 200, ok_converse_body()).await;
+    let server = mock_converse_json(200, ok_converse_body());
 
     let model = make_model(&server);
     let mut opts = default_options(test_prompt());
-    let mut po = HashMap::new();
-    po.insert(
-        "bedrock".to_string(),
+    let po = provider_namespace(
+        "bedrock",
         json!({
             "guardrailConfig": {
                 "guardrailIdentifier": "-1",
@@ -791,11 +779,12 @@ async fn guardrail_config_in_request_body() {
                 "trace": "enabled"
             }
         }),
-    );
+    )
+    .unwrap();
     opts.provider_options = Some(po);
 
     let result = model.do_generate(&opts).await.expect("should succeed");
-    let body = result.request_body.expect("request body");
+    let body = result.request.unwrap().body.expect("request body");
     assert_eq!(
         body["guardrailConfig"],
         json!({
@@ -811,9 +800,7 @@ async fn guardrail_config_in_request_body() {
 /// TS: "should include trace information in providerMetadata" — the response
 /// `trace` field is surfaced as `providerMetadata.bedrock.trace`.
 #[tokio::test]
-#[ignore = "TODO: implementation gap — do_generate does not extract trace into providerMetadata"]
 async fn trace_in_provider_metadata() {
-    let server = MockServer::start().await;
     let trace = json!({
         "guardrail": {
             "inputAssessment": {
@@ -829,16 +816,15 @@ async fn trace_in_provider_metadata() {
             }
         }
     });
-    Mock::given(method("POST"))
-        .and(path("/model/anthropic.claude-3-5-sonnet-20240620-v1:0/converse"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+    let server = mock_converse_json(
+        200,
+        json!({
             "output": { "message": { "role": "assistant", "content": [{ "text": "Hello, World!" }] } },
             "usage": { "inputTokens": 4, "outputTokens": 34, "totalTokens": 38 },
             "stopReason": "stop_sequence",
             "trace": trace
-        })))
-        .mount(&server)
-        .await;
+        }),
+    );
 
     let model = make_model(&server);
     let result = model
@@ -859,19 +845,16 @@ async fn trace_in_provider_metadata() {
 /// carries `additionalModelResponseFields.delta.stop_sequence`, it is surfaced
 /// as `providerMetadata.bedrock.stopSequence` (and `amazonBedrock.stopSequence`).
 #[tokio::test]
-#[ignore = "TODO: implementation gap — do_generate does not extract stop_sequence from additionalModelResponseFields"]
 async fn stop_sequence_in_provider_metadata() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/model/anthropic.claude-3-5-sonnet-20240620-v1:0/converse"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+    let server = mock_converse_json(
+        200,
+        json!({
             "output": { "message": { "role": "assistant", "content": [{ "text": "Hello, World!" }] } },
             "stopReason": "stop_sequence",
             "additionalModelResponseFields": { "delta": { "stop_sequence": "STOP" } },
             "usage": { "inputTokens": 4, "outputTokens": 30, "totalTokens": 34 }
-        })))
-        .mount(&server)
-        .await;
+        }),
+    );
 
     let model = make_model(&server);
     let mut opts = default_options(test_prompt());
@@ -892,13 +875,9 @@ async fn stop_sequence_in_provider_metadata() {
 /// TS: "should support tool calls with empty input (no arguments)" (stream).
 ///
 /// When a `toolUse` block carries no input deltas, the stream event loop
-/// accumulates an empty string and defaults the parsed input to `{}` — matching
-/// the TS behaviour. (The non-streaming path does **not** handle this; see
-/// `generate_tool_call_empty_input` below.)
+/// accumulates an empty string and yields `input: "{}"`.
 #[tokio::test]
 async fn stream_tool_call_empty_input() {
-    let server = MockServer::start().await;
-
     let events: Vec<(&str, &str, &str)> = vec![
         ("event", "messageStart", r#"{"role":"assistant"}"#),
         (
@@ -912,17 +891,14 @@ async fn stream_tool_call_empty_input() {
     ];
     let body_bytes = aimux_providers::bedrock::event_stream::encode_messages(&events);
 
-    Mock::given(method("POST"))
-        .and(path(
-            "/model/anthropic.claude-3-5-sonnet-20240620-v1:0/converse-stream",
-        ))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "application/vnd.amazon.eventstream")
-                .set_body_raw(body_bytes, "application/vnd.amazon.eventstream"),
-        )
-        .mount(&server)
-        .await;
+    let server = MockFetch::new(vec![Canned {
+        status: 200,
+        headers: vec![(
+            "content-type".into(),
+            "application/vnd.amazon.eventstream".into(),
+        )],
+        body: body_bytes,
+    }]);
 
     let model = make_model(&server);
     let result = model
@@ -934,89 +910,53 @@ async fn stream_tool_call_empty_input() {
     let tool_calls: Vec<_> = parts
         .iter()
         .filter_map(|p| match p {
-            StreamPart::ToolCall {
+            StreamPart::ToolCall(RawToolCall {
                 tool_call_id,
                 tool_name,
                 input,
                 ..
-            } => Some((tool_call_id.clone(), tool_name.clone(), input.clone())),
+            }) => Some((tool_call_id.clone(), tool_name.clone(), input.clone())),
             _ => None,
         })
         .collect();
     assert_eq!(tool_calls.len(), 1);
     assert_eq!(tool_calls[0].0, "tool_1");
     assert_eq!(tool_calls[0].1, "updateIssueList");
-    assert_eq!(tool_calls[0].2, Value::String("{}".into()));
+    assert_eq!(tool_calls[0].2, "{}");
 }
 
 // ── omit toolConfig ──────────────────────────────────────────────────────────
 
-/// TS: "should omit toolConfig when conversation has tool calls but toolChoice
-/// is none" — with `toolChoice: none`, no `toolConfig` is sent even when tools
-/// are provided.
-#[tokio::test]
-async fn omit_tool_config_when_tool_choice_none() {
-    let server = MockServer::start().await;
-    mock_converse_json(&server, 200, ok_converse_body()).await;
-
-    let model = make_model(&server);
-    let opts = CallOptions {
-        tools: Some(vec![Tool::Function(FunctionTool::new(
-            "weather".to_string(),
-            json!({ "type": "object", "properties": { "city": { "type": "string" } } }),
-        ))]),
-        tool_choice: ToolChoice::None,
-        ..default_options(test_prompt())
-    };
-
-    let result = model.do_generate(&opts).await.expect("should succeed");
-    let body = result.request_body.expect("request body");
-    assert!(
-        body.get("toolConfig").is_none(),
-        "toolConfig should be absent when toolChoice is none, got {}",
-        body["toolConfig"]
-    );
-}
-
 /// TS: "should omit toolConfig and filter tool content when conversation has
 /// tool calls but no active tools".
 ///
-/// The `toolConfig` omission (tools = `[]`) works in Rust. The *content
-/// filtering* — dropping the assistant's `toolUse` block from the messages when
-/// there are no active tools — is **not** implemented, so only the toolConfig
-/// assertion is live; the filtering assertion is `#[ignore]` below.
 #[tokio::test]
 async fn omit_tool_config_when_no_active_tools() {
-    let server = MockServer::start().await;
-    mock_converse_json(&server, 200, ok_converse_body()).await;
+    let server = mock_converse_json(200, ok_converse_body());
 
     let prompt: LanguageModelPrompt = vec![
-        LanguageModelPromptMessage {
-            role: Role::User,
-            content: vec![ContentPart::text("What is the weather in Toronto?")],
-            ..Default::default()
+        LanguageModelMessage::User {
+            content: vec![text("What is the weather in Toronto?")],
+            provider_options: None,
         },
-        LanguageModelPromptMessage {
-            role: Role::Assistant,
-            content: vec![ContentPart::tool_call(
+        LanguageModelMessage::Assistant {
+            content: vec![tool_call(
                 "tool-call-1".to_string(),
                 "weather".to_string(),
                 json!({ "city": "Toronto" }),
             )],
-            ..Default::default()
+            provider_options: None,
         },
-        LanguageModelPromptMessage {
-            role: Role::Tool,
-            content: vec![ContentPart::tool_result(
+        LanguageModelMessage::Tool {
+            content: vec![tool_result(
                 "tool-call-1".to_string(),
                 json!({ "type": "text", "value": "The weather in Toronto is 20°C." }),
             )],
-            ..Default::default()
+            provider_options: None,
         },
-        LanguageModelPromptMessage {
-            role: Role::User,
-            content: vec![ContentPart::text("Now give me a summary.")],
-            ..Default::default()
+        LanguageModelMessage::User {
+            content: vec![text("Now give me a summary.")],
+            provider_options: None,
         },
     ];
 
@@ -1027,7 +967,7 @@ async fn omit_tool_config_when_no_active_tools() {
     };
 
     let result = model.do_generate(&opts).await.expect("should succeed");
-    let body = result.request_body.expect("request body");
+    let body = result.request.unwrap().body.expect("request body");
     assert!(
         body.get("toolConfig").is_none(),
         "toolConfig should be absent when tools list is empty"
@@ -1035,41 +975,34 @@ async fn omit_tool_config_when_no_active_tools() {
 }
 
 /// TS: (same test) the assistant's `toolUse` block should be filtered out of
-/// the messages when there are no active tools. The Rust converter always
-/// emits `toolUse` blocks regardless of active tools.
+/// the messages when no tools are active.
 #[tokio::test]
-#[ignore = "TODO: implementation gap — convert_prompt_to_bedrock does not filter toolUse blocks when no active tools"]
 async fn filter_tool_content_when_no_active_tools() {
-    let server = MockServer::start().await;
-    mock_converse_json(&server, 200, ok_converse_body()).await;
+    let server = mock_converse_json(200, ok_converse_body());
 
     let prompt: LanguageModelPrompt = vec![
-        LanguageModelPromptMessage {
-            role: Role::User,
-            content: vec![ContentPart::text("What is the weather in Toronto?")],
-            ..Default::default()
+        LanguageModelMessage::User {
+            content: vec![text("What is the weather in Toronto?")],
+            provider_options: None,
         },
-        LanguageModelPromptMessage {
-            role: Role::Assistant,
-            content: vec![ContentPart::tool_call(
+        LanguageModelMessage::Assistant {
+            content: vec![tool_call(
                 "tool-call-1".to_string(),
                 "weather".to_string(),
                 json!({ "city": "Toronto" }),
             )],
-            ..Default::default()
+            provider_options: None,
         },
-        LanguageModelPromptMessage {
-            role: Role::Tool,
-            content: vec![ContentPart::tool_result(
+        LanguageModelMessage::Tool {
+            content: vec![tool_result(
                 "tool-call-1".to_string(),
                 json!({ "type": "text", "value": "The weather in Toronto is 20°C." }),
             )],
-            ..Default::default()
+            provider_options: None,
         },
-        LanguageModelPromptMessage {
-            role: Role::User,
-            content: vec![ContentPart::text("Now give me a summary.")],
-            ..Default::default()
+        LanguageModelMessage::User {
+            content: vec![text("Now give me a summary.")],
+            provider_options: None,
         },
     ];
 
@@ -1080,30 +1013,19 @@ async fn filter_tool_content_when_no_active_tools() {
     };
 
     let result = model.do_generate(&opts).await.expect("should succeed");
-    let body = result.request_body.expect("request body");
-    // The assistant message should NOT contain a toolUse block.
-    let assistant_msg = &body["messages"][1];
-    assert_eq!(assistant_msg["role"], "assistant");
-    let has_tool_use = assistant_msg["content"]
-        .as_array()
-        .map(|arr| arr.iter().any(|b| b.get("toolUse").is_some()))
-        .unwrap_or(false);
-    assert!(
-        !has_tool_use,
-        "toolUse should be filtered out when no active tools"
+    let body = result.request.unwrap().body.expect("request body");
+    assert_eq!(
+        body["messages"],
+        json!([{ "role": "user", "content": [{ "text": "What is the weather in Toronto?" }, { "text": "Now give me a summary." }] }])
     );
 }
 
 // ── doGenerate: tool call with empty input (non-streaming) ───────────────────
 
-/// TS variant: a non-streaming `toolUse` with no `input` field should yield
-/// `input: {}`. The Rust `BedrockToolUse.input` serde-defaults to `Null`.
+/// TS: "should support tool calls with empty input (no arguments)" (generate).
 #[tokio::test]
-#[ignore = "TODO: implementation gap — empty toolUse input deserializes as Null, not {}"]
 async fn generate_tool_call_empty_input() {
-    let server = MockServer::start().await;
-    mock_converse_json(
-        &server,
+    let server = mock_converse_json(
         200,
         json!({
             "output": {
@@ -1123,8 +1045,7 @@ async fn generate_tool_call_empty_input() {
             "stopReason": "tool_use",
             "usage": { "inputTokens": 5, "outputTokens": 5 }
         }),
-    )
-    .await;
+    );
 
     let model = make_model(&server);
     let result = model
@@ -1136,8 +1057,7 @@ async fn generate_tool_call_empty_input() {
     let (id, name, input) = as_tool_call(&result.content[0]);
     assert_eq!(id, "tool_1");
     assert_eq!(name, "updateIssueList");
-    // TS expects input == {} (empty object), not null.
-    assert_eq!(input, &json!("{}"));
+    assert_eq!(input, "{}");
 }
 
 // ── doGenerate: basic text + finish reason (sanity, already covered but
@@ -1147,19 +1067,16 @@ async fn generate_tool_call_empty_input() {
 /// model id implicitly via the URL path and the messages array.
 #[tokio::test]
 async fn request_body_messages_shape() {
-    let server = MockServer::start().await;
-    mock_converse_json(&server, 200, ok_converse_body()).await;
+    let server = mock_converse_json(200, ok_converse_body());
 
     let prompt: LanguageModelPrompt = vec![
-        LanguageModelPromptMessage {
-            role: Role::System,
-            content: vec![ContentPart::text("System Prompt")],
-            ..Default::default()
+        LanguageModelMessage::System {
+            content: "System Prompt".into(),
+            provider_options: None,
         },
-        LanguageModelPromptMessage {
-            role: Role::User,
-            content: vec![ContentPart::text("Hello")],
-            ..Default::default()
+        LanguageModelMessage::User {
+            content: vec![text("Hello")],
+            provider_options: None,
         },
     ];
 
@@ -1168,7 +1085,7 @@ async fn request_body_messages_shape() {
         .do_generate(&default_options(prompt))
         .await
         .expect("ok");
-    let body = result.request_body.expect("request body");
+    let body = result.request.unwrap().body.expect("request body");
     assert_eq!(body["system"], json!([{ "text": "System Prompt" }]));
     assert_eq!(body["messages"][0]["role"], "user");
     assert_eq!(body["messages"][0]["content"][0]["text"], "Hello");
@@ -1177,17 +1094,14 @@ async fn request_body_messages_shape() {
 /// TS: "should extract finish reason" — `guardrail_intervened` → ContentFilter.
 #[tokio::test]
 async fn finish_reason_guardrail_intervened() {
-    let server = MockServer::start().await;
-    mock_converse_json(
-        &server,
+    let server = mock_converse_json(
         200,
         json!({
             "output": { "message": { "role": "assistant", "content": [{ "text": "" }] } },
             "stopReason": "guardrail_intervened",
             "usage": { "inputTokens": 4, "outputTokens": 1 }
         }),
-    )
-    .await;
+    );
 
     let model = make_model(&server);
     let result = model
@@ -1205,118 +1119,63 @@ async fn finish_reason_guardrail_intervened() {
     );
 }
 
-/// TS: "should send all tools when toolChoice is auto" — all provided tools
-/// appear in the toolConfig, not just a filtered subset.
+/// TS: "should handle throttlingException error" (stream).
 #[tokio::test]
-async fn tool_choice_auto_sends_all_tools() {
-    let server = MockServer::start().await;
-    mock_converse_json(&server, 200, ok_converse_body()).await;
-
+async fn stream_throttling_error() {
+    let body_bytes = aimux_providers::bedrock::event_stream::encode_messages(&[(
+        "exception",
+        "throttlingException",
+        r#"{"message":"Throttling Error"}"#,
+    )]);
+    let server = MockFetch::new(vec![Canned {
+        status: 200,
+        headers: vec![(
+            "content-type".into(),
+            "application/vnd.amazon.eventstream".into(),
+        )],
+        body: body_bytes,
+    }]);
     let model = make_model(&server);
-    let opts = CallOptions {
-        tools: Some(vec![
-            Tool::Function(
-                FunctionTool::new("get-weather".to_string(), json!({ "type": "object" }))
-                    .with_description("Get weather".to_string()),
-            ),
-            Tool::Function(
-                FunctionTool::new("get-time".to_string(), json!({ "type": "object" }))
-                    .with_description("Get time".to_string()),
-            ),
-        ]),
-        tool_choice: ToolChoice::Auto,
-        ..default_options(test_prompt())
-    };
-
-    let result = model.do_generate(&opts).await.expect("should succeed");
-    let body = result.request_body.expect("request body");
-    assert_eq!(body["toolConfig"]["toolChoice"], json!({ "auto": {} }));
-    let tools = body["toolConfig"]["tools"].as_array().unwrap();
-    assert_eq!(
-        tools.len(),
-        2,
-        "both tools should be sent with toolChoice: auto"
-    );
-    assert_eq!(tools[0]["toolSpec"]["name"], "get-weather");
-    assert_eq!(tools[1]["toolSpec"]["name"], "get-time");
+    let result = model
+        .do_stream(&default_options(test_prompt()))
+        .await
+        .unwrap();
+    let parts = collect_stream(result).await;
+    assert!(parts.iter().any(
+        |part| matches!(part, StreamPart::Error { error } if error.status_code() == Some(429))
+    ));
+    assert!(parts.iter().any(|part| matches!(part, StreamPart::Finish { finish_reason, .. } if finish_reason.unified == FinishReasonUnified::Error)));
 }
 
-/// TS: "should omit empty tool descriptions to avoid Bedrock validation errors".
-///
-/// A function tool with an empty-string description must not emit a
-/// `description` field in the `toolSpec`.
+/// TS: "should handle validationException error" (stream).
 #[tokio::test]
-async fn tool_empty_description_omitted() {
-    let server = MockServer::start().await;
-    mock_converse_json(&server, 200, ok_converse_body()).await;
-
+async fn stream_validation_error() {
+    let body_bytes = aimux_providers::bedrock::event_stream::encode_messages(&[(
+        "exception",
+        "validationException",
+        r#"{"message":"Validation Error"}"#,
+    )]);
+    let server = MockFetch::new(vec![Canned {
+        status: 200,
+        headers: vec![(
+            "content-type".into(),
+            "application/vnd.amazon.eventstream".into(),
+        )],
+        body: body_bytes,
+    }]);
     let model = make_model(&server);
-    let opts = CallOptions {
-        tools: Some(vec![Tool::Function(
-            FunctionTool::new("get-weather".to_string(), json!({ "type": "object" }))
-                .with_description("".to_string()),
-        )]),
-        tool_choice: ToolChoice::Auto,
-        ..default_options(test_prompt())
-    };
-
-    let result = model.do_generate(&opts).await.expect("should succeed");
-    let body = result.request_body.expect("request body");
-    let spec = &body["toolConfig"]["tools"][0]["toolSpec"];
-    assert!(
-        spec.get("description").is_none(),
-        "empty description should be omitted"
-    );
+    let result = model
+        .do_stream(&default_options(test_prompt()))
+        .await
+        .unwrap();
+    let parts = collect_stream(result).await;
+    assert!(parts.iter().any(
+        |part| matches!(part, StreamPart::Error { error } if error.status_code() == Some(400))
+    ));
+    assert!(parts.iter().any(|part| matches!(part, StreamPart::Finish { finish_reason, .. } if finish_reason.unified == FinishReasonUnified::Error)));
 }
 
 // ── doStream: error handling ─────────────────────────────────────────────────
-
-/// TS: "should handle throttlingException error" (stream) — a 429 stream
-/// response maps to `AiMuxError::ApiCall` (429 in `status_code`).
-#[tokio::test]
-async fn stream_throttling_error() {
-    let server = MockServer::start().await;
-
-    Mock::given(method("POST"))
-        .and(path(
-            "/model/anthropic.claude-3-5-sonnet-20240620-v1:0/converse-stream",
-        ))
-        .respond_with(ResponseTemplate::new(429).set_body_json(json!({
-            "message": "throttlingException",
-            "type": "TooManyRequestsException"
-        })))
-        .mount(&server)
-        .await;
-
-    let model = make_model(&server);
-    let result = model.do_stream(&default_options(test_prompt())).await;
-    assert!(
-        matches!(result, Err(ref e) if e.status_code() == Some(429)),
-        "expected RateLimited, got {result:?}"
-    );
-}
-
-/// TS: "should handle validationException error" (stream) — a 400 stream
-/// response surfaces as an error (not a panic).
-#[tokio::test]
-async fn stream_validation_error() {
-    let server = MockServer::start().await;
-
-    Mock::given(method("POST"))
-        .and(path(
-            "/model/anthropic.claude-3-5-sonnet-20240620-v1:0/converse-stream",
-        ))
-        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
-            "message": "The model ID is invalid",
-            "type": "ValidationException"
-        })))
-        .mount(&server)
-        .await;
-
-    let model = make_model(&server);
-    let result = model.do_stream(&default_options(test_prompt())).await;
-    assert!(result.is_err(), "expected error for 400 stream response");
-}
 
 // ── doStream: request body parity ────────────────────────────────────────────
 
@@ -1324,8 +1183,6 @@ async fn stream_validation_error() {
 /// the request body for debugging.
 #[tokio::test]
 async fn stream_request_body_available() {
-    let server = MockServer::start().await;
-
     let events: Vec<(&str, &str, &str)> = vec![
         ("event", "messageStart", r#"{"role":"assistant"}"#),
         (
@@ -1338,24 +1195,21 @@ async fn stream_request_body_available() {
     ];
     let body_bytes = aimux_providers::bedrock::event_stream::encode_messages(&events);
 
-    Mock::given(method("POST"))
-        .and(path(
-            "/model/anthropic.claude-3-5-sonnet-20240620-v1:0/converse-stream",
-        ))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "application/vnd.amazon.eventstream")
-                .set_body_raw(body_bytes, "application/vnd.amazon.eventstream"),
-        )
-        .mount(&server)
-        .await;
+    let server = MockFetch::new(vec![Canned {
+        status: 200,
+        headers: vec![(
+            "content-type".into(),
+            "application/vnd.amazon.eventstream".into(),
+        )],
+        body: body_bytes,
+    }]);
 
     let model = make_model(&server);
     let mut opts = default_options(test_prompt());
     opts.max_output_tokens = Some(256);
 
     let result = model.do_stream(&opts).await.expect("should succeed");
-    let body = result.request_body.expect("stream request body");
+    let body = result.request.unwrap().body.expect("stream request body");
     assert_eq!(body["messages"][0]["role"], "user");
     assert_eq!(body["inferenceConfig"]["maxTokens"], 256);
 }

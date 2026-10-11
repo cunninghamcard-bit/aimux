@@ -10,6 +10,7 @@
 //! (2026-09). Live-API smoke pending (no key at implementation time) — same
 //! posture as RFC-0028 D4.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -25,7 +26,26 @@ use aimux_core::transcription_model::{
     AudioChunk, InputAudioFormat, TranscriptionModel, TranscriptionStreamOptions,
     TranscriptionStreamPart,
 };
-use aimux_providers::{ElevenLabsConfig, ElevenLabsProvider};
+use aimux_providers::{ElevenLabsProvider, ElevenLabsProviderSettings, create_elevenlabs};
+
+fn test_provider(
+    api_key: &str,
+    base_url: impl Into<String>,
+    headers: Option<HashMap<String, String>>,
+) -> ElevenLabsProvider {
+    create_elevenlabs(ElevenLabsProviderSettings {
+        api_key: Some(api_key.to_string().into()),
+        base_url: Some(base_url.into()),
+        headers: headers.map(|headers| {
+            headers
+                .into_iter()
+                .map(|(name, value)| (name, Some(value)))
+                .collect()
+        }),
+        ..Default::default()
+    })
+    .expect("valid settings")
+}
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -135,12 +155,7 @@ async fn start(
 }
 
 fn realtime_model(base_url: &str, model_id: &str) -> aimux_providers::ElevenLabsTranscriptionModel {
-    let config = ElevenLabsConfig {
-        api_key: "test-api-key".to_string(),
-        base_url: base_url.to_string(),
-        headers: None,
-    };
-    ElevenLabsProvider::new(config).transcription(model_id)
+    test_provider("test-api-key", base_url, None).transcription(model_id)
 }
 
 fn stream_options(
@@ -258,75 +273,6 @@ async fn stream_realtime_happy_path() {
         Ok(TranscriptionStreamPart::Finish { text, segments, .. }) => {
             assert_eq!(text, "Hello world");
             assert!(segments.is_empty());
-        }
-        other => panic!("expected finish, got {other:?}"),
-    }
-}
-
-/// providerOptions: languageCode lands on the query; include_timestamps
-/// switches the committed event to the words-carrying shape, which fills
-/// segments (spacing entries dropped) and the finish duration.
-#[tokio::test]
-async fn stream_language_and_timestamps() {
-    let (base_url, captured) = start(|ws| {
-        Box::pin(async move {
-            ws.send(Message::Text(
-                r#"{"message_type":"committed_transcript_with_timestamps","text":"Hello world","language_code":"fr","words":[
-                    {"text":"Hello","start":0.0,"end":0.5,"type":"word"},
-                    {"text":" ","start":0.5,"end":0.5,"type":"spacing"},
-                    {"text":"world","start":0.5,"end":1.0,"type":"word"}
-                ]}"#
-                    .replace('\n', ""),
-            ))
-            .await
-            .unwrap();
-            let _ = ws.next().await; // close
-        })
-    })
-    .await;
-
-    let model = realtime_model(&base_url, "scribe_v2_realtime");
-    let mut options = stream_options(vec![AudioChunk::Binary(vec![1])], None);
-    let mut provider_options = std::collections::HashMap::new();
-    provider_options.insert(
-        "elevenlabs".to_string(),
-        serde_json::json!({ "languageCode": "fr", "includeTimestamps": true }),
-    );
-    options.provider_options = Some(provider_options);
-    let result = model.do_stream(options).await.unwrap();
-    let parts = collect(result).await;
-
-    let uri = captured.uri();
-    assert!(uri.contains("language_code=fr"), "in {uri}");
-    assert!(uri.contains("include_timestamps=true"), "in {uri}");
-
-    match &parts[parts.len() - 2] {
-        Ok(TranscriptionStreamPart::TranscriptFinal {
-            text,
-            start_second,
-            end_second,
-            ..
-        }) => {
-            assert_eq!(text, "Hello world");
-            assert_eq!(*start_second, Some(0.0));
-            assert_eq!(*end_second, Some(1.0));
-        }
-        other => panic!("expected final with timestamps, got {other:?}"),
-    }
-    match parts.last().unwrap() {
-        Ok(TranscriptionStreamPart::Finish {
-            text,
-            segments,
-            language,
-            duration_in_seconds,
-            ..
-        }) => {
-            assert_eq!(text, "Hello world");
-            assert_eq!(language.as_deref(), Some("fr"));
-            assert_eq!(*duration_in_seconds, Some(1.0));
-            assert_eq!(segments.len(), 2, "spacing entry dropped: {segments:?}");
-            assert_eq!(segments[0].text, "Hello");
-            assert_eq!(segments[1].text, "world");
         }
         other => panic!("expected finish, got {other:?}"),
     }

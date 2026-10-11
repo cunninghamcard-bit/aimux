@@ -124,7 +124,7 @@ fn provider_handle_new_with_config_json() {
     let e = aimux_provider_handle_new(
         c("deepseek").as_ptr(),
         c("sk-test-fake").as_ptr(),
-        c(r#"{"base_url":"https://example.com/v1"}"#).as_ptr(),
+        c(r#"{"baseUrl":"https://example.com/v1"}"#).as_ptr(),
         &mut h,
     );
     aimux_drop_handle(expect_handle(e, h, "provider_handle_new(deepseek, config)"));
@@ -222,4 +222,31 @@ fn provider_list_models_handle_zero() {
         expect_ffi_error(e, "list_models(handle=0)"),
         "invalid or expired provider handle"
     );
+}
+
+/// By-name lookup of the official decision providers through the handle
+/// path (#226): `laya` and the other local runtimes, plus native OpenAI.
+#[test]
+fn provider_handle_new_resolves_decision_providers_by_name() {
+    use aimux_ffi::aimux_provider_decision_model;
+    for (name, key) in [
+        ("laya", None),
+        ("ollama", None),
+        ("vllm", None),
+        ("openai", Some(c("key"))),
+    ] {
+        let key_ptr = key.as_ref().map_or(ptr::null(), |key| key.as_ptr());
+        let mut provider = 0;
+        ok(
+            aimux_provider_handle_new(c(name).as_ptr(), key_ptr, ptr::null(), &mut provider),
+            name,
+        );
+        let mut model = 0;
+        ok(
+            aimux_provider_decision_model(provider, c("served-alias").as_ptr(), &mut model),
+            name,
+        );
+        aimux_drop_handle(model);
+        aimux_drop_handle(provider);
+    }
 }

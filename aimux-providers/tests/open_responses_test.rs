@@ -9,26 +9,28 @@
 //! `createTestServer`. Each test starts its own `MockServer` so parallel
 //! `#[tokio::test]` runs do not collide.
 
-use std::collections::HashMap;
+use aimux_core::tool::RawToolCall;
 
 use futures::StreamExt;
 use serde_json::{Value, json};
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use aimux_core::content::ContentPart;
 use aimux_core::language_model::LanguageModel;
-use aimux_core::language_model_message::{LanguageModelPrompt, LanguageModelPromptMessage};
-use aimux_core::message::Role;
+use aimux_core::language_model_message::{
+    AssistantPart, FilePart, LanguageModelMessage, LanguageModelPrompt, TextPart, ToolCallPart,
+    ToolPart, ToolResultPart, UserPart,
+};
 use aimux_core::options::{CallOptions, ResponseFormat, Tool, ToolChoice};
-use aimux_core::result::GenerateContent;
+use aimux_core::result::{GenerateContent, ReasoningOutput};
+use aimux_core::shared::{FileBytes, FileData};
 use aimux_core::stream_part::StreamPart;
 use aimux_core::tool::FunctionTool;
 use aimux_core::types::{FinishReasonUnified, ReasoningEffort};
 
 use aimux_providers::open_responses::{
-    OpenResponsesConfig, OpenResponsesModel, OpenResponsesProvider,
-    convert_to_open_responses_input, map_open_responses_finish_reason,
+    OpenResponsesModel, OpenResponsesProviderSettings, convert_to_open_responses_input,
+    create_open_responses, map_open_responses_finish_reason,
 };
 
 // ============================================================================
@@ -37,11 +39,7 @@ use aimux_providers::open_responses::{
 
 /// The TS `TEST_PROMPT`: a single user text message "Hello".
 fn test_prompt() -> LanguageModelPrompt {
-    vec![LanguageModelPromptMessage {
-        role: Role::User,
-        content: vec![ContentPart::text("Hello")],
-        ..Default::default()
-    }]
+    vec![LanguageModelMessage::user_text("Hello")]
 }
 
 /// `CallOptions` with only `prompt` set (everything else default/None).
@@ -49,15 +47,15 @@ fn default_options(prompt: LanguageModelPrompt) -> CallOptions {
     CallOptions::new(prompt)
 }
 
-/// Build an Open Responses config whose URL points at the mock server.
-fn make_config(server: &MockServer) -> OpenResponsesConfig {
-    OpenResponsesConfig::new("lmstudio", "lmstudio", server.uri())
+/// Build Open Responses settings whose base URL points at the mock server.
+fn make_settings(server: &MockServer) -> OpenResponsesProviderSettings {
+    OpenResponsesProviderSettings::new("lmstudio", server.uri())
 }
 
 /// Create a model pointing at the mock server.
 fn make_model(server: &MockServer, model_id: &str) -> OpenResponsesModel {
-    let provider = OpenResponsesProvider::new(make_config(server));
-    provider.model(model_id)
+    let provider = create_open_responses(make_settings(server)).expect("valid settings");
+    provider.responses(model_id)
 }
 
 /// Mount a JSON response on any path.
@@ -207,7 +205,7 @@ fn openai_pdf_json() -> Value {
         "created_at": 1775566496,
         "status": "completed",
         "incomplete_details": null,
-        "model": "gpt-4.1-nano-2025-04-14",
+        "model": lmstudio_basic_json()["model"],
         "output": [
             {
                 "id": "msg_048edf44633e41ae0069d4fea0d1a08194af1e491c093df1d9",
@@ -325,10 +323,9 @@ mod convert_tests {
 
     #[test]
     fn convert_single_system_message_to_instructions() {
-        let prompt = vec![LanguageModelPromptMessage {
-            role: Role::System,
-            content: vec![ContentPart::text("You are a helpful assistant.")],
-            ..Default::default()
+        let prompt = vec![LanguageModelMessage::System {
+            content: "You are a helpful assistant.".into(),
+            provider_options: None,
         }];
         let (input, instructions, warnings) = convert_to_open_responses_input(&prompt);
         assert_eq!(
@@ -342,15 +339,13 @@ mod convert_tests {
     #[test]
     fn convert_multiple_system_messages_joined_with_newlines() {
         let prompt = vec![
-            LanguageModelPromptMessage {
-                role: Role::System,
-                content: vec![ContentPart::text("You are a helpful assistant.")],
-                ..Default::default()
+            LanguageModelMessage::System {
+                content: "You are a helpful assistant.".into(),
+                provider_options: None,
             },
-            LanguageModelPromptMessage {
-                role: Role::System,
-                content: vec![ContentPart::text("Always be concise.")],
-                ..Default::default()
+            LanguageModelMessage::System {
+                content: "Always be concise.".into(),
+                provider_options: None,
             },
         ];
         let (_, instructions, _) = convert_to_open_responses_input(&prompt);
@@ -370,20 +365,17 @@ mod convert_tests {
     #[test]
     fn convert_system_message_with_user_and_assistant() {
         let prompt = vec![
-            LanguageModelPromptMessage {
-                role: Role::System,
-                content: vec![ContentPart::text("You are a helpful assistant.")],
-                ..Default::default()
+            LanguageModelMessage::System {
+                content: "You are a helpful assistant.".into(),
+                provider_options: None,
             },
-            LanguageModelPromptMessage {
-                role: Role::User,
-                content: vec![ContentPart::text("Hello")],
-                ..Default::default()
-            },
-            LanguageModelPromptMessage {
-                role: Role::Assistant,
-                content: vec![ContentPart::text("Hi there!")],
-                ..Default::default()
+            LanguageModelMessage::user_text("Hello"),
+            LanguageModelMessage::Assistant {
+                content: vec![AssistantPart::Text(TextPart {
+                    text: "Hi there!".into(),
+                    provider_options: None,
+                })],
+                provider_options: None,
             },
         ];
         let (input, instructions, _) = convert_to_open_responses_input(&prompt);
@@ -426,10 +418,16 @@ mod convert_tests {
 
     #[test]
     fn convert_image_file_base64_to_input_image() {
-        let prompt = vec![LanguageModelPromptMessage {
-            role: Role::User,
-            content: vec![ContentPart::file_base64("ZmFrZS1kYXRh", "image/png")],
-            ..Default::default()
+        let prompt = vec![LanguageModelMessage::User {
+            content: vec![UserPart::File(FilePart {
+                data: FileData::Data {
+                    data: FileBytes::Base64("ZmFrZS1kYXRh".into()),
+                },
+                media_type: "image/png".into(),
+                filename: None,
+                provider_options: None,
+            })],
+            provider_options: None,
         }];
         let (input, _, warnings) = convert_to_open_responses_input(&prompt);
         assert_eq!(
@@ -445,13 +443,17 @@ mod convert_tests {
 
     #[test]
     fn convert_image_file_url_to_input_image() {
-        let prompt = vec![LanguageModelPromptMessage {
-            role: Role::User,
-            content: vec![ContentPart::file_url(
-                "https://example.com/image.png",
-                "image/png",
-            )],
-            ..Default::default()
+        let prompt = vec![LanguageModelMessage::User {
+            content: vec![UserPart::File(FilePart {
+                data: FileData::Url {
+                    original_url: None,
+                    url: "https://example.com/image.png".into(),
+                },
+                media_type: "image/png".into(),
+                filename: None,
+                provider_options: None,
+            })],
+            provider_options: None,
         }];
         let (input, _, _) = convert_to_open_responses_input(&prompt);
         assert_eq!(
@@ -466,13 +468,22 @@ mod convert_tests {
 
     #[test]
     fn convert_pdf_file_base64_to_input_file() {
-        let prompt = vec![LanguageModelPromptMessage {
-            role: Role::User,
+        let prompt = vec![LanguageModelMessage::User {
             content: vec![
-                ContentPart::text("What does this PDF say?"),
-                ContentPart::file_base64("UERGREFUQQ==", "application/pdf"),
+                UserPart::Text(TextPart {
+                    text: "What does this PDF say?".into(),
+                    provider_options: None,
+                }),
+                UserPart::File(FilePart {
+                    data: FileData::Data {
+                        data: FileBytes::Base64("UERGREFUQQ==".into()),
+                    },
+                    media_type: "application/pdf".into(),
+                    filename: None,
+                    provider_options: None,
+                }),
             ],
-            ..Default::default()
+            provider_options: None,
         }];
         let (input, _, warnings) = convert_to_open_responses_input(&prompt);
         assert_eq!(
@@ -491,13 +502,17 @@ mod convert_tests {
 
     #[test]
     fn convert_pdf_file_url_to_input_file() {
-        let prompt = vec![LanguageModelPromptMessage {
-            role: Role::User,
-            content: vec![ContentPart::file_url(
-                "https://example.com/document.pdf",
-                "application/pdf",
-            )],
-            ..Default::default()
+        let prompt = vec![LanguageModelMessage::User {
+            content: vec![UserPart::File(FilePart {
+                data: FileData::Url {
+                    original_url: None,
+                    url: "https://example.com/document.pdf".into(),
+                },
+                media_type: "application/pdf".into(),
+                filename: None,
+                provider_options: None,
+            })],
+            provider_options: None,
         }];
         let (input, _, warnings) = convert_to_open_responses_input(&prompt);
         assert_eq!(
@@ -513,15 +528,16 @@ mod convert_tests {
 
     #[test]
     fn convert_file_with_custom_filename() {
-        let prompt = vec![LanguageModelPromptMessage {
-            role: Role::User,
-            content: vec![ContentPart::FileBase64 {
-                data: "UERGREFUQQ==".to_string(),
+        let prompt = vec![LanguageModelMessage::User {
+            content: vec![UserPart::File(FilePart {
+                data: FileData::Data {
+                    data: FileBytes::Base64("UERGREFUQQ==".to_string()),
+                },
                 media_type: "application/pdf".to_string(),
                 filename: Some("report.pdf".to_string()),
                 provider_options: None,
-            }],
-            ..Default::default()
+            })],
+            provider_options: None,
         }];
         let (input, _, _) = convert_to_open_responses_input(&prompt);
         assert_eq!(
@@ -542,10 +558,12 @@ mod convert_tests {
 
     #[test]
     fn convert_assistant_text_part() {
-        let prompt = vec![LanguageModelPromptMessage {
-            role: Role::Assistant,
-            content: vec![ContentPart::text("Hello from assistant")],
-            ..Default::default()
+        let prompt = vec![LanguageModelMessage::Assistant {
+            content: vec![AssistantPart::Text(TextPart {
+                text: "Hello from assistant".into(),
+                provider_options: None,
+            })],
+            provider_options: None,
         }];
         let (input, _, _) = convert_to_open_responses_input(&prompt);
         assert_eq!(
@@ -560,13 +578,18 @@ mod convert_tests {
 
     #[test]
     fn convert_assistant_multiple_text_parts() {
-        let prompt = vec![LanguageModelPromptMessage {
-            role: Role::Assistant,
+        let prompt = vec![LanguageModelMessage::Assistant {
             content: vec![
-                ContentPart::text("First part"),
-                ContentPart::text("Second part"),
+                AssistantPart::Text(TextPart {
+                    text: "First part".into(),
+                    provider_options: None,
+                }),
+                AssistantPart::Text(TextPart {
+                    text: "Second part".into(),
+                    provider_options: None,
+                }),
             ],
-            ..Default::default()
+            provider_options: None,
         }];
         let (input, _, _) = convert_to_open_responses_input(&prompt);
         assert_eq!(
@@ -586,14 +609,15 @@ mod convert_tests {
 
     #[test]
     fn convert_assistant_single_tool_call() {
-        let prompt = vec![LanguageModelPromptMessage {
-            role: Role::Assistant,
-            content: vec![ContentPart::tool_call(
-                "call_123",
-                "get_weather",
-                json!({"location": "San Francisco"}),
-            )],
-            ..Default::default()
+        let prompt = vec![LanguageModelMessage::Assistant {
+            content: vec![AssistantPart::ToolCall(ToolCallPart {
+                tool_call_id: "call_123".into(),
+                tool_name: "get_weather".into(),
+                input: json!({"location": "San Francisco"}),
+                provider_executed: None,
+                provider_options: None,
+            })],
+            provider_options: None,
         }];
         let (input, _, _) = convert_to_open_responses_input(&prompt);
         assert_eq!(
@@ -609,14 +633,15 @@ mod convert_tests {
 
     #[test]
     fn convert_assistant_tool_call_string_input() {
-        let prompt = vec![LanguageModelPromptMessage {
-            role: Role::Assistant,
-            content: vec![ContentPart::tool_call(
-                "call_124",
-                "get_weather",
-                Value::String("{\"location\":\"Berlin\"}".to_string()),
-            )],
-            ..Default::default()
+        let prompt = vec![LanguageModelMessage::Assistant {
+            content: vec![AssistantPart::ToolCall(ToolCallPart {
+                tool_call_id: "call_124".into(),
+                tool_name: "get_weather".into(),
+                input: Value::String("{\"location\":\"Berlin\"}".to_string()),
+                provider_executed: None,
+                provider_options: None,
+            })],
+            provider_options: None,
         }];
         let (input, _, _) = convert_to_open_responses_input(&prompt);
         assert_eq!(
@@ -632,13 +657,21 @@ mod convert_tests {
 
     #[test]
     fn convert_assistant_text_and_tool_call() {
-        let prompt = vec![LanguageModelPromptMessage {
-            role: Role::Assistant,
+        let prompt = vec![LanguageModelMessage::Assistant {
             content: vec![
-                ContentPart::text("Let me check the weather for you."),
-                ContentPart::tool_call("call_456", "get_weather", json!({"location": "New York"})),
+                AssistantPart::Text(TextPart {
+                    text: "Let me check the weather for you.".into(),
+                    provider_options: None,
+                }),
+                AssistantPart::ToolCall(ToolCallPart {
+                    tool_call_id: "call_456".into(),
+                    tool_name: "get_weather".into(),
+                    input: json!({"location": "New York"}),
+                    provider_executed: None,
+                    provider_options: None,
+                }),
             ],
-            ..Default::default()
+            provider_options: None,
         }];
         let (input, _, _) = convert_to_open_responses_input(&prompt);
         assert_eq!(
@@ -661,13 +694,24 @@ mod convert_tests {
 
     #[test]
     fn convert_assistant_multiple_tool_calls() {
-        let prompt = vec![LanguageModelPromptMessage {
-            role: Role::Assistant,
+        let prompt = vec![LanguageModelMessage::Assistant {
             content: vec![
-                ContentPart::tool_call("call_001", "get_weather", json!({"location": "Paris"})),
-                ContentPart::tool_call("call_002", "get_time", json!({"timezone": "Europe/Paris"})),
+                AssistantPart::ToolCall(ToolCallPart {
+                    tool_call_id: "call_001".into(),
+                    tool_name: "get_weather".into(),
+                    input: json!({"location": "Paris"}),
+                    provider_executed: None,
+                    provider_options: None,
+                }),
+                AssistantPart::ToolCall(ToolCallPart {
+                    tool_call_id: "call_002".into(),
+                    tool_name: "get_time".into(),
+                    input: json!({"timezone": "Europe/Paris"}),
+                    provider_executed: None,
+                    provider_options: None,
+                }),
             ],
-            ..Default::default()
+            provider_options: None,
         }];
         let (input, _, _) = convert_to_open_responses_input(&prompt);
         assert_eq!(
@@ -693,13 +737,17 @@ mod convert_tests {
 
     #[test]
     fn convert_tool_message_json_output() {
-        let prompt = vec![LanguageModelPromptMessage {
-            role: Role::Tool,
-            content: vec![ContentPart::tool_result(
-                "call_123",
-                json!({"type": "json", "value": {"temperature": 72, "condition": "sunny"}}),
-            )],
-            ..Default::default()
+        let prompt = vec![LanguageModelMessage::Tool {
+            content: vec![ToolPart::ToolResult(ToolResultPart {
+                tool_call_id: "call_123".into(),
+                output: serde_json::from_value(
+                    json!({"type": "json", "value": {"temperature": 72, "condition": "sunny"}}),
+                )
+                .unwrap(),
+                tool_name: "get_weather".into(),
+                provider_options: None,
+            })],
+            provider_options: None,
         }];
         let (input, _, _) = convert_to_open_responses_input(&prompt);
         assert_eq!(
@@ -714,13 +762,17 @@ mod convert_tests {
 
     #[test]
     fn convert_tool_message_text_output() {
-        let prompt = vec![LanguageModelPromptMessage {
-            role: Role::Tool,
-            content: vec![ContentPart::tool_result(
-                "call_456",
-                json!({"type": "text", "value": "Search results: Found 5 items"}),
-            )],
-            ..Default::default()
+        let prompt = vec![LanguageModelMessage::Tool {
+            content: vec![ToolPart::ToolResult(ToolResultPart {
+                tool_call_id: "call_456".into(),
+                output: serde_json::from_value(
+                    json!({"type": "text", "value": "Search results: Found 5 items"}),
+                )
+                .unwrap(),
+                tool_name: "get_weather".into(),
+                provider_options: None,
+            })],
+            provider_options: None,
         }];
         let (input, _, _) = convert_to_open_responses_input(&prompt);
         assert_eq!(
@@ -735,13 +787,17 @@ mod convert_tests {
 
     #[test]
     fn convert_tool_message_error_text_output() {
-        let prompt = vec![LanguageModelPromptMessage {
-            role: Role::Tool,
-            content: vec![ContentPart::tool_result(
-                "call_789",
-                json!({"type": "error-text", "value": "API request failed: timeout"}),
-            )],
-            ..Default::default()
+        let prompt = vec![LanguageModelMessage::Tool {
+            content: vec![ToolPart::ToolResult(ToolResultPart {
+                tool_call_id: "call_789".into(),
+                output: serde_json::from_value(
+                    json!({"type": "error-text", "value": "API request failed: timeout"}),
+                )
+                .unwrap(),
+                tool_name: "get_weather".into(),
+                provider_options: None,
+            })],
+            provider_options: None,
         }];
         let (input, _, _) = convert_to_open_responses_input(&prompt);
         assert_eq!(
@@ -756,13 +812,17 @@ mod convert_tests {
 
     #[test]
     fn convert_tool_message_execution_denied_output() {
-        let prompt = vec![LanguageModelPromptMessage {
-            role: Role::Tool,
-            content: vec![ContentPart::tool_result(
-                "call_denied",
-                json!({"type": "execution-denied", "reason": "User declined the action"}),
-            )],
-            ..Default::default()
+        let prompt = vec![LanguageModelMessage::Tool {
+            content: vec![ToolPart::ToolResult(ToolResultPart {
+                tool_call_id: "call_denied".into(),
+                output: serde_json::from_value(
+                    json!({"type": "execution-denied", "reason": "User declined the action"}),
+                )
+                .unwrap(),
+                tool_name: "get_weather".into(),
+                provider_options: None,
+            })],
+            provider_options: None,
         }];
         let (input, _, _) = convert_to_open_responses_input(&prompt);
         assert_eq!(
@@ -777,19 +837,21 @@ mod convert_tests {
 
     #[test]
     fn convert_tool_message_content_output_text() {
-        let prompt = vec![LanguageModelPromptMessage {
-            role: Role::Tool,
-            content: vec![ContentPart::tool_result(
-                "call_content",
-                json!({
+        let prompt = vec![LanguageModelMessage::Tool {
+            content: vec![ToolPart::ToolResult(ToolResultPart {
+                tool_call_id: "call_content".into(),
+                output: serde_json::from_value(json!({
                     "type": "content",
                     "value": [
                         {"type": "text", "text": "First result"},
                         {"type": "text", "text": "Second result"}
                     ]
-                }),
-            )],
-            ..Default::default()
+                }))
+                .unwrap(),
+                tool_name: "get_weather".into(),
+                provider_options: None,
+            })],
+            provider_options: None,
         }];
         let (input, _, _) = convert_to_open_responses_input(&prompt);
         assert_eq!(
@@ -807,16 +869,24 @@ mod convert_tests {
 
     #[test]
     fn convert_tool_message_multiple_results() {
-        let prompt = vec![LanguageModelPromptMessage {
-            role: Role::Tool,
+        let prompt = vec![LanguageModelMessage::Tool {
             content: vec![
-                ContentPart::tool_result(
-                    "call_001",
-                    json!({"type": "json", "value": {"temp": 72}}),
-                ),
-                ContentPart::tool_result("call_002", json!({"type": "text", "value": "3:00 PM"})),
+                ToolPart::ToolResult(ToolResultPart {
+                    tool_call_id: "call_001".into(),
+                    output: serde_json::from_value(json!({"type": "json", "value": {"temp": 72}}))
+                        .unwrap(),
+                    tool_name: "get_weather".into(),
+                    provider_options: None,
+                }),
+                ToolPart::ToolResult(ToolResultPart {
+                    tool_call_id: "call_002".into(),
+                    output: serde_json::from_value(json!({"type": "text", "value": "3:00 PM"}))
+                        .unwrap(),
+                    tool_name: "get_weather".into(),
+                    provider_options: None,
+                }),
             ],
-            ..Default::default()
+            provider_options: None,
         }];
         let (input, _, _) = convert_to_open_responses_input(&prompt);
         assert_eq!(
@@ -841,21 +911,15 @@ mod convert_tests {
     #[test]
     fn convert_user_assistant_user_chain() {
         let prompt = vec![
-            LanguageModelPromptMessage {
-                role: Role::User,
-                content: vec![ContentPart::text("What is the capital of France?")],
-                ..Default::default()
+            LanguageModelMessage::user_text("What is the capital of France?"),
+            LanguageModelMessage::Assistant {
+                content: vec![AssistantPart::Text(TextPart {
+                    text: "The capital of France is Paris.".into(),
+                    provider_options: None,
+                })],
+                provider_options: None,
             },
-            LanguageModelPromptMessage {
-                role: Role::Assistant,
-                content: vec![ContentPart::text("The capital of France is Paris.")],
-                ..Default::default()
-            },
-            LanguageModelPromptMessage {
-                role: Role::User,
-                content: vec![ContentPart::text("And what about Germany?")],
-                ..Default::default()
-            },
+            LanguageModelMessage::user_text("And what about Germany?"),
         ];
         let (input, _, _) = convert_to_open_responses_input(&prompt);
         assert_eq!(
@@ -871,27 +935,25 @@ mod convert_tests {
     #[test]
     fn convert_user_assistant_tool_tool_chain() {
         let prompt = vec![
-            LanguageModelPromptMessage {
-                role: Role::User,
-                content: vec![ContentPart::text("What is the weather in Tokyo?")],
-                ..Default::default()
+            LanguageModelMessage::user_text("What is the weather in Tokyo?"),
+            LanguageModelMessage::Assistant {
+                content: vec![AssistantPart::ToolCall(ToolCallPart {
+                    tool_call_id: "call_weather".into(),
+                    tool_name: "get_weather".into(),
+                    input: json!({"location": "Tokyo"}),
+                    provider_executed: None,
+                    provider_options: None,
+                })],
+                provider_options: None,
             },
-            LanguageModelPromptMessage {
-                role: Role::Assistant,
-                content: vec![ContentPart::tool_call(
-                    "call_weather",
-                    "get_weather",
-                    json!({"location": "Tokyo"}),
-                )],
-                ..Default::default()
-            },
-            LanguageModelPromptMessage {
-                role: Role::Tool,
-                content: vec![ContentPart::tool_result(
-                    "call_weather",
-                    json!({"type": "json", "value": {"temperature": 25, "condition": "cloudy"}}),
-                )],
-                ..Default::default()
+            LanguageModelMessage::Tool {
+                content: vec![ToolPart::ToolResult(ToolResultPart {
+                    tool_call_id: "call_weather".into(),
+                    output: serde_json::from_value(json!({"type": "json", "value": {"temperature": 25, "condition": "cloudy"}})).unwrap(),
+                    tool_name: "get_weather".into(),
+                    provider_options: None,
+                })],
+                provider_options: None,
             },
         ];
         let (input, _, _) = convert_to_open_responses_input(&prompt);
@@ -908,32 +970,32 @@ mod convert_tests {
     #[test]
     fn convert_tool_roundtrip_with_followup_assistant() {
         let prompt = vec![
-            LanguageModelPromptMessage {
-                role: Role::User,
-                content: vec![ContentPart::text("What is the weather in Tokyo?")],
-                ..Default::default()
+            LanguageModelMessage::user_text("What is the weather in Tokyo?"),
+            LanguageModelMessage::Assistant {
+                content: vec![AssistantPart::ToolCall(ToolCallPart {
+                    tool_call_id: "call_weather".into(),
+                    tool_name: "get_weather".into(),
+                    input: Value::String("{\"location\":\"Tokyo\"}".to_string()),
+                    provider_executed: None,
+                    provider_options: None,
+                })],
+                provider_options: None,
             },
-            LanguageModelPromptMessage {
-                role: Role::Assistant,
-                content: vec![ContentPart::tool_call(
-                    "call_weather",
-                    "get_weather",
-                    Value::String("{\"location\":\"Tokyo\"}".to_string()),
-                )],
-                ..Default::default()
+            LanguageModelMessage::Tool {
+                content: vec![ToolPart::ToolResult(ToolResultPart {
+                    tool_call_id: "call_weather".into(),
+                    output: serde_json::from_value(json!({"type": "json", "value": {"temperature": 25, "condition": "cloudy"}})).unwrap(),
+                    tool_name: "get_weather".into(),
+                    provider_options: None,
+                })],
+                provider_options: None,
             },
-            LanguageModelPromptMessage {
-                role: Role::Tool,
-                content: vec![ContentPart::tool_result(
-                    "call_weather",
-                    json!({"type": "json", "value": {"temperature": 25, "condition": "cloudy"}}),
-                )],
-                ..Default::default()
-            },
-            LanguageModelPromptMessage {
-                role: Role::Assistant,
-                content: vec![ContentPart::text("It is 25 C and cloudy in Tokyo.")],
-                ..Default::default()
+            LanguageModelMessage::Assistant {
+                content: vec![AssistantPart::Text(TextPart {
+                    text: "It is 25 C and cloudy in Tokyo.".into(),
+                    provider_options: None,
+                })],
+                provider_options: None,
             },
         ];
         let (input, _, _) = convert_to_open_responses_input(&prompt);
@@ -952,13 +1014,18 @@ mod convert_tests {
 
     #[test]
     fn convert_file_reference_produces_warning() {
-        let prompt = vec![LanguageModelPromptMessage {
-            role: Role::User,
-            content: vec![ContentPart::file_reference(
-                "image/png",
-                json!({"openResponses": "file-ref-123"}),
-            )],
-            ..Default::default()
+        let prompt = vec![LanguageModelMessage::User {
+            content: vec![UserPart::File(FilePart {
+                data: FileData::Reference {
+                    reference: [("openResponses".into(), "file-ref-123".into())]
+                        .into_iter()
+                        .collect(),
+                },
+                media_type: "image/png".into(),
+                filename: None,
+                provider_options: None,
+            })],
+            provider_options: None,
         }];
         let (input, _, warnings) = convert_to_open_responses_input(&prompt);
         // The reference part is skipped, so user content is empty array.
@@ -1077,10 +1144,10 @@ mod do_generate_tests {
         assert_eq!(result.content.len(), 2);
         assert_eq!(
             result.content[0],
-            GenerateContent::Reasoning {
+            GenerateContent::Reasoning(ReasoningOutput {
                 text: "reasoning content".to_string(),
                 provider_metadata: None,
-            }
+            })
         );
         assert_eq!(
             result.content[1],
@@ -1332,12 +1399,11 @@ mod do_generate_tests {
 
     // -- ProviderOptions reasoning tests --
 
-    fn lmstudio_opts(value: Value) -> Option<HashMap<String, Value>> {
-        let mut m = HashMap::new();
-        m.insert("lmstudio".to_string(), value);
-        Some(m)
+    fn lmstudio_opts(value: Value) -> Option<aimux_core::shared::SharedProviderOptions> {
+        Some(aimux_core::shared::provider_namespace("lmstudio", value).unwrap())
     }
 
+    /// TS: `packages/open-responses/src/responses/open-responses-language-model.test.ts:594`
     #[tokio::test]
     async fn provider_options_reasoning_summary_detailed() {
         let server = MockServer::start().await;
@@ -1355,6 +1421,7 @@ mod do_generate_tests {
         assert_eq!(body["reasoning"], json!({"summary": "detailed"}));
     }
 
+    /// TS: `packages/open-responses/src/responses/open-responses-language-model.test.ts:623`
     #[tokio::test]
     async fn provider_options_combines_effort_with_summary() {
         let server = MockServer::start().await;
@@ -1376,6 +1443,7 @@ mod do_generate_tests {
         );
     }
 
+    /// TS: `packages/open-responses/src/responses/open-responses-language-model.test.ts:655`
     #[tokio::test]
     async fn provider_options_reasoning_summary_concise() {
         let server = MockServer::start().await;
@@ -1393,6 +1461,7 @@ mod do_generate_tests {
         assert_eq!(body["reasoning"], json!({"summary": "concise"}));
     }
 
+    /// TS: `packages/open-responses/src/responses/open-responses-language-model.test.ts:685`
     #[tokio::test]
     async fn provider_options_no_reasoning_fields() {
         let server = MockServer::start().await;
@@ -1412,6 +1481,7 @@ mod do_generate_tests {
 
     // -- Tool call parsing tests --
 
+    /// TS: `packages/open-responses/src/responses/open-responses-language-model.test.ts:742`
     #[tokio::test]
     async fn parse_tool_call_from_response() {
         let server = MockServer::start().await;
@@ -1432,19 +1502,19 @@ mod do_generate_tests {
                 )
                 .with_description("Get the weather in a location"),
             )]),
-            tool_choice: ToolChoice::Required,
+            tool_choice: Some(ToolChoice::Required),
             ..CallOptions::new(test_prompt())
         };
         let result = model.do_generate(&options).await.unwrap();
 
         assert_eq!(result.content.len(), 1);
         match &result.content[0] {
-            GenerateContent::ToolCall {
+            GenerateContent::ToolCall(RawToolCall {
                 tool_call_id,
                 tool_name,
                 input,
                 ..
-            } => {
+            }) => {
                 assert_eq!(tool_call_id, "call_2866856768160095");
                 assert_eq!(tool_name, "weather");
                 assert_eq!(
@@ -1456,6 +1526,7 @@ mod do_generate_tests {
         }
     }
 
+    /// TS: `packages/open-responses/src/responses/open-responses-language-model.test.ts:746`
     #[tokio::test]
     async fn tool_call_finish_reason() {
         let server = MockServer::start().await;
@@ -1467,7 +1538,7 @@ mod do_generate_tests {
                 FunctionTool::new("weather", json!({"type": "object"}))
                     .with_description("Get the weather in a location"),
             )]),
-            tool_choice: ToolChoice::Required,
+            tool_choice: Some(ToolChoice::Required),
             ..CallOptions::new(test_prompt())
         };
         let result = model.do_generate(&options).await.unwrap();
@@ -1476,6 +1547,7 @@ mod do_generate_tests {
         assert_eq!(result.finish_reason.raw, None);
     }
 
+    /// TS: `packages/open-responses/src/responses/open-responses-language-model.test.ts:753`
     #[tokio::test]
     async fn tool_call_usage() {
         let server = MockServer::start().await;
@@ -1487,7 +1559,7 @@ mod do_generate_tests {
                 FunctionTool::new("weather", json!({"type": "object"}))
                     .with_description("Get the weather in a location"),
             )]),
-            tool_choice: ToolChoice::Required,
+            tool_choice: Some(ToolChoice::Required),
             ..CallOptions::new(test_prompt())
         };
         let result = model.do_generate(&options).await.unwrap();
@@ -1516,6 +1588,7 @@ mod do_generate_tests {
         )
     }
 
+    /// TS: `packages/open-responses/src/responses/open-responses-language-model.test.ts:772`
     #[tokio::test]
     async fn tool_choice_auto() {
         let server = MockServer::start().await;
@@ -1524,19 +1597,18 @@ mod do_generate_tests {
         let model = make_model(&server, "gemma-7b-it");
         let options = CallOptions {
             tools: Some(vec![test_tool()]),
-            tool_choice: ToolChoice::Auto,
+            tool_choice: Some(ToolChoice::Auto),
             ..CallOptions::new(test_prompt())
         };
         model.do_generate(&options).await.unwrap();
 
         let request = &server.received_requests().await.unwrap()[0];
         let body: Value = serde_json::from_slice(&request.body).unwrap();
-        // In Rust, ToolChoice::Auto is the default and is not emitted (matches
-        // TS behavior where undefined toolChoice is omitted). Tools are still present.
-        assert!(body.get("tool_choice").is_none());
+        assert_eq!(body["tool_choice"], json!("auto"));
         assert!(body.get("tools").is_some());
     }
 
+    /// TS: `packages/open-responses/src/responses/open-responses-language-model.test.ts:784`
     #[tokio::test]
     async fn tool_choice_none() {
         let server = MockServer::start().await;
@@ -1545,7 +1617,7 @@ mod do_generate_tests {
         let model = make_model(&server, "gemma-7b-it");
         let options = CallOptions {
             tools: Some(vec![test_tool()]),
-            tool_choice: ToolChoice::None,
+            tool_choice: Some(ToolChoice::None),
             ..CallOptions::new(test_prompt())
         };
         model.do_generate(&options).await.unwrap();
@@ -1555,6 +1627,7 @@ mod do_generate_tests {
         assert_eq!(body["tool_choice"], json!("none"));
     }
 
+    /// TS: `packages/open-responses/src/responses/open-responses-language-model.test.ts:796`
     #[tokio::test]
     async fn tool_choice_required() {
         let server = MockServer::start().await;
@@ -1563,7 +1636,7 @@ mod do_generate_tests {
         let model = make_model(&server, "gemma-7b-it");
         let options = CallOptions {
             tools: Some(vec![test_tool()]),
-            tool_choice: ToolChoice::Required,
+            tool_choice: Some(ToolChoice::Required),
             ..CallOptions::new(test_prompt())
         };
         model.do_generate(&options).await.unwrap();
@@ -1573,6 +1646,7 @@ mod do_generate_tests {
         assert_eq!(body["tool_choice"], json!("required"));
     }
 
+    /// TS: `packages/open-responses/src/responses/open-responses-language-model.test.ts:808`
     #[tokio::test]
     async fn tool_choice_specific_tool() {
         let server = MockServer::start().await;
@@ -1581,9 +1655,9 @@ mod do_generate_tests {
         let model = make_model(&server, "gemma-7b-it");
         let options = CallOptions {
             tools: Some(vec![test_tool()]),
-            tool_choice: ToolChoice::Tool {
+            tool_choice: Some(ToolChoice::Tool {
                 tool_name: "get_weather".to_string(),
-            },
+            }),
             ..CallOptions::new(test_prompt())
         };
         model.do_generate(&options).await.unwrap();
@@ -1605,16 +1679,11 @@ mod do_generate_tests {
 
         let model = make_model(&server, "gemma-7b-it");
         let prompt = vec![
-            LanguageModelPromptMessage {
-                role: Role::System,
-                content: vec![ContentPart::text("You are a helpful assistant.")],
-                ..Default::default()
+            LanguageModelMessage::System {
+                content: "You are a helpful assistant.".into(),
+                provider_options: None,
             },
-            LanguageModelPromptMessage {
-                role: Role::User,
-                content: vec![ContentPart::text("Hello")],
-                ..Default::default()
-            },
+            LanguageModelMessage::user_text("Hello"),
         ];
         model.do_generate(&default_options(prompt)).await.unwrap();
 
@@ -1630,21 +1699,15 @@ mod do_generate_tests {
 
         let model = make_model(&server, "gemma-7b-it");
         let prompt = vec![
-            LanguageModelPromptMessage {
-                role: Role::System,
-                content: vec![ContentPart::text("You are a helpful assistant.")],
-                ..Default::default()
+            LanguageModelMessage::System {
+                content: "You are a helpful assistant.".into(),
+                provider_options: None,
             },
-            LanguageModelPromptMessage {
-                role: Role::System,
-                content: vec![ContentPart::text("Always be concise.")],
-                ..Default::default()
+            LanguageModelMessage::System {
+                content: "Always be concise.".into(),
+                provider_options: None,
             },
-            LanguageModelPromptMessage {
-                role: Role::User,
-                content: vec![ContentPart::text("Hello")],
-                ..Default::default()
-            },
+            LanguageModelMessage::user_text("Hello"),
         ];
         model.do_generate(&default_options(prompt)).await.unwrap();
 
@@ -1665,30 +1728,29 @@ mod do_generate_tests {
 
         let model = make_model(&server, "gemma-7b-it");
         let prompt = vec![
-            LanguageModelPromptMessage {
-                role: Role::User,
-                content: vec![ContentPart::text("What is the weather in Tokyo?")],
-                ..Default::default()
+            LanguageModelMessage::user_text("What is the weather in Tokyo?"),
+            LanguageModelMessage::Assistant {
+                content: vec![AssistantPart::ToolCall(ToolCallPart {
+                    tool_call_id: "call_weather_123".into(),
+                    tool_name: "get_weather".into(),
+                    input: json!({"location": "Tokyo"}),
+                    provider_executed: None,
+                    provider_options: None,
+                })],
+                provider_options: None,
             },
-            LanguageModelPromptMessage {
-                role: Role::Assistant,
-                content: vec![ContentPart::tool_call(
-                    "call_weather_123",
-                    "get_weather",
-                    json!({"location": "Tokyo"}),
-                )],
-                ..Default::default()
-            },
-            LanguageModelPromptMessage {
-                role: Role::Tool,
-                content: vec![ContentPart::tool_result(
-                    "call_weather_123",
-                    json!({
+            LanguageModelMessage::Tool {
+                content: vec![ToolPart::ToolResult(ToolResultPart {
+                    tool_call_id: "call_weather_123".into(),
+                    output: serde_json::from_value(json!({
                         "type": "json",
                         "value": {"temperature": 22, "condition": "sunny", "humidity": 65}
-                    }),
-                )],
-                ..Default::default()
+                    }))
+                    .unwrap(),
+                    tool_name: "get_weather".into(),
+                    provider_options: None,
+                })],
+                provider_options: None,
             },
         ];
         let options = CallOptions {
@@ -1736,18 +1798,23 @@ mod do_generate_tests {
         mock_json(&server, openai_pdf_json()).await;
 
         let model = make_model(&server, "gpt-4.1-nano");
-        let prompt = vec![LanguageModelPromptMessage {
-            role: Role::User,
+        let prompt = vec![LanguageModelMessage::User {
             content: vec![
-                ContentPart::text(
-                    "What text does this PDF contain? Reply with just the text content, nothing else.",
-                ),
-                ContentPart::file_url(
-                    "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
-                    "application/pdf",
-                ),
-            ],
-            ..Default::default()
+UserPart::Text(TextPart {
+text: "What text does this PDF contain? Reply with just the text content, nothing else.".into(),
+provider_options: None
+}),
+UserPart::File(FilePart {
+data: FileData::Url {
+original_url: None,
+url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf".into()
+},
+media_type: "application/pdf".into(),
+filename: None,
+provider_options: None
+})
+],
+            provider_options: None,
         }];
         model.do_generate(&default_options(prompt)).await.unwrap();
 
@@ -1775,16 +1842,23 @@ mod do_generate_tests {
         mock_json(&server, openai_pdf_json()).await;
 
         let model = make_model(&server, "gpt-4.1-nano");
-        let prompt = vec![LanguageModelPromptMessage {
-            role: Role::User,
+        let prompt = vec![LanguageModelMessage::User {
             content: vec![
-                ContentPart::text("What text does this PDF contain?"),
-                ContentPart::file_url(
-                    "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
-                    "application/pdf",
-                ),
-            ],
-            ..Default::default()
+UserPart::Text(TextPart {
+text: "What text does this PDF contain?".into(),
+provider_options: None
+}),
+UserPart::File(FilePart {
+data: FileData::Url {
+original_url: None,
+url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf".into()
+},
+media_type: "application/pdf".into(),
+filename: None,
+provider_options: None
+})
+],
+            provider_options: None,
         }];
         let result = model.do_generate(&default_options(prompt)).await.unwrap();
 
@@ -1804,16 +1878,23 @@ mod do_generate_tests {
         mock_json(&server, openai_pdf_json()).await;
 
         let model = make_model(&server, "gpt-4.1-nano");
-        let prompt = vec![LanguageModelPromptMessage {
-            role: Role::User,
+        let prompt = vec![LanguageModelMessage::User {
             content: vec![
-                ContentPart::text("What text does this PDF contain?"),
-                ContentPart::file_url(
-                    "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
-                    "application/pdf",
-                ),
-            ],
-            ..Default::default()
+UserPart::Text(TextPart {
+text: "What text does this PDF contain?".into(),
+provider_options: None
+}),
+UserPart::File(FilePart {
+data: FileData::Url {
+original_url: None,
+url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf".into()
+},
+media_type: "application/pdf".into(),
+filename: None,
+provider_options: None
+})
+],
+            provider_options: None,
         }];
         let result = model.do_generate(&default_options(prompt)).await.unwrap();
 
@@ -2009,12 +2090,12 @@ mod do_stream_tests {
 
         // ToolCall
         let tool_call = parts.iter().find_map(|p| match p {
-            StreamPart::ToolCall {
+            StreamPart::ToolCall(RawToolCall {
                 tool_call_id,
                 tool_name,
                 input,
                 ..
-            } => Some((tool_call_id, tool_name, input)),
+            }) => Some((tool_call_id, tool_name, input)),
             _ => None,
         });
         assert!(tool_call.is_some(), "should have ToolCall");
@@ -2081,16 +2162,23 @@ mod do_stream_tests {
         mock_sse(&server, body).await;
 
         let model = make_model(&server, "gpt-4.1-nano");
-        let prompt = vec![LanguageModelPromptMessage {
-            role: Role::User,
+        let prompt = vec![LanguageModelMessage::User {
             content: vec![
-                ContentPart::text("What text does this PDF contain?"),
-                ContentPart::file_url(
-                    "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
-                    "application/pdf",
-                ),
-            ],
-            ..Default::default()
+UserPart::Text(TextPart {
+text: "What text does this PDF contain?".into(),
+provider_options: None
+}),
+UserPart::File(FilePart {
+data: FileData::Url {
+original_url: None,
+url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf".into()
+},
+media_type: "application/pdf".into(),
+filename: None,
+provider_options: None
+})
+],
+            provider_options: None,
         }];
         let result = model.do_stream(&default_options(prompt)).await.unwrap();
         let parts = collect_stream(result).await;
@@ -2143,91 +2231,5 @@ mod do_stream_tests {
 
         // Should not panic or error.
         let _parts = collect_stream(result).await;
-    }
-}
-
-// ============================================================================
-// config_snapshot / api_key_source (M2b)
-// ============================================================================
-
-#[cfg(test)]
-mod config_snapshot_tests {
-    use super::*;
-    use aimux_core::language_model::LanguageModel;
-
-    /// No `headers` closure → no auth → `api_key_source == "none"` (e.g. a local
-    /// LM Studio server).
-    #[test]
-    fn no_headers_means_none_source() {
-        let provider = OpenResponsesProvider::new(make_config_dummy());
-        let snap = provider.model("gemma-7b-it").config_snapshot();
-        assert_eq!(snap.provider, "lmstudio");
-        assert_eq!(snap.api_key_source, "none");
-    }
-
-    /// A `headers` closure that carries an `Authorization` header →
-    /// `api_key_source == "explicit"` (auth detected from the closure; the
-    /// secret value is never serialized).
-    #[test]
-    fn headers_with_auth_means_explicit_source() {
-        let config =
-            OpenResponsesConfig::new("lmstudio", "lmstudio", "https://example/v1/responses")
-                .with_headers(|| {
-                    let mut h = HashMap::new();
-                    h.insert(
-                        "Authorization".to_string(),
-                        "Bearer super-secret".to_string(),
-                    );
-                    h
-                });
-        let snap = OpenResponsesProvider::new(config)
-            .model("gemma-7b-it")
-            .config_snapshot();
-        assert_eq!(snap.api_key_source, "explicit");
-        let json = serde_json::to_string(&snap).unwrap();
-        assert!(
-            !json.contains("super-secret"),
-            "plaintext secret leaked: {json}"
-        );
-    }
-
-    /// An explicit `with_api_key_source` marker overrides closure inference
-    /// (lets a caller record an `env:VAR` source precisely).
-    #[test]
-    fn explicit_source_overrides_closure_inference() {
-        let config =
-            OpenResponsesConfig::new("lmstudio", "lmstudio", "https://example/v1/responses")
-                .with_headers(|| {
-                    let mut h = HashMap::new();
-                    h.insert("Authorization".to_string(), "Bearer k".to_string());
-                    h
-                })
-                .with_api_key_source(Some("env:OPEN_RESPONSES_API_KEY"));
-        let snap = OpenResponsesProvider::new(config)
-            .model("gemma-7b-it")
-            .config_snapshot();
-        assert_eq!(snap.api_key_source, "env:OPEN_RESPONSES_API_KEY");
-    }
-
-    /// A `headers` closure carrying only non-auth custom headers → `none`
-    /// (auth detection is key-name based, not "closure present").
-    #[test]
-    fn headers_without_auth_means_none_source() {
-        let config =
-            OpenResponsesConfig::new("lmstudio", "lmstudio", "https://example/v1/responses")
-                .with_headers(|| {
-                    let mut h = HashMap::new();
-                    h.insert("X-Custom".to_string(), "value".to_string());
-                    h
-                });
-        let snap = OpenResponsesProvider::new(config)
-            .model("gemma-7b-it")
-            .config_snapshot();
-        assert_eq!(snap.api_key_source, "none");
-    }
-
-    /// Minimal config without a mock server (snapshot needs no HTTP).
-    fn make_config_dummy() -> OpenResponsesConfig {
-        OpenResponsesConfig::new("lmstudio", "lmstudio", "https://example/v1/responses")
     }
 }

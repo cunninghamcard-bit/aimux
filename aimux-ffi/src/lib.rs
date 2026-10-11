@@ -12,7 +12,7 @@
 //! value on failure (the out-parameter is left at its sentinel: handle 0,
 //! pointer NULL). Every non-NULL error has one code from [`aimux_error_code`]
 //! and one message from [`aimux_error_message`], and is released exactly once
-//! with [`aimux_error_free`]. Codes 1..17 come from `AiMuxError`, 100..105
+//! with [`aimux_error_free`]. Codes 1..20 come from `AiMuxError`, 100..105
 //! from `RecordingError`, and 200..206 identify failures detected while
 //! crossing the C ABI.
 //!
@@ -71,18 +71,20 @@ use aimux_core::provider::Provider;
 use aimux_core::recording::RecordingError;
 use aimux_core::tool::ToolCall;
 use aimux_core::trace::{RingTraceStore, TraceFilter, TraceLayer};
-use aimux_providers::anthropic::{AnthropicConfig, AnthropicProvider};
-use aimux_providers::anthropic_aws::{AnthropicAwsProvider, AnthropicAwsProviderConfig};
-use aimux_providers::azure::{AzureConfig, AzureProvider};
-use aimux_providers::bedrock::{BedrockProvider, BedrockProviderConfig};
-use aimux_providers::cohere::{CohereConfig, CohereProvider};
-use aimux_providers::google::{GoogleConfig, GoogleProvider};
-use aimux_providers::mistral::{MistralConfig, MistralProvider};
-use aimux_providers::openai::{OpenAIConfig, OpenAIProvider};
-use aimux_providers::tavily::{TavilyConfig, TavilyProvider};
-use aimux_providers::vertex::{VertexProvider, VertexProviderConfig};
-use aimux_providers::xai::{XAIConfig, XAIProvider};
-use aimux_providers::{ProviderOptions, provider, provider_handle};
+use aimux_providers::anthropic::{AnthropicProviderSettings, create_anthropic};
+use aimux_providers::anthropic_aws::{
+    AnthropicAwsAuth, AnthropicAwsProviderSettings, create_anthropic_aws,
+};
+use aimux_providers::azure::{AzureOpenAIProviderSettings, create_azure};
+use aimux_providers::bedrock::{AmazonBedrockProviderSettings, create_amazon_bedrock};
+use aimux_providers::cohere::{CohereProviderSettings, create_cohere};
+use aimux_providers::google::{GoogleProviderSettings, create_google};
+use aimux_providers::mistral::{MistralProviderSettings, create_mistral};
+use aimux_providers::openai::{OpenAIProviderSettings, create_openai};
+use aimux_providers::tavily::{TavilyProvider, TavilyProviderSettings, create_tavily};
+use aimux_providers::vertex::{VertexProviderSettings, create_google_vertex};
+use aimux_providers::xai::{XAIProviderSettings, create_xai};
+use aimux_providers::{PresetSettings, create_provider};
 
 use futures::StreamExt;
 use tokio::runtime::Runtime;
@@ -96,7 +98,7 @@ use tokio::runtime::Runtime;
 #[derive(Clone)]
 enum HandleEntry {
     Language(Arc<dyn LanguageModel>),
-    Provider(Arc<dyn aimux_core::provider::Provider>),
+    Provider(ProviderEntry),
     Embedding(Arc<dyn aimux_core::embedding_model::EmbeddingModel>),
     Speech(Arc<dyn aimux_core::speech_model::SpeechModel>),
     Image(Arc<dyn aimux_core::image_model::ImageModel>),
@@ -109,6 +111,14 @@ enum HandleEntry {
     /// Live transcription streaming session (RFC-0028 Phase 2).
     TranscriptionSession(Arc<transcription_session::TranscriptionFfiSession>),
     Abort(AbortSignal),
+}
+
+/// A provider handle: the model factory plus its runtime-discovery side.
+///
+/// Discovery is accessed through `Provider::discovery()`.
+#[derive(Clone)]
+struct ProviderEntry {
+    provider: Arc<dyn aimux_core::provider::Provider>,
 }
 
 type Registry = HashMap<u64, HandleEntry>;
@@ -439,6 +449,12 @@ pub const AIMUX_E_RETRY: i32 = 14;
 pub const AIMUX_E_NO_SUCH_TOOL: i32 = 15;
 pub const AIMUX_E_INVALID_TOOL_INPUT: i32 = 16;
 pub const AIMUX_E_TOOL_CALL_REPAIR: i32 = 17;
+// Appended after 17 (4 stays retired): the AI SDK's `LoadAPIKeyError` and
+// `LoadSettingError`. Their facts travel on the provider-code / provider-message
+// getters: `env_var` and the description (key) or setting name.
+pub const AIMUX_E_LOAD_API_KEY: i32 = 18;
+pub const AIMUX_E_LOAD_SETTING: i32 = 19;
+pub const AIMUX_E_NO_OUTPUT_GENERATED: i32 = 20;
 
 // 100..105 preserve `RecordingError` as a separate high-level type while C
 // uses one code space for every returned error.
@@ -469,12 +485,17 @@ fn aimux_error_code_of(err: &AiMuxError) -> i32 {
         AiMuxError::ApiCall { .. } => AIMUX_E_API_CALL,
         AiMuxError::Retry(_) => AIMUX_E_RETRY,
         AiMuxError::JsonParse(_) => AIMUX_E_JSON_PARSE,
-        AiMuxError::InvalidResponseData(_) => AIMUX_E_INVALID_RESPONSE_DATA,
+        AiMuxError::NoOutputGenerated(_) => AIMUX_E_NO_OUTPUT_GENERATED,
+        AiMuxError::InvalidResponseData(_) | AiMuxError::ToolCallNotFoundForApproval { .. } => {
+            AIMUX_E_INVALID_RESPONSE_DATA
+        }
         AiMuxError::NoSuchTool { .. } => AIMUX_E_NO_SUCH_TOOL,
         AiMuxError::InvalidToolInput { .. } => AIMUX_E_INVALID_TOOL_INPUT,
         AiMuxError::ToolCallRepair { .. } => AIMUX_E_TOOL_CALL_REPAIR,
         AiMuxError::InvalidArgument(_) => AIMUX_E_INVALID_ARGUMENT,
         AiMuxError::InvalidPrompt(_) => AIMUX_E_INVALID_PROMPT,
+        AiMuxError::LoadApiKey { .. } => AIMUX_E_LOAD_API_KEY,
+        AiMuxError::LoadSetting { .. } => AIMUX_E_LOAD_SETTING,
         AiMuxError::TokenExpired(_) => AIMUX_E_TOKEN_EXPIRED,
         AiMuxError::UnsupportedFunctionality(_) => AIMUX_E_UNSUPPORTED_FUNCTIONALITY,
         AiMuxError::NoSuchModel { .. } => AIMUX_E_NO_SUCH_MODEL,
@@ -597,19 +618,35 @@ pub extern "C" fn aimux_error_retryable(err: *const aimux_error_t) -> i32 {
 }
 
 /// `AIMUX_E_API_CALL`: the provider's own error code, e.g. "insufficient_quota".
+/// `AIMUX_E_LOAD_API_KEY` / `AIMUX_E_LOAD_SETTING`: the environment variable
+/// that was consulted (`env_var`), e.g. "OPENAI_API_KEY".
 #[unsafe(no_mangle)]
 pub extern "C" fn aimux_error_provider_code(err: *const aimux_error_t) -> *mut c_char {
-    opt_cstring(map_aimux_error(err, |e| api_call(e)?.provider_code.clone()).flatten())
+    opt_cstring(
+        map_aimux_error(err, |e| match e {
+            AiMuxError::LoadApiKey { env_var, .. } | AiMuxError::LoadSetting { env_var, .. } => {
+                Some(env_var.clone())
+            }
+            _ => api_call(e)?.provider_code.clone(),
+        })
+        .flatten(),
+    )
 }
 
 /// `AIMUX_E_API_CALL`: the failure's own text ("slow down"), without the
 /// composed prefix `message` carries ("API call error: HTTP 429: slow down").
+/// `AIMUX_E_LOAD_API_KEY`: what the key is for ("OpenAI");
+/// `AIMUX_E_LOAD_SETTING`: the setting's parameter name ("region").
 #[unsafe(no_mangle)]
 pub extern "C" fn aimux_error_provider_message(err: *const aimux_error_t) -> *mut c_char {
     opt_cstring(
-        map_aimux_error(err, |e| Some(api_call(e)?.message.clone()))
-            .flatten()
-            .filter(|m| !m.is_empty()),
+        map_aimux_error(err, |e| match e {
+            AiMuxError::LoadApiKey { description, .. } => Some(description.clone()),
+            AiMuxError::LoadSetting { name, .. } => Some(name.clone()),
+            _ => Some(api_call(e)?.message.clone()),
+        })
+        .flatten()
+        .filter(|m| !m.is_empty()),
     )
 }
 
@@ -744,7 +781,7 @@ pub extern "C" fn aimux_error_model_type(err: *const aimux_error_t) -> *mut c_ch
 pub extern "C" fn aimux_error_provider_id(err: *const aimux_error_t) -> *mut c_char {
     opt_cstring(
         map_aimux_error(err, |e| match e {
-            AiMuxError::NoSuchProvider { provider_id } => Some(provider_id.clone()),
+            AiMuxError::NoSuchProvider { provider_id, .. } => Some(provider_id.clone()),
             _ => None,
         })
         .flatten(),
@@ -937,17 +974,52 @@ fn parse_opts_arg(opts_json: *const c_char) -> FfiResult<GenerateTextOptions> {
     }
 }
 
-/// Parse the optional `config_json` argument (`ProviderOptions`); NULL,
-/// empty or "null" means unset.
-fn parse_provider_options(config_json: *const c_char) -> FfiResult<Option<ProviderOptions>> {
-    match opt_str_arg(config_json, "config_json")? {
-        Some(s) if !s.trim().is_empty() && s.trim() != "null" => {
-            serde_json::from_str::<ProviderOptions>(&s)
-                .map(Some)
-                .map_err(|e| wire_err("config_json", e))
-        }
-        _ => Ok(None),
+/// The optional `config_json` of the by-name constructors, as the settings of
+/// the selected factory. NULL, empty or "null" means no settings. An unknown
+/// key (`maxRetries`, `bodyOverrides`, ...) is `InvalidArgument`.
+fn parse_provider_settings(
+    api_key: Option<String>,
+    config_json: *const c_char,
+) -> FfiResult<PresetSettings> {
+    #[derive(serde::Deserialize, Default)]
+    #[serde(deny_unknown_fields, rename_all = "camelCase")]
+    struct Config {
+        base_url: Option<String>,
+        headers: Option<HashMap<String, String>>,
+        organization: Option<String>,
+        project: Option<String>,
+        params: Option<HashMap<String, String>>,
     }
+    let config = match opt_str_arg(config_json, "config_json")? {
+        Some(s) if !s.trim().is_empty() && s.trim() != "null" => {
+            serde_json::from_str::<Config>(&s).map_err(|e| wire_err("config_json", e))?
+        }
+        _ => Config::default(),
+    };
+    // Organization and project become their headers, below the caller's own.
+    let mut headers = aimux_provider_utils::HeaderMapOpt::new();
+    for (name, value) in [
+        ("OpenAI-Organization", config.organization),
+        ("OpenAI-Project", config.project),
+    ] {
+        if let Some(value) = value {
+            headers.insert(name.to_string(), Some(value));
+        }
+    }
+    headers.extend(
+        config
+            .headers
+            .into_iter()
+            .flatten()
+            .map(|(k, v)| (k, Some(v))),
+    );
+    Ok(PresetSettings {
+        api_key: api_key.map(aimux_provider_utils::Resolvable::Value),
+        base_url: config.base_url,
+        headers: (!headers.is_empty()).then_some(headers),
+        params: config.params.unwrap_or_default(),
+        ..PresetSettings::default()
+    })
 }
 
 /// Read a config-style JSON C string and normalize it for lenient
@@ -1040,6 +1112,20 @@ fn invoke_stream_callback(callback_name: &str, f: impl FnOnce()) -> Result<(), F
 // C ABI: provider constructors
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// An OpenAI provider for a key handed over the C ABI. The key is an explicit
+/// value, so an empty string is sent as given and never falls back to
+/// `OPENAI_API_KEY`.
+fn openai_provider(
+    api_key: String,
+    base_url: Option<String>,
+) -> Result<aimux_providers::openai::OpenAIProvider, AiMuxError> {
+    create_openai(OpenAIProviderSettings {
+        api_key: Some(api_key),
+        base_url,
+        ..Default::default()
+    })
+}
+
 /// Create an OpenAI model instance. AiMuxError: invalid model id.
 #[unsafe(no_mangle)]
 pub extern "C" fn aimux_openai_new(
@@ -1049,8 +1135,9 @@ pub extern "C" fn aimux_openai_new(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let (api_key, model_id) = parse_two_args(api_key, "api_key", model_id, "model_id")?;
-        let m = OpenAIProvider::new(OpenAIConfig::new(api_key)).language_model(&model_id)?;
-        Ok(intern_model(Arc::from(m)))
+        Ok(intern_model(
+            openai_provider(api_key, None)?.language_model(&model_id)?,
+        ))
     })
 }
 
@@ -1066,12 +1153,38 @@ pub extern "C" fn aimux_openai_new_with_base(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let (api_key, model_id) = parse_two_args(api_key, "api_key", model_id, "model_id")?;
-        let mut config = OpenAIConfig::new(api_key);
-        if let Some(url) = parse_base_url(base_url)? {
-            config = config.with_base_url(url);
-        }
-        let m = OpenAIProvider::new(config).language_model(&model_id)?;
-        Ok(intern_model(Arc::from(m)))
+        let provider = openai_provider(api_key, parse_base_url(base_url)?)?;
+        Ok(intern_model(provider.language_model(&model_id)?))
+    })
+}
+
+/// An Anthropic provider for an explicit key handed over by the host, with an
+/// optional base URL. The key is an explicit value (`""` included), so it
+/// never falls back to `ANTHROPIC_API_KEY`.
+fn anthropic_provider(
+    api_key: String,
+    base_url: Option<String>,
+) -> Result<aimux_providers::anthropic::AnthropicProvider, AiMuxError> {
+    create_anthropic(AnthropicProviderSettings {
+        api_key: Some(api_key),
+        base_url,
+        ..Default::default()
+    })
+}
+
+/// An Anthropic-on-AWS provider for an explicit API key and region.
+fn anthropic_aws_provider(
+    api_key: String,
+    region: String,
+    base_url: Option<String>,
+) -> Result<aimux_providers::anthropic_aws::AnthropicAwsProvider, AiMuxError> {
+    create_anthropic_aws(AnthropicAwsProviderSettings {
+        region: Some(region),
+        auth: Some(AnthropicAwsAuth::ApiKey(
+            aimux_provider_utils::Resolvable::Value(api_key),
+        )),
+        base_url,
+        ..Default::default()
     })
 }
 
@@ -1084,8 +1197,8 @@ pub extern "C" fn aimux_anthropic_new(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let (api_key, model_id) = parse_two_args(api_key, "api_key", model_id, "model_id")?;
-        let m = AnthropicProvider::new(AnthropicConfig::new(api_key)).language_model(&model_id)?;
-        Ok(intern_model(Arc::from(m)))
+        let m = anthropic_provider(api_key, None)?.language_model(&model_id)?;
+        Ok(intern_model(m))
     })
 }
 
@@ -1101,12 +1214,9 @@ pub extern "C" fn aimux_anthropic_new_with_base(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let (api_key, model_id) = parse_two_args(api_key, "api_key", model_id, "model_id")?;
-        let mut config = AnthropicConfig::new(api_key);
-        if let Some(url) = parse_base_url(base_url)? {
-            config = config.with_base_url(url);
-        }
-        let m = AnthropicProvider::new(config).language_model(&model_id)?;
-        Ok(intern_model(Arc::from(m)))
+        let m =
+            anthropic_provider(api_key, parse_base_url(base_url)?)?.language_model(&model_id)?;
+        Ok(intern_model(m))
     })
 }
 
@@ -1122,10 +1232,8 @@ pub extern "C" fn aimux_anthropic_aws_new(
         let api_key = str_arg(api_key, "api_key")?;
         let region = str_arg(region, "region")?;
         let model_id = str_arg(model_id, "model_id")?;
-        let m =
-            AnthropicAwsProvider::new(AnthropicAwsProviderConfig::with_api_key(api_key, region))
-                .language_model(&model_id)?;
-        Ok(intern_model(Arc::from(m)))
+        let m = anthropic_aws_provider(api_key, region, None)?.language_model(&model_id)?;
+        Ok(intern_model(m))
     })
 }
 
@@ -1142,12 +1250,9 @@ pub extern "C" fn aimux_anthropic_aws_new_with_base(
         let api_key = str_arg(api_key, "api_key")?;
         let region = str_arg(region, "region")?;
         let model_id = str_arg(model_id, "model_id")?;
-        let mut config = AnthropicAwsProviderConfig::with_api_key(api_key, region);
-        if let Some(url) = parse_base_url(base_url)? {
-            config = config.with_base_url(url);
-        }
-        let m = AnthropicAwsProvider::new(config).language_model(&model_id)?;
-        Ok(intern_model(Arc::from(m)))
+        let m = anthropic_aws_provider(api_key, region, parse_base_url(base_url)?)?
+            .language_model(&model_id)?;
+        Ok(intern_model(m))
     })
 }
 
@@ -1167,14 +1272,10 @@ pub extern "C" fn aimux_azure_new(
         let api_key = str_arg(api_key, "api_key")?;
         let resource_name = str_arg(resource_name, "resource_name")?;
         let deployment = str_arg(deployment, "deployment")?;
-        let mut config = AzureConfig::new()
-            .with_api_key(api_key)
-            .with_resource_name(resource_name);
-        if let Some(v) = opt_str_arg(api_version, "api_version")?.filter(|v| !v.is_empty()) {
-            config = config.with_api_version(v);
-        }
-        let m = AzureProvider::new(config)?.language_model(&deployment)?;
-        Ok(intern_model(Arc::from(m)))
+        let api_version = opt_str_arg(api_version, "api_version")?.filter(|v| !v.is_empty());
+        let m = azure_provider(api_key, Some(resource_name), None, api_version)?
+            .language_model(&deployment)?;
+        Ok(intern_model(m))
     })
 }
 
@@ -1192,15 +1293,127 @@ pub extern "C" fn aimux_azure_new_with_base(
         let api_key = str_arg(api_key, "api_key")?;
         let base_url = str_arg(base_url, "base_url")?;
         let deployment = str_arg(deployment, "deployment")?;
-        let mut config = AzureConfig::new()
-            .with_api_key(api_key)
-            .with_base_url(base_url);
-        if let Some(v) = opt_str_arg(api_version, "api_version")?.filter(|v| !v.is_empty()) {
-            config = config.with_api_version(v);
-        }
-        let m = AzureProvider::new(config)?.language_model(&deployment)?;
-        Ok(intern_model(Arc::from(m)))
+        let api_version = opt_str_arg(api_version, "api_version")?.filter(|v| !v.is_empty());
+        let m = azure_provider(api_key, None, Some(base_url), api_version)?
+            .language_model(&deployment)?;
+        Ok(intern_model(m))
     })
+}
+
+/// A Bedrock provider for explicit SigV4 credentials handed over by the host,
+/// with an optional base URL. The credentials are explicit values, so they
+/// never fall back to the environment.
+fn bedrock_provider(
+    access_key_id: String,
+    secret_access_key: String,
+    region: String,
+    base_url: Option<String>,
+) -> Result<aimux_providers::bedrock::AmazonBedrockProvider, AiMuxError> {
+    create_amazon_bedrock(AmazonBedrockProviderSettings {
+        credential_provider: Some(aimux_provider_utils::Resolvable::Value(
+            aimux_provider_utils::AwsCredentials {
+                access_key_id,
+                secret_access_key,
+                session_token: None,
+                region: region.clone(),
+            },
+        )),
+        region: Some(region),
+        base_url,
+        ..Default::default()
+    })
+}
+
+/// A Vertex AI provider for an explicit access token, project and location,
+/// with an optional base URL.
+fn vertex_provider(
+    access_token: String,
+    project: String,
+    location: String,
+    base_url: Option<String>,
+) -> Result<aimux_providers::vertex::VertexProvider, AiMuxError> {
+    create_google_vertex(VertexProviderSettings {
+        access_token: Some(aimux_provider_utils::Resolvable::Value(access_token)),
+        project: Some(project),
+        location: Some(location),
+        base_url,
+        ..Default::default()
+    })
+}
+
+/// A Google provider for an explicit key handed over by the host, with an
+/// optional base URL.
+fn google_provider(
+    api_key: String,
+    base_url: Option<String>,
+) -> Result<aimux_providers::google::GoogleProvider, AiMuxError> {
+    create_google(GoogleProviderSettings {
+        api_key: Some(api_key),
+        base_url,
+        ..Default::default()
+    })
+}
+
+/// A Cohere provider for an explicit key handed over by the host, with an
+/// optional base URL.
+fn cohere_provider(
+    api_key: String,
+    base_url: Option<String>,
+) -> Result<aimux_providers::cohere::CohereProvider, AiMuxError> {
+    create_cohere(CohereProviderSettings {
+        api_key: Some(api_key),
+        base_url,
+        ..Default::default()
+    })
+}
+
+/// A Mistral provider for an explicit key handed over by the host, with an
+/// optional base URL.
+fn mistral_provider(
+    api_key: String,
+    base_url: Option<String>,
+) -> Result<aimux_providers::mistral::MistralProvider, AiMuxError> {
+    create_mistral(MistralProviderSettings {
+        api_key: Some(api_key),
+        base_url,
+        ..Default::default()
+    })
+}
+
+/// An xAI provider for an explicit key handed over by the host, with an
+/// optional base URL.
+fn xai_provider(
+    api_key: String,
+    base_url: Option<String>,
+) -> Result<aimux_providers::xai::XAIProvider, AiMuxError> {
+    create_xai(XAIProviderSettings {
+        api_key: Some(api_key),
+        base_url,
+        ..Default::default()
+    })
+}
+
+/// An Azure OpenAI provider for an explicit key, with either a resource name
+/// or a base URL. A dated `api_version` belongs to the deployment URL form
+/// (`{base}/deployments/{deployment}{path}?api-version=`), so passing one
+/// selects it; without one the AI SDK's v1 form is used.
+fn azure_provider(
+    api_key: String,
+    resource_name: Option<String>,
+    base_url: Option<String>,
+    api_version: Option<String>,
+) -> Result<aimux_providers::azure::AzureOpenAIProvider, AiMuxError> {
+    let mut settings = AzureOpenAIProviderSettings {
+        api_key: Some(aimux_provider_utils::Resolvable::Value(api_key)),
+        resource_name,
+        base_url,
+        ..Default::default()
+    };
+    if let Some(version) = api_version {
+        settings.api_version = Some(version);
+        settings.use_deployment_based_urls = true;
+    }
+    create_azure(settings)
 }
 
 /// Create a Bedrock model instance (AWS SigV4 credentials).
@@ -1223,13 +1436,9 @@ pub extern "C" fn aimux_bedrock_new(
             model_id,
             "model_id",
         )?;
-        let m = BedrockProvider::new(BedrockProviderConfig::new(
-            access_key_id,
-            secret_access_key,
-            region,
-        ))
-        .language_model(&model_id)?;
-        Ok(intern_model(Arc::from(m)))
+        let m = bedrock_provider(access_key_id, secret_access_key, region, None)?
+            .language_model(&model_id)?;
+        Ok(intern_model(m))
     })
 }
 
@@ -1254,12 +1463,14 @@ pub extern "C" fn aimux_bedrock_new_with_base(
             model_id,
             "model_id",
         )?;
-        let mut config = BedrockProviderConfig::new(access_key_id, secret_access_key, region);
-        if let Some(url) = parse_base_url(base_url)? {
-            config = config.with_base_url(url);
-        }
-        let m = BedrockProvider::new(config).language_model(&model_id)?;
-        Ok(intern_model(Arc::from(m)))
+        let m = bedrock_provider(
+            access_key_id,
+            secret_access_key,
+            region,
+            parse_base_url(base_url)?,
+        )?
+        .language_model(&model_id)?;
+        Ok(intern_model(m))
     })
 }
 
@@ -1283,9 +1494,9 @@ pub extern "C" fn aimux_vertex_new(
             model_id,
             "model_id",
         )?;
-        let m = VertexProvider::new(VertexProviderConfig::new(access_token, project, location))
-            .language_model(&model_id)?;
-        Ok(intern_model(Arc::from(m)))
+        let m =
+            vertex_provider(access_token, project, location, None)?.language_model(&model_id)?;
+        Ok(intern_model(m))
     })
 }
 
@@ -1310,12 +1521,9 @@ pub extern "C" fn aimux_vertex_new_with_base(
             model_id,
             "model_id",
         )?;
-        let mut config = VertexProviderConfig::new(access_token, project, location);
-        if let Some(url) = parse_base_url(base_url)? {
-            config = config.with_base_url(url);
-        }
-        let m = VertexProvider::new(config).language_model(&model_id)?;
-        Ok(intern_model(Arc::from(m)))
+        let m = vertex_provider(access_token, project, location, parse_base_url(base_url)?)?
+            .language_model(&model_id)?;
+        Ok(intern_model(m))
     })
 }
 
@@ -1328,8 +1536,8 @@ pub extern "C" fn aimux_cohere_new(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let (api_key, model_id) = parse_two_args(api_key, "api_key", model_id, "model_id")?;
-        let m = CohereProvider::new(CohereConfig::new(api_key)).language_model(&model_id)?;
-        Ok(intern_model(Arc::from(m)))
+        let m = cohere_provider(api_key, None)?.language_model(&model_id)?;
+        Ok(intern_model(m))
     })
 }
 
@@ -1343,12 +1551,8 @@ pub extern "C" fn aimux_cohere_new_with_base(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let (api_key, model_id) = parse_two_args(api_key, "api_key", model_id, "model_id")?;
-        let mut config = CohereConfig::new(api_key);
-        if let Some(url) = parse_base_url(base_url)? {
-            config = config.with_base_url(url);
-        }
-        let m = CohereProvider::new(config).language_model(&model_id)?;
-        Ok(intern_model(Arc::from(m)))
+        let m = cohere_provider(api_key, parse_base_url(base_url)?)?.language_model(&model_id)?;
+        Ok(intern_model(m))
     })
 }
 
@@ -1361,8 +1565,8 @@ pub extern "C" fn aimux_mistral_new(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let (api_key, model_id) = parse_two_args(api_key, "api_key", model_id, "model_id")?;
-        let m = MistralProvider::new(MistralConfig::new(api_key)).language_model(&model_id)?;
-        Ok(intern_model(Arc::from(m)))
+        let m = mistral_provider(api_key, None)?.language_model(&model_id)?;
+        Ok(intern_model(m))
     })
 }
 
@@ -1376,12 +1580,8 @@ pub extern "C" fn aimux_mistral_new_with_base(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let (api_key, model_id) = parse_two_args(api_key, "api_key", model_id, "model_id")?;
-        let mut config = MistralConfig::new(api_key);
-        if let Some(url) = parse_base_url(base_url)? {
-            config = config.with_base_url(url);
-        }
-        let m = MistralProvider::new(config).language_model(&model_id)?;
-        Ok(intern_model(Arc::from(m)))
+        let m = mistral_provider(api_key, parse_base_url(base_url)?)?.language_model(&model_id)?;
+        Ok(intern_model(m))
     })
 }
 
@@ -1394,8 +1594,8 @@ pub extern "C" fn aimux_xai_new(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let (api_key, model_id) = parse_two_args(api_key, "api_key", model_id, "model_id")?;
-        let m = XAIProvider::new(XAIConfig::new(api_key)).language_model(&model_id)?;
-        Ok(intern_model(Arc::from(m)))
+        let m = xai_provider(api_key, None)?.language_model(&model_id)?;
+        Ok(intern_model(m))
     })
 }
 
@@ -1409,12 +1609,8 @@ pub extern "C" fn aimux_xai_new_with_base(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let (api_key, model_id) = parse_two_args(api_key, "api_key", model_id, "model_id")?;
-        let mut config = XAIConfig::new(api_key);
-        if let Some(url) = parse_base_url(base_url)? {
-            config = config.with_base_url(url);
-        }
-        let m = XAIProvider::new(config).language_model(&model_id)?;
-        Ok(intern_model(Arc::from(m)))
+        let m = xai_provider(api_key, parse_base_url(base_url)?)?.language_model(&model_id)?;
+        Ok(intern_model(m))
     })
 }
 
@@ -1424,12 +1620,12 @@ pub extern "C" fn aimux_xai_new_with_base(
 /// - `api_key` — may be NULL to read the provider's env var from the registry
 ///   entry (replaces the retired `aimux_deepseek_new` etc.).
 /// - `model_id` — model id string.
-/// - `config_json` — optional JSON object of `ProviderOptions`
-///   (`{"base_url": "...", "headers": {...}, "max_retries": 0, "body_overrides": {...}}`);
-///   NULL / empty / "null" for defaults.
+/// - `config_json` — optional JSON object of settings
+///   (`{"baseUrl": "...", "headers": {...}, "organization": "...", "project": "...", "params": {...}}`);
+///   NULL / empty / "null" for defaults. Any other key (`maxRetries` is a
+///   call-level option, `bodyOverrides` is gone) is an invalid argument.
 ///
-/// AiMuxError: unknown provider, bad config shape, missing env key, or
-/// invalid model id.
+/// AiMuxError: unknown provider, bad config shape, or invalid model id.
 #[unsafe(no_mangle)]
 pub extern "C" fn aimux_provider_new(
     name: *const c_char,
@@ -1443,14 +1639,14 @@ pub extern "C" fn aimux_provider_new(
         let model_id = str_arg(model_id, "model_id")?;
         // NULL => the registry entry's env var; a non-NULL key must be UTF-8.
         let key = opt_str_arg(api_key, "api_key")?;
-        let opts = parse_provider_options(config_json)?;
-        let m = provider(&name, key, &model_id, opts)?;
-        Ok(intern_model(Arc::from(m)))
+        let settings = parse_provider_settings(key, config_json)?;
+        let m = create_provider(&name, settings)?.language_model(&model_id)?;
+        Ok(intern_model(m))
     })
 }
 
 /// Convenience: create a language model by provider name, reading the API key
-/// from the provider's env var.
+/// from the provider's env var at request time.
 #[unsafe(no_mangle)]
 pub extern "C" fn aimux_provider_from_env(
     name: *const c_char,
@@ -1460,8 +1656,8 @@ pub extern "C" fn aimux_provider_from_env(
     with_out_handle(out_handle, || {
         let name = str_arg(name, "name")?;
         let model_id = str_arg(model_id, "model_id")?;
-        let m = provider(&name, None, &model_id, None)?;
-        Ok(intern_model(Arc::from(m)))
+        let m = create_provider(&name, PresetSettings::default())?.language_model(&model_id)?;
+        Ok(intern_model(m))
     })
 }
 
@@ -1476,7 +1672,7 @@ pub extern "C" fn aimux_provider_from_env(
 /// discovery) and `aimux_provider_model` (build a model from a discovered id).
 ///
 /// `api_key = null` reads the provider's env var from the registry entry.
-/// `config_json` is an optional `ProviderOptions` JSON string (same as
+/// `config_json` is an optional settings JSON string (same as
 /// `aimux_provider_new`).
 #[unsafe(no_mangle)]
 pub extern "C" fn aimux_provider_handle_new(
@@ -1488,16 +1684,18 @@ pub extern "C" fn aimux_provider_handle_new(
     with_out_handle(out_handle, || {
         let name = str_arg(name, "name")?;
         let key = opt_str_arg(api_key, "api_key")?;
-        let opts = parse_provider_options(config_json)?;
-        let p = provider_handle(&name, key, opts)?;
-        Ok(intern_handle(HandleEntry::Provider(Arc::from(p))))
+        let settings = parse_provider_settings(key, config_json)?;
+        let provider = create_provider(&name, settings)?;
+        Ok(intern_handle(HandleEntry::Provider(ProviderEntry {
+            provider,
+        })))
     })
 }
 
 /// List models on a provider handle (RFC-0027 runtime discovery).
 ///
 /// `handle` is from `aimux_provider_handle_new`. Writes a JSON array of
-/// sparse `RuntimeModel` (id / owned_by / created) — **no community
+/// sparse `RuntimeModel` (id / ownedBy / created) — **no community
 /// enrichment**. To supplement with model specs, call `aimux_get_model_specs`
 /// separately and merge in the host.
 #[unsafe(no_mangle)]
@@ -1512,7 +1710,10 @@ pub extern "C" fn aimux_provider_list_models(
             }
             .into());
         };
-        run_json(p.list_models())
+        let discovery = p.provider.discovery().ok_or_else(|| {
+            AiMuxError::InvalidArgument("provider does not support model discovery".into())
+        })?;
+        run_json(discovery.list_models())
     })
 }
 
@@ -1535,8 +1736,8 @@ pub extern "C" fn aimux_provider_model(
             .into());
         };
         let model_id = str_arg(model_id, "model_id")?;
-        let m = p.language_model(&model_id)?;
-        Ok(intern_model(Arc::from(m)))
+        let m = p.provider.language_model(&model_id)?;
+        Ok(intern_model(m))
     })
 }
 
@@ -1589,8 +1790,8 @@ pub extern "C" fn aimux_generate_text(
 /// Generate a structured JSON object from the model (M12, RFC-0016).
 ///
 /// Same signature as [`aimux_generate_text`]; writes the serialized
-/// `GenerateObjectResult`. The caller passes `response_format: { "Json": {
-/// ... } }` via `opts_json` to control the schema; the function applies JSON
+/// `GenerateObjectResult`. The caller passes `responseFormat: { "type": "json",
+/// ... }` via `opts_json` to control the schema; the function applies JSON
 /// repair before parsing.
 #[unsafe(no_mangle)]
 pub extern "C" fn aimux_generate_object(
@@ -1732,13 +1933,13 @@ pub extern "C" fn aimux_stream_text_with_abort(
 
 /// Build the repair argument for one invalid tool call (RFC-0035).
 ///
-/// `tool_call_json` is one entry of `GenerateTextResult.tool_calls` with
+/// `tool_call_json` is one entry of `GenerateTextResult.toolCalls` with
 /// `"invalid": true`. `prompt_json` and `opts_json` are **the same two
 /// strings the call was generated with** ([`aimux_generate_text`] /
 /// [`aimux_stream_text`]); messages, instructions, and the tool set are
 /// derived from them here, so no host repeats that derivation.
 ///
-/// Writes `{tool_call, error, input_schema, tools, messages, instructions}` —
+/// Writes `{toolCall, error, inputSchema, tools, messages, instructions}` —
 /// the AI SDK `repairToolCall` argument — to `*out_json`, or the JSON literal
 /// `null` when `opts_json` carried no tools: as in the AI SDK, a call made
 /// without a tool set is never repaired, and the host skips it. `null` is a
@@ -1770,7 +1971,7 @@ pub extern "C" fn aimux_tool_call_repair_context(
 /// Resolve one invalid tool call against a host's repair reply (RFC-0035).
 ///
 /// `opts_json` is the same string the call was generated with; the tool set
-/// comes from it. `reply_json` is `{"type":"repaired","tool_call":{…}}`,
+/// comes from it. `reply_json` is `{"type":"repaired","toolCall":{…}}`,
 /// `{"type":"unchanged"}`, or `{"type":"failed","message":"…"}`. Writes the
 /// resulting `ToolCall` — valid, or invalid with the AI SDK's nested
 /// `ToolCallRepairError` — to `*out_json`. Same purity as
@@ -1802,7 +2003,7 @@ pub extern "C" fn aimux_apply_tool_call_repair(
 ///
 /// `result_json` is a serialized `GenerateTextResult` or
 /// `GenerateObjectResult`; `opts_json` is the same string the call was
-/// generated with. Both `tool_calls` and the matching `response_messages`
+/// generated with. Both `toolCalls` and the matching `responseMessages`
 /// tool-call part are rewritten. The OpenAI-shaped
 /// `ChatCompletion` is not supported — it carries no `invalid`/`error`, so
 /// repair is driven from the native result, which
@@ -1838,7 +2039,7 @@ pub extern "C" fn aimux_apply_tool_call_repair_to_result(
 ///
 /// The conversion half of [`aimux_generate_text_as_openai`], for hosts that
 /// repair a native result themselves (RFC-0035) and then want the OpenAI
-/// shape: tool calls come from `result_json`'s `tool_calls`, so a patched
+/// shape: tool calls come from `result_json`'s `toolCalls`, so a patched
 /// result converts to a completion that reflects the repair. `handle` only
 /// supplies the model id fallback for `ChatCompletion.model`; no runtime work,
 /// so this is safe from inside a stream callback.
@@ -2102,7 +2303,9 @@ fn stream_text_with_signal(
             let cstr = match item {
                 Ok(part) => stream_part_cstring(&part)?,
                 Err(e) if e.is_recoverable_stream_error() => {
-                    stream_part_cstring(&aimux_core::stream_part::StreamPart::Error { error: e })?
+                    stream_part_cstring(&aimux_core::stream_part::TextStreamPart::Error {
+                        error: e,
+                    })?
                 }
                 Err(e) => return Err(e.into()),
             };
@@ -2164,7 +2367,7 @@ pub extern "C" fn aimux_openai_embedding_new(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let (api_key, model_id) = parse_two_args(api_key, "api_key", model_id, "model_id")?;
-        let model = OpenAIProvider::new(OpenAIConfig::new(api_key)).embedding_model(&model_id);
+        let model = openai_provider(api_key, None)?.embedding(&model_id);
         Ok(intern_handle(HandleEntry::Embedding(Arc::new(model))))
     })
 }
@@ -2178,11 +2381,8 @@ pub extern "C" fn aimux_openai_embedding_new_with_base(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let (api_key, model_id) = parse_two_args(api_key, "api_key", model_id, "model_id")?;
-        let mut config = OpenAIConfig::new(api_key);
-        if let Some(url) = parse_base_url(base_url)? {
-            config = config.with_base_url(url);
-        }
-        let model = OpenAIProvider::new(config).embedding_model(&model_id);
+        let provider = openai_provider(api_key, parse_base_url(base_url)?)?;
+        let model = provider.embedding(&model_id);
         Ok(intern_handle(HandleEntry::Embedding(Arc::new(model))))
     })
 }
@@ -2195,7 +2395,7 @@ pub extern "C" fn aimux_cohere_embedding_new(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let (api_key, model_id) = parse_two_args(api_key, "api_key", model_id, "model_id")?;
-        let model = CohereProvider::new(CohereConfig::new(api_key)).embedding_model(&model_id);
+        let model = cohere_provider(api_key, None)?.embedding(&model_id);
         Ok(intern_handle(HandleEntry::Embedding(Arc::new(model))))
     })
 }
@@ -2209,11 +2409,7 @@ pub extern "C" fn aimux_cohere_embedding_new_with_base(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let (api_key, model_id) = parse_two_args(api_key, "api_key", model_id, "model_id")?;
-        let mut config = CohereConfig::new(api_key);
-        if let Some(url) = parse_base_url(base_url)? {
-            config = config.with_base_url(url);
-        }
-        let model = CohereProvider::new(config).embedding_model(&model_id);
+        let model = cohere_provider(api_key, parse_base_url(base_url)?)?.embedding(&model_id);
         Ok(intern_handle(HandleEntry::Embedding(Arc::new(model))))
     })
 }
@@ -2226,7 +2422,7 @@ pub extern "C" fn aimux_google_embedding_new(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let (api_key, model_id) = parse_two_args(api_key, "api_key", model_id, "model_id")?;
-        let model = GoogleProvider::new(GoogleConfig::new(api_key)).embedding_model(&model_id);
+        let model = google_provider(api_key, None)?.embedding(&model_id);
         Ok(intern_handle(HandleEntry::Embedding(Arc::new(model))))
     })
 }
@@ -2240,11 +2436,7 @@ pub extern "C" fn aimux_google_embedding_new_with_base(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let (api_key, model_id) = parse_two_args(api_key, "api_key", model_id, "model_id")?;
-        let mut config = GoogleConfig::new(api_key);
-        if let Some(url) = parse_base_url(base_url)? {
-            config = config.with_base_url(url);
-        }
-        let model = GoogleProvider::new(config).embedding_model(&model_id);
+        let model = google_provider(api_key, parse_base_url(base_url)?)?.embedding(&model_id);
         Ok(intern_handle(HandleEntry::Embedding(Arc::new(model))))
     })
 }
@@ -2290,7 +2482,7 @@ pub extern "C" fn aimux_openai_speech_new(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let (api_key, model_id) = parse_two_args(api_key, "api_key", model_id, "model_id")?;
-        let model = OpenAIProvider::new(OpenAIConfig::new(api_key)).speech(&model_id);
+        let model = openai_provider(api_key, None)?.speech(&model_id);
         Ok(intern_handle(HandleEntry::Speech(Arc::new(model))))
     })
 }
@@ -2304,11 +2496,8 @@ pub extern "C" fn aimux_openai_speech_new_with_base(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let (api_key, model_id) = parse_two_args(api_key, "api_key", model_id, "model_id")?;
-        let mut config = OpenAIConfig::new(api_key);
-        if let Some(url) = parse_base_url(base_url)? {
-            config = config.with_base_url(url);
-        }
-        let model = OpenAIProvider::new(config).speech(&model_id);
+        let provider = openai_provider(api_key, parse_base_url(base_url)?)?;
+        let model = provider.speech(&model_id);
         Ok(intern_handle(HandleEntry::Speech(Arc::new(model))))
     })
 }
@@ -2343,7 +2532,7 @@ pub extern "C" fn aimux_openai_image_new(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let (api_key, model_id) = parse_two_args(api_key, "api_key", model_id, "model_id")?;
-        let model = OpenAIProvider::new(OpenAIConfig::new(api_key)).image(&model_id);
+        let model = openai_provider(api_key, None)?.image(&model_id);
         Ok(intern_handle(HandleEntry::Image(Arc::new(model))))
     })
 }
@@ -2357,11 +2546,8 @@ pub extern "C" fn aimux_openai_image_new_with_base(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let (api_key, model_id) = parse_two_args(api_key, "api_key", model_id, "model_id")?;
-        let mut config = OpenAIConfig::new(api_key);
-        if let Some(url) = parse_base_url(base_url)? {
-            config = config.with_base_url(url);
-        }
-        let model = OpenAIProvider::new(config).image(&model_id);
+        let provider = openai_provider(api_key, parse_base_url(base_url)?)?;
+        let model = provider.image(&model_id);
         Ok(intern_handle(HandleEntry::Image(Arc::new(model))))
     })
 }
@@ -2374,7 +2560,7 @@ pub extern "C" fn aimux_google_image_new(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let (api_key, model_id) = parse_two_args(api_key, "api_key", model_id, "model_id")?;
-        let model = GoogleProvider::new(GoogleConfig::new(api_key)).image(&model_id);
+        let model = google_provider(api_key, None)?.image(&model_id);
         Ok(intern_handle(HandleEntry::Image(Arc::new(model))))
     })
 }
@@ -2388,11 +2574,7 @@ pub extern "C" fn aimux_google_image_new_with_base(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let (api_key, model_id) = parse_two_args(api_key, "api_key", model_id, "model_id")?;
-        let mut config = GoogleConfig::new(api_key);
-        if let Some(url) = parse_base_url(base_url)? {
-            config = config.with_base_url(url);
-        }
-        let model = GoogleProvider::new(config).image(&model_id);
+        let model = google_provider(api_key, parse_base_url(base_url)?)?.image(&model_id);
         Ok(intern_handle(HandleEntry::Image(Arc::new(model))))
     })
 }
@@ -2425,7 +2607,7 @@ pub extern "C" fn aimux_openai_transcription_new(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let (api_key, model_id) = parse_two_args(api_key, "api_key", model_id, "model_id")?;
-        let model = OpenAIProvider::new(OpenAIConfig::new(api_key)).transcription(&model_id);
+        let model = openai_provider(api_key, None)?.transcription(&model_id);
         Ok(intern_handle(HandleEntry::Transcription(Arc::new(model))))
     })
 }
@@ -2439,11 +2621,8 @@ pub extern "C" fn aimux_openai_transcription_new_with_base(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let (api_key, model_id) = parse_two_args(api_key, "api_key", model_id, "model_id")?;
-        let mut config = OpenAIConfig::new(api_key);
-        if let Some(url) = parse_base_url(base_url)? {
-            config = config.with_base_url(url);
-        }
-        let model = OpenAIProvider::new(config).transcription(&model_id);
+        let provider = openai_provider(api_key, parse_base_url(base_url)?)?;
+        let model = provider.transcription(&model_id);
         Ok(intern_handle(HandleEntry::Transcription(Arc::new(model))))
     })
 }
@@ -2480,12 +2659,13 @@ pub extern "C" fn aimux_transcription_generate(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// JSON options for `aimux_transcription_session_new` (all fields optional):
-/// `{ "input_audio_format": { "format_type": "audio/pcm", "rate": 24000 },
-///    "provider_options": { … }, "headers": { … }, "include_raw_chunks": false }`.
+/// `{ "inputAudioFormat": { "formatType": "audio/pcm", "rate": 24000 },
+///    "providerOptions": { … }, "headers": { … }, "includeRawChunks": false }`.
 #[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 struct TranscriptionSessionFfiOptions {
     input_audio_format: Option<aimux_core::transcription_model::InputAudioFormat>,
-    provider_options: Option<HashMap<String, serde_json::Value>>,
+    provider_options: Option<aimux_core::shared::SharedProviderOptions>,
     headers: Option<HashMap<String, String>>,
     include_raw_chunks: Option<bool>,
     timeout: Option<aimux_core::options::TimeoutConfiguration>,
@@ -2683,7 +2863,7 @@ pub extern "C" fn aimux_openai_files_new(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let api_key = str_arg(api_key, "api_key")?;
-        let files = OpenAIProvider::new(OpenAIConfig::new(api_key)).files();
+        let files = openai_provider(api_key, None)?.files();
         Ok(intern_handle(HandleEntry::Files(Arc::new(files))))
     })
 }
@@ -2696,11 +2876,8 @@ pub extern "C" fn aimux_openai_files_new_with_base(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let api_key = str_arg(api_key, "api_key")?;
-        let mut config = OpenAIConfig::new(api_key);
-        if let Some(url) = parse_base_url(base_url)? {
-            config = config.with_base_url(url);
-        }
-        let files = OpenAIProvider::new(config).files();
+        let provider = openai_provider(api_key, parse_base_url(base_url)?)?;
+        let files = provider.files();
         Ok(intern_handle(HandleEntry::Files(Arc::new(files))))
     })
 }
@@ -2742,7 +2919,7 @@ pub extern "C" fn aimux_cohere_reranking_new(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let (api_key, model_id) = parse_two_args(api_key, "api_key", model_id, "model_id")?;
-        let model = CohereProvider::new(CohereConfig::new(api_key)).reranking_model(&model_id);
+        let model = cohere_provider(api_key, None)?.reranking(&model_id);
         Ok(intern_handle(HandleEntry::Reranking(Arc::new(model))))
     })
 }
@@ -2756,11 +2933,7 @@ pub extern "C" fn aimux_cohere_reranking_new_with_base(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let (api_key, model_id) = parse_two_args(api_key, "api_key", model_id, "model_id")?;
-        let mut config = CohereConfig::new(api_key);
-        if let Some(url) = parse_base_url(base_url)? {
-            config = config.with_base_url(url);
-        }
-        let model = CohereProvider::new(config).reranking_model(&model_id);
+        let model = cohere_provider(api_key, parse_base_url(base_url)?)?.reranking(&model_id);
         Ok(intern_handle(HandleEntry::Reranking(Arc::new(model))))
     })
 }
@@ -2799,7 +2972,7 @@ pub extern "C" fn aimux_google_video_new(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let (api_key, model_id) = parse_two_args(api_key, "api_key", model_id, "model_id")?;
-        let model = GoogleProvider::new(GoogleConfig::new(api_key)).video(&model_id);
+        let model = google_provider(api_key, None)?.video(&model_id);
         Ok(intern_handle(HandleEntry::Video(Arc::new(model))))
     })
 }
@@ -2813,11 +2986,7 @@ pub extern "C" fn aimux_google_video_new_with_base(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let (api_key, model_id) = parse_two_args(api_key, "api_key", model_id, "model_id")?;
-        let mut config = GoogleConfig::new(api_key);
-        if let Some(url) = parse_base_url(base_url)? {
-            config = config.with_base_url(url);
-        }
-        let model = GoogleProvider::new(config).video(&model_id);
+        let model = google_provider(api_key, parse_base_url(base_url)?)?.video(&model_id);
         Ok(intern_handle(HandleEntry::Video(Arc::new(model))))
     })
 }
@@ -2859,7 +3028,7 @@ pub extern "C" fn aimux_provider_decision_model(
             .into());
         };
         let model_id = str_arg(model_id, "model_id")?;
-        let model = provider.decision_model(&model_id)?;
+        let model = provider.provider.decision_model(&model_id)?;
         Ok(intern_handle(HandleEntry::Decision(Arc::from(model))))
     })
 }
@@ -2961,6 +3130,19 @@ pub extern "C" fn aimux_decide_with_abort(
 // C ABI: Search
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// A Tavily provider for an explicit key handed over by the host, with an
+/// optional base URL.
+fn tavily_provider(
+    api_key: String,
+    base_url: Option<String>,
+) -> Result<TavilyProvider, AiMuxError> {
+    create_tavily(TavilyProviderSettings {
+        api_key: Some(aimux_provider_utils::Resolvable::Value(api_key)),
+        base_url,
+        ..Default::default()
+    })
+}
+
 /// Create a Tavily search model instance. `model_id` is accepted for API
 /// symmetry but ignored (Tavily uses a fixed endpoint).
 #[unsafe(no_mangle)]
@@ -2971,7 +3153,7 @@ pub extern "C" fn aimux_tavily_search_new(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let api_key = str_arg(api_key, "api_key")?;
-        let model = TavilyProvider::new(TavilyConfig::new(api_key)).search_model();
+        let model = tavily_provider(api_key, None)?.search_model();
         Ok(intern_handle(HandleEntry::Search(Arc::new(model))))
     })
 }
@@ -2985,11 +3167,7 @@ pub extern "C" fn aimux_tavily_search_new_with_base(
 ) -> *mut aimux_error_t {
     with_out_handle(out_handle, || {
         let api_key = str_arg(api_key, "api_key")?;
-        let mut config = TavilyConfig::new(api_key);
-        if let Some(url) = parse_base_url(base_url)? {
-            config = config.with_base_url(url);
-        }
-        let model = TavilyProvider::new(config).search_model();
+        let model = tavily_provider(api_key, parse_base_url(base_url)?)?.search_model();
         Ok(intern_handle(HandleEntry::Search(Arc::new(model))))
     })
 }
@@ -3335,29 +3513,6 @@ pub extern "C" fn aimux_recording_try_flush() -> *mut aimux_error_t {
     })
 }
 
-/// Register external OpenAI-compatible providers from a JSON config string
-/// (RFC-0020). `config_json` is `{ "providers": [ { "name": ..., "base_url":
-/// ..., ... }, ... ] }`. Entries override same-named built-ins or add new
-/// ones. Malformed JSON text is `InvalidWireJson`; a well-formed document the
-/// registry rejects is `AiMuxError::InvalidArgument`.
-#[unsafe(no_mangle)]
-pub extern "C" fn aimux_register_providers(config_json: *const c_char) -> *mut aimux_error_t {
-    no_result(|| {
-        let json = str_arg(config_json, "config_json")?;
-        // Malformed JSON text is this layer's finding; a well-formed document
-        // that the registry rejects (bad schema, unknown protocol) is an AiMuxError.
-        serde_json::from_str::<serde_json::Value>(&json).map_err(|e| wire_err("config_json", e))?;
-        aimux_providers::load_providers_from_json(&json).map_err(|e| match e {
-            // The registry reports a schema mismatch as `JsonParse`; the text
-            // already parsed above, so what it rejected is the shape —
-            // `AiMuxError::InvalidArgument`, not a provider-response parse failure.
-            AiMuxError::JsonParse(m) => AiMuxError::InvalidArgument(format!("config_json: {m}")),
-            e => e,
-        })?;
-        Ok(())
-    })
-}
-
 /// Set the global proxy configuration (M6, RFC-0016). Must be called before
 /// the first `aimux_generate_text` / `aimux_stream_text` call; a no-op if the
 /// shared HTTP client is already initialised.
@@ -3447,7 +3602,7 @@ fn model_handles(
 /// `handles` is an array of `len` existing model handles (e.g. from
 /// `aimux_openai_new`). `config_json` selects the router + fallback policy:
 /// `{ "router": "rule" | "weighted", "weights": [..], "fallback": "on_error" |
-/// "none", "provider_name": "router", "model_id": "router" }`. All keys are
+/// "none", "providerName": "router", "modelId": "router" }`. All keys are
 /// optional; defaults are `rule` / `on_error` / `"router"` / `"router"`.
 ///
 /// Fails on: NULL `handles` with `len > 0`, bad JSON, zero-length `handles`,
@@ -3504,9 +3659,9 @@ pub extern "C" fn aimux_router_new(
 /// `reference_handles` is an array of `ref_len` existing model handles (may be
 /// 0 — MoaModel then degrades to running just the aggregator). `aggregator`
 /// is a single existing model handle. `config_json` is a serialized `MoaConfig`
-/// (all fields optional): `{ "provider_name": "moa", "model_id": "moa",
-/// "aggregator_instructions": null, "strip_reference_tools": true,
-/// "fail_mode": "best_effort" | "fail_fast" }`.
+/// (all fields optional): `{ "providerName": "moa", "modelId": "moa",
+/// "aggregatorInstructions": null, "stripReferenceTools": true,
+/// "failMode": "best_effort" | "fail_fast" }`.
 ///
 /// Fails on: bad JSON, an unknown aggregator handle (references may be empty;
 /// aggregator may not).
@@ -3540,6 +3695,7 @@ pub extern "C" fn aimux_moa_new(
 
 /// FFI-side router config (lenient: all fields optional).
 #[derive(Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RouterFfiConfig {
     router: Option<String>,
     weights: Option<Vec<f64>>,
@@ -3582,7 +3738,7 @@ mod tests {
     fn expect_aimux_error(e: *mut aimux_error_t) -> (i32, String) {
         assert!(!e.is_null(), "expected a returned error");
         let code = aimux_error_code(e);
-        if !(AIMUX_E_OTHER..=AIMUX_E_TOOL_CALL_REPAIR).contains(&code) {
+        if !(AIMUX_E_OTHER..=AIMUX_E_NO_OUTPUT_GENERATED).contains(&code) {
             panic!("expected an AiMuxError code, got {code}: {}", msg(e));
         }
         let out = (code, take(aimux_error_message(e)).unwrap());
@@ -3758,8 +3914,57 @@ mod tests {
         assert_eq!(aimux_error_retryable(h), 0);
         aimux_error_free(owner);
 
+        // LoadApiKey / LoadSetting carry the consulted environment variable on
+        // the provider-code channel and the description / setting name on the
+        // provider-message channel; every other getter answers its sentinel.
+        let owner = boxed(AiMuxError::LoadApiKey {
+            env_var: "OPENAI_API_KEY".into(),
+            description: "OpenAI".into(),
+        });
+        let h = owner;
+        assert_eq!(aimux_error_code(h), AIMUX_E_LOAD_API_KEY);
+        assert_eq!(
+            take(aimux_error_provider_code(h)).as_deref(),
+            Some("OPENAI_API_KEY")
+        );
+        assert_eq!(
+            take(aimux_error_provider_message(h)).as_deref(),
+            Some("OpenAI")
+        );
+        assert!(
+            take(aimux_error_message(h))
+                .unwrap()
+                .contains("OPENAI_API_KEY")
+        );
+        assert!(aimux_error_response_body(h).is_null());
+        assert!(aimux_error_model_id(h).is_null());
+        assert_eq!(aimux_error_status(h), -1);
+        assert_eq!(aimux_error_retryable(h), 0);
+        aimux_error_free(owner);
+
+        let owner = boxed(AiMuxError::LoadSetting {
+            env_var: "AWS_REGION".into(),
+            name: "region".into(),
+        });
+        let h = owner;
+        assert_eq!(aimux_error_code(h), AIMUX_E_LOAD_SETTING);
+        assert_eq!(
+            take(aimux_error_provider_code(h)).as_deref(),
+            Some("AWS_REGION")
+        );
+        assert_eq!(
+            take(aimux_error_provider_message(h)).as_deref(),
+            Some("region")
+        );
+        assert!(aimux_error_url(h).is_null());
+        assert_eq!(aimux_error_status(h), -1);
+        aimux_error_free(owner);
+
         let owner = boxed(AiMuxError::NoSuchProvider {
             provider_id: "p".into(),
+            model_id: String::new(),
+            model_type: String::new(),
+            available_providers: Vec::new(),
         });
         let h = owner;
         assert_eq!(aimux_error_code(h), AIMUX_E_NO_SUCH_PROVIDER);
@@ -3938,7 +4143,7 @@ mod tests {
         );
     }
 
-    /// Pin the full 16-variant → code mapping.
+    /// Pin the full 18-variant → code mapping.
     #[test]
     fn error_code_mapping_covers_all_variants() {
         let s = |t: &str| t.to_string();
@@ -3995,6 +4200,20 @@ mod tests {
                 AIMUX_E_INVALID_ARGUMENT,
             ),
             (AiMuxError::InvalidPrompt(s("x")), AIMUX_E_INVALID_PROMPT),
+            (
+                AiMuxError::LoadApiKey {
+                    env_var: s("OPENAI_API_KEY"),
+                    description: s("OpenAI"),
+                },
+                AIMUX_E_LOAD_API_KEY,
+            ),
+            (
+                AiMuxError::LoadSetting {
+                    env_var: s("AWS_REGION"),
+                    name: s("region"),
+                },
+                AIMUX_E_LOAD_SETTING,
+            ),
             (AiMuxError::TokenExpired(s("x")), AIMUX_E_TOKEN_EXPIRED),
             (
                 AiMuxError::UnsupportedFunctionality(s("x")),
@@ -4010,6 +4229,9 @@ mod tests {
             (
                 AiMuxError::NoSuchProvider {
                     provider_id: s("x"),
+                    model_id: String::new(),
+                    model_type: String::new(),
+                    available_providers: Vec::new(),
                 },
                 AIMUX_E_NO_SUCH_PROVIDER,
             ),
@@ -4173,227 +4395,6 @@ mod tests {
         }
     }
 
-    /// A tiny mock model for composite-FFI tests (returns fixed text).
-    struct MockText {
-        provider: &'static str,
-        model_id: &'static str,
-        text: &'static str,
-    }
-    #[async_trait::async_trait]
-    impl aimux_core::LanguageModel for MockText {
-        fn provider(&self) -> &str {
-            self.provider
-        }
-        fn model_id(&self) -> &str {
-            self.model_id
-        }
-        async fn do_generate(
-            &self,
-            _options: &aimux_core::options::CallOptions,
-        ) -> Result<aimux_core::result::GenerateResult, AiMuxError> {
-            Ok(aimux_core::result::GenerateResult {
-                content: vec![aimux_core::result::GenerateContent::Text {
-                    text: self.text.into(),
-                    provider_metadata: None,
-                }],
-                finish_reason: aimux_core::types::FinishReason {
-                    unified: aimux_core::types::FinishReasonUnified::Stop,
-                    raw: None,
-                },
-                usage: aimux_core::types::Usage::default(),
-                warnings: vec![],
-                provider_metadata: None,
-                response: aimux_core::types::ResponseMetadata {
-                    model_id: Some(self.model_id.into()),
-                    ..Default::default()
-                },
-                request_body: None,
-                response_headers: None,
-            })
-        }
-        async fn do_stream(
-            &self,
-            _options: &aimux_core::options::CallOptions,
-        ) -> Result<aimux_core::result::StreamResult, AiMuxError> {
-            unimplemented!()
-        }
-    }
-
-    fn mock_handle(provider: &'static str, model_id: &'static str, text: &'static str) -> u64 {
-        intern_model(Arc::new(MockText {
-            provider,
-            model_id,
-            text,
-        }))
-    }
-
-    /// Streams: delta, recoverable Err(JsonParse), delta, Finish.
-    struct RecoverableFrameModel;
-    #[async_trait::async_trait]
-    impl aimux_core::LanguageModel for RecoverableFrameModel {
-        fn provider(&self) -> &str {
-            "mock"
-        }
-        fn model_id(&self) -> &str {
-            "recoverable"
-        }
-        async fn do_generate(
-            &self,
-            _options: &aimux_core::options::CallOptions,
-        ) -> Result<aimux_core::result::GenerateResult, AiMuxError> {
-            unimplemented!()
-        }
-        async fn do_stream(
-            &self,
-            _options: &aimux_core::options::CallOptions,
-        ) -> Result<aimux_core::result::StreamResult, AiMuxError> {
-            let delta = |text: &str| aimux_core::stream_part::StreamPart::TextDelta {
-                id: "1".into(),
-                delta: text.into(),
-                provider_metadata: None,
-            };
-            Ok(aimux_core::result::StreamResult {
-                stream: Box::pin(futures::stream::iter([
-                    Ok(delta("a")),
-                    Err(AiMuxError::JsonParse("bad frame".into())),
-                    Ok(delta("b")),
-                    Ok(aimux_core::stream_part::StreamPart::Finish {
-                        finish_reason: aimux_core::types::FinishReason {
-                            unified: aimux_core::types::FinishReasonUnified::Stop,
-                            raw: None,
-                        },
-                        usage: aimux_core::types::Usage::default(),
-                        provider_metadata: None,
-                    }),
-                ])),
-                request_body: None,
-                response_headers: None,
-            })
-        }
-    }
-
-    /// The pump must deliver a recoverable frame error as a StreamPart::Error
-    /// data part and keep going — parts after it still arrive and on_done
-    /// fires (the pre-fix pump returned the error and skipped on_done).
-    #[test]
-    fn recoverable_frame_error_does_not_end_the_ffi_stream() {
-        struct Collected {
-            parts: Vec<String>,
-            done: bool,
-        }
-        extern "C-unwind" fn on_part(json: *const c_char, ctx: *mut c_void) {
-            let collected = unsafe { &mut *(ctx as *mut Collected) };
-            let text = unsafe { std::ffi::CStr::from_ptr(json) }
-                .to_string_lossy()
-                .into_owned();
-            collected.parts.push(text);
-        }
-        extern "C-unwind" fn on_done(ctx: *mut c_void) {
-            let collected = unsafe { &mut *(ctx as *mut Collected) };
-            collected.done = true;
-        }
-
-        let handle = intern_model(Arc::new(RecoverableFrameModel));
-        let mut collected = Collected {
-            parts: Vec::new(),
-            done: false,
-        };
-        let prompt = std::ffi::CString::new("\"hi\"").unwrap();
-        let e = aimux_stream_text(
-            handle,
-            prompt.as_ptr(),
-            std::ptr::null(),
-            Some(on_part),
-            Some(on_done),
-            &mut collected as *mut Collected as *mut c_void,
-        );
-        assert!(e.is_null(), "{}", msg(e));
-        assert!(
-            collected.done,
-            "on_done must fire after a recoverable frame"
-        );
-        let error_index = collected
-            .parts
-            .iter()
-            .position(|p| p.contains("\"Error\""))
-            .expect("the recoverable frame arrives as a StreamPart::Error part");
-        assert!(
-            collected.parts[error_index + 1..]
-                .iter()
-                .any(|p| p.contains("\"b\"")),
-            "parts after the recoverable frame still arrive: {:?}",
-            collected.parts
-        );
-    }
-
-    /// On the OpenAI-compatible path every item is a ChatCompletionChunk, so a
-    /// recoverable frame error is skipped — no error item, no truncation, and
-    /// on_done still fires.
-    #[test]
-    fn recoverable_frame_error_is_skipped_on_the_openai_stream() {
-        struct Collected {
-            parts: Vec<String>,
-            done: bool,
-        }
-        extern "C-unwind" fn on_part(json: *const c_char, ctx: *mut c_void) {
-            let collected = unsafe { &mut *(ctx as *mut Collected) };
-            let text = unsafe { std::ffi::CStr::from_ptr(json) }
-                .to_string_lossy()
-                .into_owned();
-            collected.parts.push(text);
-        }
-        extern "C-unwind" fn on_done(ctx: *mut c_void) {
-            let collected = unsafe { &mut *(ctx as *mut Collected) };
-            collected.done = true;
-        }
-
-        let handle = intern_model(Arc::new(RecoverableFrameModel));
-        let mut collected = Collected {
-            parts: Vec::new(),
-            done: false,
-        };
-        let prompt = std::ffi::CString::new("\"hi\"").unwrap();
-        let e = aimux_stream_text_as_openai(
-            handle,
-            prompt.as_ptr(),
-            std::ptr::null(),
-            Some(on_part),
-            Some(on_done),
-            &mut collected as *mut Collected as *mut c_void,
-        );
-        assert!(e.is_null(), "{}", msg(e));
-        assert!(
-            collected.done,
-            "on_done must fire after a recoverable frame"
-        );
-        assert!(
-            collected.parts.iter().all(|p| !p.contains("\"error\"")),
-            "no error item may ride the chunk-typed wire: {:?}",
-            collected.parts
-        );
-        assert!(
-            collected.parts.iter().any(|p| p.contains("\"b\"")),
-            "chunks after the recoverable frame still arrive: {:?}",
-            collected.parts
-        );
-    }
-
-    #[test]
-    fn router_new_builds_router_model() {
-        let handles = [
-            mock_handle("mock", "primary", "primary-out"),
-            mock_handle("mock", "backup", "backup-out"),
-        ];
-        let mut h = zero_err();
-        let e = aimux_router_new(handles.as_ptr(), handles.len(), std::ptr::null(), &mut h);
-        assert!(e.is_null(), "{}", msg(e));
-        assert!(h != 0, "router handle must be non-zero");
-        // Confirm it resolves to a model.
-        let model = get_model(h).expect("router handle resolves");
-        assert_eq!(model.provider(), "router");
-        assert_eq!(model.model_id(), "router");
-    }
-
     #[test]
     fn router_new_rejects_empty_handles() {
         // len == 0 (with or without a NULL array) is "no usable child", not a
@@ -4410,112 +4411,6 @@ mod tests {
         assert_eq!(expect_ffi_error(e), "handles: must not be NULL");
     }
 
-    #[test]
-    fn router_new_rejects_bad_json() {
-        let handles = [mock_handle("mock", "m", "x")];
-        let bad = std::ffi::CString::new("{not json").unwrap();
-        let mut h = zero_err();
-        let e = aimux_router_new(handles.as_ptr(), handles.len(), bad.as_ptr(), &mut h);
-        assert_eq!(h, 0);
-        assert!(expect_ffi_error(e).starts_with("config_json: invalid JSON:"));
-    }
-
-    #[test]
-    fn router_new_treats_empty_config_as_defaults() {
-        // S1 guard: empty string / "null" config must NOT be a JSON_PARSE error
-        // (consistent with other config-bearing FFI entry points).
-        let handles = [mock_handle("mock", "m", "x")];
-        for cfg in ["", "  ", "null"] {
-            let c = std::ffi::CString::new(cfg).unwrap();
-            let mut h = zero_err();
-            let e = aimux_router_new(handles.as_ptr(), handles.len(), c.as_ptr(), &mut h);
-            assert!(e.is_null(), "router with config {cfg:?}: {}", msg(e));
-            assert!(h != 0);
-        }
-    }
-
-    #[test]
-    fn moa_new_builds_moa_model() {
-        let refs = [
-            mock_handle("mock", "ref-a", "A"),
-            mock_handle("mock", "ref-b", "B"),
-        ];
-        let agg = mock_handle("mock", "aggregator", "agg");
-        let mut h = zero_err();
-        let e = aimux_moa_new(refs.as_ptr(), refs.len(), agg, std::ptr::null(), &mut h);
-        assert!(e.is_null(), "{}", msg(e));
-        assert!(h != 0, "moa handle must be non-zero");
-        let model = get_model(h).expect("moa handle resolves");
-        assert_eq!(model.provider(), "moa");
-        assert_eq!(model.model_id(), "moa");
-    }
-
-    #[test]
-    fn moa_new_rejects_bad_aggregator() {
-        let refs = [mock_handle("mock", "ref-a", "A")];
-        let mut h = zero_err();
-        // aggregator handle 999999 does not exist.
-        let e = aimux_moa_new(refs.as_ptr(), refs.len(), 999_999, std::ptr::null(), &mut h);
-        assert_eq!(h, 0);
-        assert_eq!(
-            expect_ffi_error(e),
-            "invalid or expired moa aggregator handle"
-        );
-    }
-
-    #[test]
-    fn composites_reject_any_dead_member_handle() {
-        // A dead handle inside the array is a caller bug: reported, never
-        // silently dropped (the composite would otherwise run with fewer
-        // members than the caller believes).
-        let live = mock_handle("mock", "live", "L");
-        let dead = mock_handle("mock", "dead", "D");
-        aimux_drop_handle(dead);
-        let handles = [live, dead];
-
-        let mut h = zero_err();
-        let e = aimux_router_new(handles.as_ptr(), handles.len(), std::ptr::null(), &mut h);
-        assert_eq!(h, 0);
-        assert_eq!(
-            expect_ffi_error(e),
-            "invalid or expired router child handle"
-        );
-
-        let agg = mock_handle("mock", "aggregator", "agg");
-        let e = aimux_moa_new(
-            handles.as_ptr(),
-            handles.len(),
-            agg,
-            std::ptr::null(),
-            &mut h,
-        );
-        assert_eq!(h, 0);
-        assert_eq!(
-            expect_ffi_error(e),
-            "invalid or expired moa reference handle"
-        );
-
-        // NULL with ref_len > 0 is a null pointer, same as router.
-        let e = aimux_moa_new(std::ptr::null(), 2, agg, std::ptr::null(), &mut h);
-        assert_eq!(h, 0);
-        assert_eq!(expect_ffi_error(e), "reference_handles: must not be NULL");
-    }
-
-    #[test]
-    fn moa_new_allows_zero_references() {
-        // 0 references is valid (degrades to aggregator-only).
-        let agg = mock_handle("mock", "aggregator", "agg");
-        let mut h = zero_err();
-        let e = aimux_moa_new(std::ptr::null(), 0, agg, std::ptr::null(), &mut h);
-        assert!(e.is_null(), "{}", msg(e));
-        assert!(h != 0, "moa with 0 references should succeed");
-    }
-
-    // ── Transcription streaming sessions (RFC-0028 Phase 2) ──────────────
-
-    /// A mock transcription model whose `do_stream` echoes: one delta per
-    /// received audio chunk, then final + finish after the audio ends.
-    /// Honors the abort signal.
     struct MockStreamingTranscriber;
 
     #[async_trait::async_trait]
@@ -4656,15 +4551,15 @@ mod tests {
         // Pull parts: StreamStart, delta("3 "), delta("2 "), Final, Finish,
         // then ENDED.
         let p1 = pull_part(session);
-        assert!(p1.contains("StreamStart"), "part 1: {p1}");
+        assert!(p1.contains("\"type\":\"stream-start\""), "part 1: {p1}");
         let p2 = pull_part(session);
         assert!(p2.contains("3 "), "part 2: {p2}");
         let p3 = pull_part(session);
         assert!(p3.contains("2 "), "part 3: {p3}");
         let p4 = pull_part(session);
-        assert!(p4.contains("TranscriptFinal"), "part 4: {p4}");
+        assert!(p4.contains("\"type\":\"transcript-final\""), "part 4: {p4}");
         let p5 = pull_part(session);
-        assert!(p5.contains("Finish"), "part 5: {p5}");
+        assert!(p5.contains("\"type\":\"finish\""), "part 5: {p5}");
         assert!(p5.contains("3 2 "), "finish text: {p5}");
 
         // Stream ended: NULL error, ENDED state, no part.
@@ -4830,51 +4725,5 @@ mod tests {
             .expect("session_drop must wake a backpressured push_audio");
         pusher.join().unwrap();
         drop_handle(model);
-    }
-
-    #[test]
-    fn transcription_session_new_rejects_bad_inputs() {
-        let model = mock_transcriber_handle();
-        let mut h = zero_err();
-        // Bad JSON.
-        let bad = std::ffi::CString::new("{not json").unwrap();
-        let e = aimux_transcription_session_new(model, 0, bad.as_ptr(), &mut h);
-        assert_eq!(h, 0);
-        assert!(expect_ffi_error(e).starts_with("opts_json: invalid JSON:"));
-
-        // Non-transcription model handle.
-        let lang = mock_handle("mock", "m", "x");
-        let e = aimux_transcription_session_new(lang, 0, std::ptr::null(), &mut h);
-        assert_eq!(h, 0);
-        assert_eq!(
-            expect_ffi_error(e),
-            "invalid or expired transcription handle"
-        );
-
-        // Bad abort handle.
-        let e = aimux_transcription_session_new(model, 999_999, std::ptr::null(), &mut h);
-        assert_eq!(h, 0);
-        assert_eq!(expect_ffi_error(e), "invalid or expired abort handle");
-
-        // NULL out-params on next_part.
-        let mut part: *mut c_char = std::ptr::null_mut();
-        assert_eq!(
-            expect_ffi_error(aimux_transcription_next_part(
-                0,
-                0,
-                std::ptr::null_mut(),
-                std::ptr::null_mut()
-            )),
-            "out_part: must not be NULL"
-        );
-        assert_eq!(
-            expect_ffi_error(aimux_transcription_next_part(
-                0,
-                0,
-                &mut part,
-                std::ptr::null_mut()
-            )),
-            "out_state: must not be NULL"
-        );
     }
 }

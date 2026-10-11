@@ -14,6 +14,8 @@
 //! - `map-huggingface-responses-finish-reason.ts` — finish-reason mapping
 //! - `huggingface-responses-language-model-options.ts` — provider options
 
+use aimux_core::tool::RawToolCall;
+use aimux_core::tool::ToolResult;
 use std::collections::HashMap;
 
 use async_trait::async_trait;
@@ -21,26 +23,25 @@ use base64::Engine;
 use futures::StreamExt;
 use serde_json::{Map, Value, json};
 
-use aimux_core::content::ContentPart;
 use aimux_core::error::AiMuxError;
 use aimux_core::error::ApiCallError;
 use aimux_core::language_model::LanguageModel;
-use aimux_core::language_model_message::LanguageModelPrompt;
-use aimux_core::message::Role;
+use aimux_core::language_model_message::{
+    AssistantPart, LanguageModelMessage, LanguageModelPrompt, ReasoningPart, TextPart, UserPart,
+};
 use aimux_core::options::{CallOptions, ResponseFormat, ToolChoice};
-use aimux_core::result::{GenerateContent, GenerateResult, StreamResult};
+use aimux_core::result::{GenerateContent, GenerateResult, ReasoningOutput, Source, StreamResult};
+use aimux_core::shared::{FileBytes, FileData};
 use aimux_core::stream_part::StreamPart;
 use aimux_core::tool::Tool;
-use aimux_core::types::{
-    FinishReason, FinishReasonUnified, ResponseMetadata, TokenUsage, Usage, Warning,
+use aimux_core::types::{FinishReason, FinishReasonUnified, ResponseMetadata, Usage, Warning};
+
+use aimux_provider_utils::{
+    MediaTypeData, TransformStreamController, Transformer, detect_media_type,
+    get_top_level_media_type, is_full_media_type, pipe_through,
 };
 
-use aimux_provider_utils::HttpRequest;
-
-use super::HuggingFaceConfig;
-use crate::openai::responses::responses_convert::build_header_list;
-
-const PROVIDER_NAME: &str = "huggingface";
+use crate::shared::EndpointConfig;
 
 fn huggingface_failed_response_handler() -> aimux_provider_utils::ResponseHandler<AiMuxError> {
     aimux_provider_utils::create_json_error_response_handler(|data| {
@@ -127,67 +128,35 @@ fn huggingface_stream_error(
 
 /// A Hugging Face Responses API language model.
 ///
-/// Created via [`super::HuggingFaceProvider::responses_model`].
+/// Created via [`super::HuggingFaceProvider::responses`].
 pub struct HuggingFaceResponsesModel {
     model_id: String,
-    config: HuggingFaceConfig,
+    config: EndpointConfig,
 }
 
 impl HuggingFaceResponsesModel {
-    #[must_use]
-    pub fn new(model_id: String, config: HuggingFaceConfig) -> Self {
+    pub(crate) fn from_config(model_id: String, config: EndpointConfig) -> Self {
         Self { model_id, config }
-    }
-
-    fn endpoint(&self) -> String {
-        format!("{}/responses", self.config.0.base_url)
-    }
-
-    fn build_headers(&self, extra: Option<&HashMap<String, String>>) -> HashMap<String, String> {
-        let mut headers = HashMap::new();
-        headers.insert(
-            "Authorization".to_string(),
-            format!("Bearer {}", self.config.0.api_key),
-        );
-        if let Some(extra) = extra {
-            for (k, v) in extra {
-                headers.insert(k.clone(), v.clone());
-            }
-        }
-        headers
     }
 }
 
 #[async_trait]
 impl LanguageModel for HuggingFaceResponsesModel {
     fn provider(&self) -> &str {
-        PROVIDER_NAME
+        &self.config.provider
     }
 
     fn model_id(&self) -> &str {
         &self.model_id
     }
 
-    fn retry_config(&self) -> aimux_core::retry::RetryConfig {
-        self.config.openai_config().retry_config
-    }
-
-    fn config_snapshot(&self) -> aimux_core::recording::ProviderRecord {
-        // M2b: HuggingFace wraps OpenAIConfig — reuse the OpenAI snapshot helper.
-        crate::openai::config_snapshot_from_config(
-            self.provider(),
-            &self.model_id,
-            self.config.openai_config(),
-        )
-    }
-
     async fn do_generate(&self, options: &CallOptions) -> Result<GenerateResult, AiMuxError> {
+        let exchange = self.config.exchange(options.headers.as_ref()).await?;
         let request = build_request_body_with_warnings(&self.model_id, options, false)?;
         let body = request.body;
-        let headers = self.build_headers(options.headers.as_ref());
 
         let resp = aimux_provider_utils::post_json_to_api(
-            HttpRequest::new(self.endpoint(), build_header_list(&headers), options),
+            exchange.request(exchange.url("/responses"), options),
             body.clone(),
             huggingface_successful_response_handler(),
             huggingface_failed_response_handler(),
@@ -220,26 +189,28 @@ impl LanguageModel for HuggingFaceResponsesModel {
             finish_reason,
             usage,
             warnings: request.warnings,
-            provider_metadata: Some(json!({
-                "huggingface": { "responseId": response_id }
-            })),
-            response: ResponseMetadata {
+            provider_metadata: Some(super::options::huggingface_metadata(
+                json!({ "responseId": response_id }),
+            )),
+            response: Some(aimux_core::shared::ResponseInfo {
                 id: response_id,
                 timestamp: format_timestamp(created_at),
                 model_id: model,
-            },
-            request_body: Some(body),
-            response_headers: Some(response_headers),
+                headers: Some(response_headers),
+                body: Some(response),
+            }),
+            request: Some(aimux_core::shared::RequestInfo { body: Some(body) }),
         })
     }
 
     async fn do_stream(&self, options: &CallOptions) -> Result<StreamResult, AiMuxError> {
+        let exchange = self.config.exchange(options.headers.as_ref()).await?;
         let request = build_request_body_with_warnings(&self.model_id, options, true)?;
         let body = request.body;
-        let headers = self.build_headers(options.headers.as_ref());
+        let endpoint = exchange.url("/responses");
 
         let resp = aimux_provider_utils::post_json_to_api(
-            HttpRequest::new(self.endpoint(), build_header_list(&headers), options),
+            exchange.request(endpoint.clone(), options),
             body.clone(),
             aimux_provider_utils::create_event_source_response_handler::<Value>(),
             huggingface_failed_response_handler(),
@@ -253,311 +224,348 @@ impl LanguageModel for HuggingFaceResponsesModel {
             first_event => first_event,
         };
         if let Some(Ok(event)) = first_event.as_ref()
-            && let Some(error) = huggingface_stream_error(
-                event,
-                &self.endpoint(),
-                body.clone(),
-                response_headers.clone(),
-            )
+            && let Some(error) =
+                huggingface_stream_error(event, &endpoint, body.clone(), response_headers.clone())
         {
             return Err(error);
         }
-        let stream_error_url = self.endpoint();
+        let stream_error_url = endpoint;
         let stream_request_body = body.clone();
         let stream_response_headers = response_headers.clone();
 
         let warnings = request.warnings.clone();
-        let stream = async_stream::stream! {
-            // First part: StreamStart.
-            yield Ok(StreamPart::StreamStart { warnings });
-
-            let mut finish_reason = FinishReason {
-                unified: FinishReasonUnified::Other,
-                raw: None,
-            };
-            let mut response_id: Option<String> = None;
-            let mut usage_raw: Option<Value> = None;
-            let mut event_iter = futures::stream::iter(first_event.into_iter()).chain(sse_stream);
-
-            while let Some(event) = event_iter.next().await {
-                match event {
-                    Ok(parsed) => {
-                        if let Some(error) = huggingface_stream_error(
-                            &parsed,
-                            &stream_error_url,
-                            stream_request_body.clone(),
-                            stream_response_headers.clone(),
-                        ) {
-                            yield Ok(StreamPart::Error { error });
-                            break;
-                        }
-                        let chunk_type = parsed
-                            .get("type")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-
-                        match chunk_type {
-                            "response.created" => {
-                                if let Some(resp) = parsed.get("response") {
-                                    response_id = resp
-                                        .get("id")
-                                        .and_then(|v| v.as_str())
-                                        .map(std::string::ToString::to_string);
-                                    let created_at = resp
-                                        .get("created_at")
-                                        .and_then(serde_json::Value::as_u64)
-                                        .unwrap_or(0);
-                                    let model = resp
-                                        .get("model")
-                                        .and_then(|v| v.as_str())
-                                        .map(std::string::ToString::to_string);
-                                    yield Ok(StreamPart::ResponseMetadata {
-                                        id: response_id.clone(),
-                                        timestamp: format_timestamp(created_at),
-                                        model_id: model,
-                                    });
-                                }
-                            }
-
-                            "response.output_item.added" => {
-                                if let Some(item) = parsed.get("item") {
-                                    let item_type = item
-                                        .get("type")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("");
-                                    match item_type {
-                                        "message" => {
-                                            let role = item
-                                                .get("role")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("");
-                                            if role == "assistant" {
-                                                let id = item
-                                                    .get("id")
-                                                    .and_then(|v| v.as_str())
-                                                    .unwrap_or("")
-                                                    .to_string();
-                                                yield Ok(StreamPart::TextStart {
-                                                    id: id.clone(),
-                                                    provider_metadata: Some(json!({
-                                                        "huggingface": { "itemId": id }
-                                                    })),
-                                                });
-                                            }
-                                        }
-                                        "function_call" => {
-                                            let call_id = item
-                                                .get("call_id")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("")
-                                                .to_string();
-                                            let name = item
-                                                .get("name")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("")
-                                                .to_string();
-                                            yield Ok(StreamPart::ToolInputStart {
-                                                id: call_id,
-                                                tool_name: name,
-                                                provider_executed: None,
-                                                dynamic: None,
-                                                title: None,
-                                                provider_metadata: None,
-                                            });
-                                        }
-                                        "reasoning" => {
-                                            let id = item
-                                                .get("id")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("")
-                                                .to_string();
-                                            yield Ok(StreamPart::ReasoningStart {
-                                                id: id.clone(),
-                                                provider_metadata: Some(json!({
-                                                    "huggingface": { "itemId": id }
-                                                })),
-                                            });
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-
-                            "response.output_item.done" => {
-                                if let Some(item) = parsed.get("item") {
-                                    let item_type = item
-                                        .get("type")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("");
-                                    match item_type {
-                                        "message" => {
-                                            let role = item
-                                                .get("role")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("");
-                                            if role == "assistant" {
-                                                let id = item
-                                                    .get("id")
-                                                    .and_then(|v| v.as_str())
-                                                    .unwrap_or("")
-                                                    .to_string();
-                                                yield Ok(StreamPart::TextEnd { id, provider_metadata: None});
-                                            }
-                                        }
-                                        "function_call" => {
-                                            let call_id = item
-                                                .get("call_id")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("")
-                                                .to_string();
-                                            let name = item
-                                                .get("name")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("")
-                                                .to_string();
-                                            let arguments = item
-                                                .get("arguments")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("{}");
-                                            let input = Value::String(arguments.to_string());
-
-                                            yield Ok(StreamPart::ToolInputEnd {
-                                                id: call_id.clone(),
-                                                provider_metadata: None,
-                                            });
-                                            yield Ok(StreamPart::ToolCall {
-                                                tool_call_id: call_id.clone(),
-                                                tool_name: name.clone(),
-                                                input,
-                                                provider_executed: None,
-                                                dynamic: None,
-                                                thought_signature: None,
-                                                invalid: None,
-                                                error: None,
-                                                provider_metadata: None,
-                                            });
-
-                                            if let Some(output) =
-                                                item.get("output").and_then(|v| v.as_str())
-                                            {
-                                                yield Ok(StreamPart::ToolResult {
-                                                    tool_call_id: call_id,
-                                                    tool_name: name.clone(),
-                                                    result: Value::String(output.to_string()),
-                                                    is_error: None,
-                                                    preliminary: None,
-                                                    dynamic: None,
-                                                    provider_metadata: None,
-                                                });
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-
-                            "response.output_text.delta" => {
-                                let item_id = parsed
-                                    .get("item_id")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let delta = parsed
-                                    .get("delta")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                yield Ok(StreamPart::TextDelta { id: item_id, delta, provider_metadata: None});
-                            }
-
-                            "response.reasoning_text.delta" => {
-                                let item_id = parsed
-                                    .get("item_id")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let delta = parsed
-                                    .get("delta")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                yield Ok(StreamPart::ReasoningDelta {
-                                    id: item_id,
-                                    delta,
-                provider_metadata: None,
-            });
-                            }
-
-                            "response.reasoning_text.done" => {
-                                let item_id = parsed
-                                    .get("item_id")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                yield Ok(StreamPart::ReasoningEnd { id: item_id,
-                provider_metadata: None,
-            });
-                            }
-
-                            "response.completed" => {
-                                if let Some(resp) = parsed.get("response") {
-                                    response_id = resp
-                                        .get("id")
-                                        .and_then(|v| v.as_str())
-                                        .map(std::string::ToString::to_string);
-
-                                    let incomplete_reason = resp
-                                        .get("incomplete_details")
-                                        .and_then(|d| d.get("reason"))
-                                        .and_then(|r| r.as_str());
-
-                                    finish_reason = FinishReason {
-                                        unified: map_finish_reason(
-                                            incomplete_reason.unwrap_or("stop"),
-                                        ),
-                                        raw: incomplete_reason.map(std::string::ToString::to_string),
-                                    };
-
-                                    if let Some(usage) = resp.get("usage")
-                                        && !usage.is_null()
-                                    {
-                                        usage_raw = Some(usage.clone());
-                                    }
-                                }
-                            }
-
-                            _ => {
-                                // Unknown chunk type — ignore (matches the TS
-                                // fallback schema which silently drops unknowns).
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        let recoverable = error.is_recoverable_stream_error();
-                        yield Err(error);
-                        if !recoverable {
-                            return;
-                        }
-                    }
-                }
-            }
-
-            let usage = convert_usage(usage_raw.as_ref());
-
-            yield Ok(StreamPart::Finish {
-                finish_reason,
-                usage,
-                provider_metadata: Some(json!({
-                    "huggingface": { "responseId": response_id }
-                })),
-            });
-        };
+        let stream = pipe_through(
+            futures::stream::iter(first_event).chain(sse_stream),
+            HuggingFaceResponsesStream {
+                warnings,
+                stream_error_url,
+                stream_request_body,
+                stream_response_headers,
+                finish_reason: FinishReason {
+                    unified: FinishReasonUnified::Other,
+                    raw: None,
+                },
+                response_id: None,
+                usage_raw: None,
+                finished: false,
+            },
+        );
 
         Ok(StreamResult {
             stream: Box::pin(stream),
-            request_body: Some(body),
-            response_headers: Some(response_headers),
+            request: Some(aimux_core::shared::RequestInfo { body: Some(body) }),
+            response: Some(aimux_core::shared::StreamResponseInfo {
+                headers: Some(response_headers),
+            }),
         })
+    }
+}
+
+/// The `TransformStream` of the Hugging Face Responses `doStream`.
+struct HuggingFaceResponsesStream {
+    warnings: Vec<Warning>,
+    stream_error_url: String,
+    stream_request_body: Value,
+    stream_response_headers: HashMap<String, String>,
+    finish_reason: FinishReason,
+    response_id: Option<String>,
+    usage_raw: Option<Value>,
+    /// Set by an error chunk: later chunks are ignored, the stream still
+    /// finishes.
+    finished: bool,
+}
+
+impl Transformer for HuggingFaceResponsesStream {
+    type Input = Result<Value, AiMuxError>;
+    type Output = StreamPart;
+
+    fn start(&mut self, controller: &mut TransformStreamController<StreamPart>) {
+        controller.enqueue(StreamPart::StreamStart {
+            warnings: std::mem::take(&mut self.warnings),
+        });
+    }
+
+    fn transform(
+        &mut self,
+        event: Result<Value, AiMuxError>,
+        controller: &mut TransformStreamController<StreamPart>,
+    ) {
+        if self.finished {
+            return;
+        }
+        let Self {
+            ref mut finish_reason,
+            ref mut response_id,
+            ref mut usage_raw,
+            ..
+        } = *self;
+        match event {
+            Ok(parsed) => {
+                if let Some(error) = huggingface_stream_error(
+                    &parsed,
+                    &self.stream_error_url,
+                    self.stream_request_body.clone(),
+                    self.stream_response_headers.clone(),
+                ) {
+                    controller.enqueue(StreamPart::Error { error });
+                    self.finished = true;
+                    return;
+                }
+                let chunk_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+                match chunk_type {
+                    "response.created" => {
+                        if let Some(resp) = parsed.get("response") {
+                            *response_id = resp
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .map(std::string::ToString::to_string);
+                            let created_at = resp
+                                .get("created_at")
+                                .and_then(serde_json::Value::as_u64)
+                                .unwrap_or(0);
+                            let model = resp
+                                .get("model")
+                                .and_then(|v| v.as_str())
+                                .map(std::string::ToString::to_string);
+                            controller.enqueue(StreamPart::ResponseMetadata(ResponseMetadata {
+                                id: response_id.clone(),
+                                timestamp: format_timestamp(created_at),
+                                model_id: model,
+                            }));
+                        }
+                    }
+
+                    "response.output_item.added" => {
+                        if let Some(item) = parsed.get("item") {
+                            let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                            match item_type {
+                                "message" => {
+                                    let role =
+                                        item.get("role").and_then(|v| v.as_str()).unwrap_or("");
+                                    if role == "assistant" {
+                                        let id = item
+                                            .get("id")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
+                                        controller.enqueue(StreamPart::TextStart {
+                                            id: id.clone(),
+                                            provider_metadata: Some(
+                                                super::options::huggingface_metadata(
+                                                    json!({ "itemId": id }),
+                                                ),
+                                            ),
+                                        });
+                                    }
+                                }
+                                "function_call" => {
+                                    let call_id = item
+                                        .get("call_id")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let name = item
+                                        .get("name")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    controller.enqueue(StreamPart::ToolInputStart {
+                                        id: call_id,
+                                        tool_name: name,
+                                        provider_executed: None,
+                                        dynamic: None,
+                                        title: None,
+                                        provider_metadata: None,
+                                    });
+                                }
+                                "reasoning" => {
+                                    let id = item
+                                        .get("id")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    controller.enqueue(StreamPart::ReasoningStart {
+                                        id: id.clone(),
+                                        provider_metadata: Some(
+                                            super::options::huggingface_metadata(
+                                                json!({ "itemId": id }),
+                                            ),
+                                        ),
+                                    });
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    "response.output_item.done" => {
+                        if let Some(item) = parsed.get("item") {
+                            let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                            match item_type {
+                                "message" => {
+                                    let role =
+                                        item.get("role").and_then(|v| v.as_str()).unwrap_or("");
+                                    if role == "assistant" {
+                                        let id = item
+                                            .get("id")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
+                                        controller.enqueue(StreamPart::TextEnd {
+                                            id,
+                                            provider_metadata: None,
+                                        });
+                                    }
+                                }
+                                "function_call" => {
+                                    let call_id = item
+                                        .get("call_id")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let name = item
+                                        .get("name")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let arguments = item
+                                        .get("arguments")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("{}");
+                                    let input = arguments.to_string();
+
+                                    controller.enqueue(StreamPart::ToolInputEnd {
+                                        id: call_id.clone(),
+                                        provider_metadata: None,
+                                    });
+                                    controller.enqueue(StreamPart::ToolCall(RawToolCall {
+                                        tool_call_id: call_id.clone(),
+                                        tool_name: name.clone(),
+                                        input,
+                                        provider_executed: None,
+                                        dynamic: None,
+                                        provider_metadata: None,
+                                    }));
+
+                                    if let Some(output) =
+                                        item.get("output").and_then(|v| v.as_str())
+                                    {
+                                        controller.enqueue(StreamPart::ToolResult(ToolResult {
+                                            tool_call_id: call_id,
+                                            tool_name: name.clone(),
+                                            result: Value::String(output.to_string()),
+                                            is_error: None,
+                                            preliminary: None,
+                                            dynamic: None,
+                                            provider_metadata: None,
+                                        }));
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    "response.output_text.delta" => {
+                        let item_id = parsed
+                            .get("item_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let delta = parsed
+                            .get("delta")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        controller.enqueue(StreamPart::TextDelta {
+                            id: item_id,
+                            delta,
+                            provider_metadata: None,
+                        });
+                    }
+
+                    "response.reasoning_text.delta" => {
+                        let item_id = parsed
+                            .get("item_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let delta = parsed
+                            .get("delta")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        controller.enqueue(StreamPart::ReasoningDelta {
+                            id: item_id,
+                            delta,
+                            provider_metadata: None,
+                        });
+                    }
+
+                    "response.reasoning_text.done" => {
+                        let item_id = parsed
+                            .get("item_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        controller.enqueue(StreamPart::ReasoningEnd {
+                            id: item_id,
+                            provider_metadata: None,
+                        });
+                    }
+
+                    "response.completed" => {
+                        if let Some(resp) = parsed.get("response") {
+                            *response_id = resp
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .map(std::string::ToString::to_string);
+
+                            let incomplete_reason = resp
+                                .get("incomplete_details")
+                                .and_then(|d| d.get("reason"))
+                                .and_then(|r| r.as_str());
+
+                            *finish_reason = FinishReason {
+                                unified: map_finish_reason(incomplete_reason.unwrap_or("stop")),
+                                raw: incomplete_reason.map(std::string::ToString::to_string),
+                            };
+
+                            if let Some(usage) = resp.get("usage")
+                                && !usage.is_null()
+                            {
+                                *usage_raw = Some(usage.clone());
+                            }
+                        }
+                    }
+
+                    _ => {
+                        // Unknown chunk type — ignore (matches the TS
+                        // fallback schema which silently drops unknowns).
+                    }
+                }
+            }
+            Err(error) => {
+                if error.is_recoverable_stream_error() {
+                    controller.enqueue_error(error);
+                } else {
+                    controller.error(error);
+                }
+            }
+        }
+    }
+
+    fn flush(self, controller: &mut TransformStreamController<StreamPart>) {
+        let usage = convert_usage(self.usage_raw.as_ref());
+
+        controller.enqueue(StreamPart::Finish {
+            finish_reason: self.finish_reason,
+            usage,
+            provider_metadata: Some(super::options::huggingface_metadata(
+                json!({ "responseId": self.response_id }),
+            )),
+        });
     }
 }
 
@@ -626,7 +634,7 @@ pub fn build_request_body_with_warnings(
     let hf_options = options
         .provider_options
         .as_ref()
-        .and_then(|m| m.get("huggingface"));
+        .and_then(|m| super::options::huggingface_options(Some(m)));
     let metadata = hf_options.and_then(|o| o.get("metadata")).cloned();
     let instructions = hf_options
         .and_then(|o| o.get("instructions"))
@@ -643,7 +651,7 @@ pub fn build_request_body_with_warnings(
 
     // Prepare tools.
     let (tools, tool_choice, tool_warnings) =
-        prepare_responses_tools(&options.tools, &options.tool_choice);
+        prepare_responses_tools(&options.tools, options.tool_choice.as_ref());
     warnings.extend(tool_warnings);
 
     // Assemble the body. Key insertion order follows the TS `baseArgs` object
@@ -733,74 +741,59 @@ pub fn convert_to_huggingface_responses_messages(
     let mut warnings: Vec<Warning> = Vec::new();
 
     for msg in prompt {
-        match msg.role {
-            Role::System => {
-                // System content is a plain string (concatenation of text parts).
-                let content: String = msg
-                    .content
-                    .iter()
-                    .filter_map(|p| match p {
-                        ContentPart::Text { text, .. } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("");
+        match msg {
+            LanguageModelMessage::System { content, .. } => {
                 messages.push(json!({ "role": "system", "content": content }));
             }
-
-            Role::User => {
+            LanguageModelMessage::User { content, .. } => {
                 let mut parts: Vec<Value> = Vec::new();
-                for part in &msg.content {
+                for part in content {
                     match part {
-                        ContentPart::Text { text, .. } => {
+                        UserPart::Text(TextPart { text, .. }) => {
                             parts.push(json!({ "type": "input_text", "text": text }));
                         }
-                        ContentPart::FileBase64 {
-                            data, media_type, ..
-                        } => {
-                            parts.push(convert_file_part_base64(media_type, data)?);
-                        }
-                        ContentPart::FileUrl {
-                            url, media_type, ..
-                        } => {
-                            parts.push(convert_file_part_url(media_type, url)?);
-                        }
-                        ContentPart::FileReference { .. } => {
-                            return Err(AiMuxError::UnsupportedFunctionality(
-                                "file parts with provider references".into(),
-                            ));
-                        }
-                        ContentPart::Image {
-                            image, media_type, ..
-                        } => {
-                            let encoded = base64::engine::general_purpose::STANDARD.encode(image);
-                            parts.push(convert_file_part_base64(media_type, &encoded)?);
-                        }
-                        ContentPart::File {
-                            data, media_type, ..
-                        } => {
-                            let encoded = base64::engine::general_purpose::STANDARD.encode(data);
-                            parts.push(convert_file_part_base64(media_type, &encoded)?);
-                        }
-                        _ => {
-                            // Other part types (tool-call, tool-result, reasoning)
-                            // are not expected in user messages — skip.
+                        UserPart::File(file) => {
+                            parts.push(match &file.data {
+                                FileData::Data {
+                                    data: FileBytes::Binary(bytes),
+                                } => {
+                                    let encoded =
+                                        base64::engine::general_purpose::STANDARD.encode(bytes);
+                                    convert_file_part_base64(&file.media_type, &encoded)?
+                                }
+                                FileData::Data {
+                                    data: FileBytes::Base64(data),
+                                } => convert_file_part_base64(&file.media_type, data)?,
+                                FileData::Url { url, .. } => {
+                                    convert_file_part_url(&file.media_type, url)?
+                                }
+                                FileData::Reference { .. } => {
+                                    return Err(AiMuxError::UnsupportedFunctionality(
+                                        "file parts with provider references".into(),
+                                    ));
+                                }
+                                FileData::Text { .. } => {
+                                    return Err(AiMuxError::UnsupportedFunctionality(
+                                        "text file parts".into(),
+                                    ));
+                                }
+                            });
                         }
                     }
                 }
                 messages.push(json!({ "role": "user", "content": parts }));
             }
 
-            Role::Assistant => {
-                for part in &msg.content {
+            LanguageModelMessage::Assistant { content, .. } => {
+                for part in content {
                     match part {
-                        ContentPart::Text { text, .. } => {
+                        AssistantPart::Text(TextPart { text, .. }) => {
                             messages.push(json!({
                                 "role": "assistant",
                                 "content": [{ "type": "output_text", "text": text }]
                             }));
                         }
-                        ContentPart::Reasoning { text, .. } => {
+                        AssistantPart::Reasoning(ReasoningPart { text, .. }) => {
                             messages.push(json!({
                                 "role": "assistant",
                                 "content": [{ "type": "output_text", "text": text }]
@@ -808,13 +801,16 @@ pub fn convert_to_huggingface_responses_messages(
                         }
                         // Tool calls and tool results are handled by the
                         // Responses API — skip (no warning, matching TS).
-                        ContentPart::ToolCall { .. } | ContentPart::ToolResult { .. } => {}
-                        _ => {}
+                        AssistantPart::ToolCall(_)
+                        | AssistantPart::ToolResult(_)
+                        | AssistantPart::File(_)
+                        | AssistantPart::ReasoningFile(_)
+                        | AssistantPart::Custom(_) => {}
                     }
                 }
             }
 
-            Role::Tool => {
+            LanguageModelMessage::Tool { .. } => {
                 warnings.push(Warning::Unsupported {
                     feature: "tool messages".into(),
                     details: None,
@@ -864,28 +860,6 @@ fn convert_file_part_url(media_type: &str, url: &str) -> Result<Value, AiMuxErro
 // Media type detection (top-level-only media type resolution)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Returns the top-level segment of a media type (the portion before `/`).
-///
-/// `"image/png"` → `"image"`, `"image/*"` → `"image"`, `"image"` → `"image"`.
-fn get_top_level_media_type(media_type: &str) -> &str {
-    match media_type.find('/') {
-        Some(idx) => &media_type[..idx],
-        None => media_type,
-    }
-}
-
-/// Returns `true` only when the media type has a non-empty, non-wildcard
-/// subtype (i.e. matches `type/subtype` where `subtype` is not `*`).
-fn is_full_media_type(media_type: &str) -> bool {
-    match media_type.find('/') {
-        Some(idx) => {
-            let subtype = &media_type[idx + 1..];
-            !subtype.is_empty() && subtype != "*"
-        }
-        None => false,
-    }
-}
-
 /// Resolve a media type to its full `type/subtype` form.
 ///
 /// - If already a full media type, return as-is.
@@ -896,115 +870,13 @@ fn resolve_full_media_type_base64(media_type: &str, data: &str) -> Result<String
     }
 
     let top_level = get_top_level_media_type(media_type);
-    if let Some(detected) = detect_media_type_from_base64(data, top_level) {
-        return Ok(detected);
+    if let Some(detected) = detect_media_type(MediaTypeData::Base64(data), Some(top_level))? {
+        return Ok(detected.to_string());
     }
 
     Err(AiMuxError::UnsupportedFunctionality(format!(
         "file of media type \"{media_type}\" must specify subtype since it could not be auto-detected"
     )))
-}
-
-/// Image media type signatures (magic-byte prefixes).
-///
-/// `None` in the prefix means "any byte" (wildcard), matching the TS signature
-/// table.
-const IMAGE_SIGNATURES: &[(&str, &[Option<u8>])] = &[
-    ("image/gif", &[Some(0x47), Some(0x49), Some(0x46)]),
-    (
-        "image/png",
-        &[Some(0x89), Some(0x50), Some(0x4E), Some(0x47)],
-    ),
-    ("image/jpeg", &[Some(0xFF), Some(0xD8)]),
-    (
-        "image/webp",
-        &[
-            Some(0x52),
-            Some(0x49),
-            Some(0x46),
-            Some(0x46), // RIFF
-            None,
-            None,
-            None,
-            None, // file size (variable)
-            Some(0x57),
-            Some(0x45),
-            Some(0x42),
-            Some(0x50), // WEBP
-        ],
-    ),
-    ("image/bmp", &[Some(0x42), Some(0x4D)]),
-    (
-        "image/tiff",
-        &[Some(0x49), Some(0x49), Some(0x2A), Some(0x00)],
-    ),
-    (
-        "image/tiff",
-        &[Some(0x4D), Some(0x4D), Some(0x00), Some(0x2A)],
-    ),
-    (
-        "image/avif",
-        &[
-            Some(0x00),
-            Some(0x00),
-            Some(0x00),
-            Some(0x20),
-            Some(0x66),
-            Some(0x74),
-            Some(0x79),
-            Some(0x70),
-            Some(0x61),
-            Some(0x76),
-            Some(0x69),
-            Some(0x66),
-        ],
-    ),
-    (
-        "image/heic",
-        &[
-            Some(0x00),
-            Some(0x00),
-            Some(0x00),
-            Some(0x20),
-            Some(0x66),
-            Some(0x74),
-            Some(0x79),
-            Some(0x70),
-            Some(0x68),
-            Some(0x65),
-            Some(0x69),
-            Some(0x63),
-        ],
-    ),
-];
-
-/// Detect the full media type from base64-encoded data, considering only
-/// signatures for the given top-level type.
-fn detect_media_type_from_base64(data: &str, top_level: &str) -> Option<String> {
-    let signatures = match top_level {
-        "image" => IMAGE_SIGNATURES,
-        _ => return None,
-    };
-
-    // Decode enough bytes to cover the longest signature (12 bytes).
-    // 4 base64 chars → 3 bytes; ceil(12 / 3) * 4 = 16 chars.
-    let max_chars = 16.min(data.len());
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(&data[..max_chars])
-        .ok()?;
-
-    for (media_type, prefix) in signatures {
-        if bytes.len() >= prefix.len()
-            && prefix
-                .iter()
-                .enumerate()
-                .all(|(i, &b)| b.is_none() || bytes[i] == b.unwrap())
-        {
-            return Some(media_type.to_string());
-        }
-    }
-
-    None
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1018,7 +890,7 @@ fn detect_media_type_from_base64(data: &str, top_level: &str) -> Option<String> 
 #[must_use]
 pub fn prepare_responses_tools(
     tools: &Option<Vec<Tool>>,
-    tool_choice: &ToolChoice,
+    tool_choice: Option<&ToolChoice>,
 ) -> (Option<Vec<Value>>, Option<Value>, Vec<Warning>) {
     let tools = match tools {
         Some(t) if !t.is_empty() => t,
@@ -1050,10 +922,10 @@ pub fn prepare_responses_tools(
     }
 
     let mapped_tool_choice = match tool_choice {
-        ToolChoice::Auto => Some(json!("auto")),
-        ToolChoice::Required => Some(json!("required")),
-        ToolChoice::None => None, // not supported, ignore
-        ToolChoice::Tool { tool_name } => Some(json!({
+        Some(ToolChoice::Auto) => Some(json!("auto")),
+        Some(ToolChoice::Required) => Some(json!("required")),
+        None | Some(ToolChoice::None) => None, // not supported, ignore
+        Some(ToolChoice::Tool { tool_name }) => Some(json!({
             "type": "function",
             "function": { "name": tool_name }
         })),
@@ -1092,9 +964,9 @@ fn build_generate_content(response: &Value) -> Result<Vec<GenerateContent>, AiMu
                     let item_id = part.get("id").and_then(|v| v.as_str()).unwrap_or("");
                     content.push(GenerateContent::Text {
                         text: text.to_string(),
-                        provider_metadata: Some(json!({
-                            "huggingface": { "itemId": item_id }
-                        })),
+                        provider_metadata: Some(super::options::huggingface_metadata(
+                            json!({ "itemId": item_id }),
+                        )),
                     });
 
                     // Process annotations → source parts.
@@ -1102,13 +974,12 @@ fn build_generate_content(response: &Value) -> Result<Vec<GenerateContent>, AiMu
                         for ann in annotations {
                             let url = ann.get("url").and_then(|v| v.as_str()).unwrap_or("");
                             let title = ann.get("title").and_then(|v| v.as_str());
-                            content.push(GenerateContent::Source {
+                            content.push(GenerateContent::Source(Source::Url {
                                 id: format!("id-{source_id_counter}"),
-                                source_type: "url".to_string(),
-                                url: Some(url.to_string()),
+                                url: url.to_string(),
                                 title: title.map(std::string::ToString::to_string),
                                 provider_metadata: None,
-                            });
+                            }));
                             source_id_counter += 1;
                         }
                     }
@@ -1123,12 +994,12 @@ fn build_generate_content(response: &Value) -> Result<Vec<GenerateContent>, AiMu
                 for cp in content_parts {
                     let text = cp.get("text").and_then(|v| v.as_str()).unwrap_or("");
                     let item_id = part.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                    content.push(GenerateContent::Reasoning {
+                    content.push(GenerateContent::Reasoning(ReasoningOutput {
                         text: text.to_string(),
-                        provider_metadata: Some(json!({
-                            "huggingface": { "itemId": item_id }
-                        })),
-                    });
+                        provider_metadata: Some(super::options::huggingface_metadata(
+                            json!({ "itemId": item_id }),
+                        )),
+                    }));
                 }
             }
 
@@ -1140,15 +1011,14 @@ fn build_generate_content(response: &Value) -> Result<Vec<GenerateContent>, AiMu
                     .and_then(|v| v.as_str())
                     .unwrap_or("{}");
                 let input = arguments.to_string();
-                content.push(GenerateContent::ToolCall {
+                content.push(GenerateContent::ToolCall(RawToolCall {
                     tool_call_id: call_id.to_string(),
                     tool_name: name.to_string(),
                     input,
                     provider_executed: None,
                     dynamic: None,
-                    thought_signature: None,
                     provider_metadata: None,
-                });
+                }));
             }
 
             "mcp_call" => {
@@ -1159,18 +1029,17 @@ fn build_generate_content(response: &Value) -> Result<Vec<GenerateContent>, AiMu
                     .and_then(|v| v.as_str())
                     .unwrap_or("{}");
                 let input = arguments.to_string();
-                content.push(GenerateContent::ToolCall {
+                content.push(GenerateContent::ToolCall(RawToolCall {
                     tool_call_id: id.to_string(),
                     tool_name: name.to_string(),
                     input,
                     provider_executed: Some(true),
                     dynamic: Some(true),
-                    thought_signature: None,
                     provider_metadata: None,
-                });
+                }));
 
                 if let Some(output) = part.get("output").filter(|v| !v.is_null()) {
-                    content.push(GenerateContent::ToolResult {
+                    content.push(GenerateContent::ToolResult(ToolResult {
                         tool_call_id: id.to_string(),
                         tool_name: name.to_string(),
                         result: output.clone(),
@@ -1178,25 +1047,24 @@ fn build_generate_content(response: &Value) -> Result<Vec<GenerateContent>, AiMu
                         preliminary: None,
                         dynamic: Some(true),
                         provider_metadata: None,
-                    });
+                    }));
                 }
             }
 
             "mcp_list_tools" => {
                 let id = part.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 let server_label = part.get("server_label").cloned().unwrap_or(Value::Null);
-                content.push(GenerateContent::ToolCall {
+                content.push(GenerateContent::ToolCall(RawToolCall {
                     tool_call_id: id.to_string(),
                     tool_name: "list_tools".to_string(),
                     input: json!({ "server_label": server_label }).to_string(),
                     provider_executed: Some(true),
                     dynamic: Some(true),
-                    thought_signature: None,
                     provider_metadata: None,
-                });
+                }));
 
                 if let Some(tools) = part.get("tools").filter(|v| !v.is_null()) {
-                    content.push(GenerateContent::ToolResult {
+                    content.push(GenerateContent::ToolResult(ToolResult {
                         tool_call_id: id.to_string(),
                         tool_name: "list_tools".to_string(),
                         result: json!({ "tools": tools }),
@@ -1204,7 +1072,7 @@ fn build_generate_content(response: &Value) -> Result<Vec<GenerateContent>, AiMu
                         preliminary: None,
                         dynamic: Some(true),
                         provider_metadata: None,
-                    });
+                    }));
                 }
             }
 
@@ -1274,21 +1142,19 @@ fn convert_usage(usage: Option<&Value>) -> Usage {
         .unwrap_or(0) as u32;
 
     Usage {
-        input_tokens: TokenUsage {
+        input_tokens: aimux_core::types::InputTokenUsage {
             total: Some(input_tokens),
             no_cache: Some(input_tokens - cached_tokens),
             cache_read: Some(cached_tokens),
             cache_write: None,
-            ..Default::default()
         },
-        output_tokens: TokenUsage {
+        output_tokens: aimux_core::types::OutputTokenUsage {
             total: Some(output_tokens),
             text: Some(output_tokens - reasoning_tokens),
             reasoning: Some(reasoning_tokens),
-            ..Default::default()
         },
         // RFC-0015 P0-3: keep the raw provider usage payload.
-        raw: Some(u.clone()),
+        raw: u.as_object().cloned(),
     }
 }
 
