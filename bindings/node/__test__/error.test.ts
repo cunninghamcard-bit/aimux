@@ -308,3 +308,25 @@ test('provider() still accepts the known config keys', async (t) => {
   })
   t.truthy(model)
 })
+
+test('provider config maxRetries points to the call options, not a generic unknown field', async (t) => {
+  const config = { maxRetries: 0 } as any
+  for (const make of [
+    () => provider('groq', 'sk-test-fake-key', 'llama-3.3-70b', config),
+    () => createProvider('groq', 'sk-test-fake-key', config),
+    () => openai('sk-test-fake-key', 'gpt-4o', config),
+  ]) {
+    const err = (await t.throwsAsync(make)) as AimuxError
+    t.true(err instanceof InvalidArgumentError)
+    t.regex(err.message, /call-level option: pass it in the call options \(`maxRetries`\)/)
+    t.notRegex(err.message, /unknown field/)
+  }
+})
+
+test('provider config keys set to undefined are treated as absent', async (t) => {
+  const model = await provider('groq', 'sk-test-fake-key', 'llama-3.3-70b', {
+    baseUrl: undefined,
+    headers: undefined,
+  })
+  t.truthy(model)
+})

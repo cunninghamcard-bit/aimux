@@ -500,12 +500,6 @@ export interface ProviderConfig {
    * declares are accepted.
    */
   params?: Record<string, string>
-  /**
-   * Rejected with `InvalidArgumentError`: retry is a per-call setting
-   * (`maxRetries` in the call options). The field exists only so passing it
-   * is reported instead of ignored.
-   */
-  maxRetries?: number
 }
 
 /** 刷盘全局 recorder(阻塞至 JSONL 落盘;ring 模式为 no-op)。 */

@@ -627,6 +627,8 @@ impl AsyncGenerator for StreamTextGenerator {
 /// For backward compatibility a bare string is still accepted (treated as
 /// `baseUrl`). See RFC-0017.
 #[napi(object, object_from_js = false)]
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ProviderConfig {
     /// Base URL for API calls (e.g. a relay/proxy endpoint).
     pub base_url: Option<String>,
@@ -642,74 +644,67 @@ pub struct ProviderConfig {
     /// name (`provider()` / `createProvider()`). Only parameters the preset
     /// declares are accepted.
     pub params: Option<std::collections::HashMap<String, String>>,
-    /// Rejected with `InvalidArgumentError`: retry is a per-call setting
-    /// (`maxRetries` in the call options). The field exists only so passing it
-    /// is reported instead of ignored.
-    pub max_retries: Option<u32>,
-    /// Keys of the JS object that are not fields above, reported as unknown
-    /// fields instead of being dropped.
+    /// Why the JS object was refused (a call-level key, an unknown field, a
+    /// mistyped value), reported as `InvalidArgumentError` by
+    /// [`native_config`] instead of being dropped.
     #[napi(skip)]
-    pub unknown_fields: Vec<String>,
+    #[serde(skip)]
+    pub invalid: Option<String>,
 }
 
-/// The JS names of the [`ProviderConfig`] fields.
-const PROVIDER_CONFIG_FIELDS: &[&str] = &[
-    "baseUrl",
-    "headers",
-    "organization",
-    "project",
-    "params",
-    "maxRetries",
-];
+/// Reject keys that belong somewhere else before the generic unknown-field
+/// check, so they get a pointed message.
+fn reject_removed_keys(raw: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    raw.contains_key("maxRetries").then(|| {
+        "`max_retries` is a call-level option: pass it in the call options (`maxRetries`), \
+         not in the provider configuration"
+            .to_string()
+    })
+}
 
+/// The JS object is read as a raw JSON map (`undefined` values skipped, like
+/// absent keys), checked by [`reject_removed_keys`], then deserialized with
+/// serde `deny_unknown_fields`: the struct above is the single list of
+/// accepted keys.
 impl FromNapiValue for ProviderConfig {
     unsafe fn from_napi_value(env: sys::napi_env, napi_val: sys::napi_value) -> Result<Self> {
         let obj = unsafe { Object::from_napi_value(env, napi_val)? };
         let names = obj.get_property_names()?;
-        let mut unknown_fields = Vec::new();
+        let mut raw = serde_json::Map::new();
         for i in 0..names.get_array_length()? {
             let name: String = names.get_element(i)?;
-            if !PROVIDER_CONFIG_FIELDS.contains(&name.as_str()) {
-                unknown_fields.push(name);
+            let value: Unknown = obj.get_named_property(&name)?;
+            if value.get_type()? == ValueType::Undefined {
+                continue;
             }
+            let value = unsafe { serde_json::Value::from_napi_value(env, value.raw())? };
+            raw.insert(name, value);
         }
-        Ok(Self {
-            base_url: obj.get("baseUrl")?,
-            headers: obj.get("headers")?,
-            organization: obj.get("organization")?,
-            project: obj.get("project")?,
-            params: obj.get("params")?,
-            max_retries: obj.get("maxRetries")?,
-            unknown_fields,
-        })
+        let invalid = |message: String| Self {
+            invalid: Some(message),
+            ..Self::default()
+        };
+        if let Some(message) = reject_removed_keys(&raw) {
+            return Ok(invalid(message));
+        }
+        Ok(
+            serde_json::from_value::<Self>(serde_json::Value::Object(raw))
+                .unwrap_or_else(|error| invalid(error.to_string())),
+        )
     }
 }
 
 impl ValidateNapiValue for ProviderConfig {}
 
 impl ProviderConfig {
-    /// Fail on an unknown key or on `max_retries` instead of dropping them
-    /// silently.
-    fn reject_removed_keys(&self) -> MResult<()> {
-        let message = if let Some(name) = self.unknown_fields.first() {
-            format!(
-                "unknown field `{name}`, expected one of {}",
-                PROVIDER_CONFIG_FIELDS
-                    .iter()
-                    .map(|f| format!("`{f}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        } else if self.max_retries.is_some() {
-            "`max_retries` is a call-level option: pass it in the call options (`maxRetries`), \
-             not in the provider configuration"
-                .to_string()
-        } else {
-            return Ok(());
-        };
-        Err(AiMuxBindingError::from(&AiMuxError::InvalidArgument(
-            message,
-        )))
+    /// The refusal recorded while reading the JS object, if any.
+    fn check(&self) -> MResult<()> {
+        match &self.invalid {
+            Some(message) => Err(AiMuxBindingError::from(&AiMuxError::InvalidArgument(
+                message.clone(),
+            ))),
+            None => Ok(()),
+        }
     }
 }
 
@@ -736,7 +731,7 @@ fn native_config(config: Option<Either<String, ProviderConfig>>) -> MResult<Nati
         None => {}
         Some(Either::A(url)) => native.base_url = Some(url),
         Some(Either::B(cfg)) => {
-            cfg.reject_removed_keys()?;
+            cfg.check()?;
             native.base_url = cfg.base_url;
             if let Some(json_str) = &cfg.headers {
                 let h: std::collections::HashMap<String, String> =
