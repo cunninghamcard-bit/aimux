@@ -14,7 +14,6 @@ use crate::decision_support::DecisionEndpoint;
 pub struct OpenAIDecisionModel {
     endpoint: DecisionEndpoint,
     model_id: String,
-    retry_config: aimux_core::retry::RetryConfig,
 }
 
 impl OpenAIDecisionModel {
@@ -32,15 +31,7 @@ impl OpenAIDecisionModel {
         Ok(Self {
             endpoint: DecisionEndpoint::OpenAI(config),
             model_id: model_id.into(),
-            retry_config: aimux_core::retry::RetryConfig::default(),
         })
-    }
-
-    /// Replace the retry settings [`decide`] uses for this model (#226).
-    #[must_use]
-    pub fn with_retry_config(mut self, retry_config: aimux_core::retry::RetryConfig) -> Self {
-        self.retry_config = retry_config;
-        self
     }
 }
 
@@ -406,17 +397,6 @@ impl DecisionModel for OpenAIDecisionModel {
     }
     fn model_id(&self) -> &str {
         &self.model_id
-    }
-    fn retry_config(&self) -> aimux_core::retry::RetryConfig {
-        self.retry_config
-    }
-    fn config_snapshot(&self) -> aimux_core::recording::ProviderRecord {
-        self.endpoint.snapshot(
-            self.provider(),
-            self.model_id(),
-            self.retry_config,
-            json!({"decision_protocol":"openai_decisions", "decision_capabilities":self.capabilities()}),
-        )
     }
     fn capabilities(&self) -> DecisionCapabilities {
         DecisionCapabilities {

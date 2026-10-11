@@ -82,22 +82,17 @@ async fn ring_records_one_complete_call_and_replays_exact_inputs_with_redaction(
     assert_eq!(records[0].input.operation, RecordingOperation::Decision);
     assert!(records[0].input.prompt.is_empty());
     assert!(records[0].input.decision_capabilities.is_some());
-    // Identity plus #226's connection snapshot (credential source only).
+    // Identity only (A6 item 1): no credential source or base URL.
     let provider = serde_json::to_value(&records[0].provider).unwrap();
     for (key, value) in [
         ("providerId", "jev"),
         ("provider", "jev"),
         ("modelId", "jev-latest"),
-        ("apiKeySource", "explicit"),
     ] {
         assert_eq!(provider[key], json!(value), "{key}");
     }
-    assert!(
-        provider["baseUrl"]
-            .as_str()
-            .unwrap()
-            .ends_with("/v1/systemone")
-    );
+    assert!(provider.get("apiKeySource").is_none(), "{provider}");
+    assert!(provider.get("baseUrl").is_none(), "{provider}");
     assert_eq!(records[0].exchanges.len(), 1);
     assert_eq!(records[0].exchanges[0].attempt, 1);
     assert_eq!(records[0].exchanges[0].exchange_index, 1);

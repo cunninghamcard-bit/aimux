@@ -550,20 +550,6 @@ pub trait DecisionModel: Send + Sync {
     fn provider(&self) -> &str;
     fn model_id(&self) -> &str;
     fn capabilities(&self) -> DecisionCapabilities;
-    /// The provider snapshot written into decision recordings (#226): identity
-    /// plus connection metadata (base URL, credential *source*, capabilities,
-    /// redacted options). Never carries a credential value.
-    fn config_snapshot(&self) -> crate::recording::ProviderRecord {
-        let mut snapshot =
-            crate::recording::ProviderRecord::from_model(self.provider(), self.model_id());
-        snapshot.profile = Some(serde_json::json!({"decision_capabilities": self.capabilities()}));
-        snapshot
-    }
-    /// Retry settings for [`decide`] (#226). A per-call `max_retries`
-    /// overrides only the retry count.
-    fn retry_config(&self) -> retry::RetryConfig {
-        retry::RetryConfig::default()
-    }
     /// Perform one provider attempt.
     /// # Errors
     /// Returns provider, transport or invalid response errors.
@@ -576,7 +562,17 @@ pub trait DecisionModel: Send + Sync {
 /// retry exhaustion, timeout or caller abort errors.
 pub async fn decide(
     model: &dyn DecisionModel,
+    options: DecisionCallOptions,
+) -> Result<DecisionResult, AiMuxError> {
+    decide_with_retry_delay(model, options, None).await
+}
+
+/// [`decide`] with an optional crate-internal override of the first retry
+/// delay (tests only; `None` keeps the core default).
+async fn decide_with_retry_delay(
+    model: &dyn DecisionModel,
     mut options: DecisionCallOptions,
+    initial_retry_delay: Option<std::time::Duration>,
 ) -> Result<DecisionResult, AiMuxError> {
     options.validate()?;
     let capabilities = model.capabilities();
@@ -648,11 +644,14 @@ pub async fn decide(
     }
     let timeout = timeout::OperationTimeout::new(options.timeout.unwrap_or_default())?;
     let abort_signal = options.abort_signal.clone();
-    let retries = retry::prepare_retries_with_config(
-        options.max_retries,
-        model.retry_config(),
-        abort_signal.clone(),
-    );
+    let retries = retry::prepare_retries(options.max_retries, abort_signal.clone());
+    #[cfg(test)]
+    let retries = match initial_retry_delay {
+        Some(delay) => retries.with_initial_delay(delay),
+        None => retries,
+    };
+    #[cfg(not(test))]
+    let _ = initial_retry_delay;
     let context = crate::recording::recorder().map(|recorder| {
         let ctx =
             crate::recording::RecordingContext::new(crate::recording::new_call_id(), recorder);
@@ -664,8 +663,10 @@ pub async fn decide(
             model.model_id(),
             &capabilities,
         );
-        ctx.recorder
-            .record_provider(&ctx.call_id, &model.config_snapshot().redacted());
+        ctx.recorder.record_provider(
+            &ctx.call_id,
+            &crate::recording::ProviderRecord::from_model(model.provider(), model.model_id()),
+        );
         ctx
     });
     let result = timeout::run(
@@ -720,4 +721,113 @@ pub async fn decide(
         ctx.recorder.record_outcome(&ctx.call_id, &outcome);
     }
     result
+}
+
+#[cfg(test)]
+mod retry_tests {
+    //! Decision retries use only the core call-level `max_retries` (A6 item 2).
+    //! The first retry delay is set to zero through the crate-internal
+    //! [`retry::PreparedRetries::with_initial_delay`], so no test waits.
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use super::*;
+    use crate::error::{ApiCallError, RetryErrorReason};
+
+    struct FailingModel {
+        calls: AtomicUsize,
+        status: u16,
+        retryable: bool,
+    }
+
+    #[async_trait]
+    impl DecisionModel for FailingModel {
+        fn provider(&self) -> &str {
+            "test"
+        }
+        fn model_id(&self) -> &str {
+            "test"
+        }
+        fn capabilities(&self) -> DecisionCapabilities {
+            DecisionCapabilities {
+                supports_images: false,
+                max_images: None,
+                supports_typed_choices: false,
+                rounding: DecisionRounding::default(),
+                probability_source: DecisionProbabilitySource::ModelEstimate,
+                supports_boolean: true,
+                supports_choice: true,
+                supports_score: true,
+                returns_distributions: false,
+                max_questions: None,
+                min_choices: None,
+                max_choices: None,
+                max_score_levels: None,
+            }
+        }
+        async fn do_decide(&self, _: &DecisionCallOptions) -> Result<DecisionResult, AiMuxError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(AiMuxError::ApiCall(Box::new(ApiCallError {
+                status_code: Some(self.status),
+                is_retryable: self.retryable,
+                ..ApiCallError::new("failure", "https://example.test", serde_json::json!({}))
+            })))
+        }
+    }
+
+    fn options(max_retries: Option<u32>) -> DecisionCallOptions {
+        let mut options: DecisionCallOptions = serde_json::from_value(serde_json::json!({
+            "state": "text",
+            "questions": [{"id": "q", "type": "boolean", "instructions": "test"}]
+        }))
+        .unwrap();
+        options.max_retries = max_retries;
+        options
+    }
+
+    async fn run(status: u16, retryable: bool, max_retries: Option<u32>) -> (usize, AiMuxError) {
+        let model = FailingModel {
+            calls: AtomicUsize::new(0),
+            status,
+            retryable,
+        };
+        let error = decide_with_retry_delay(&model, options(max_retries), Some(Duration::ZERO))
+            .await
+            .unwrap_err();
+        (model.calls.load(Ordering::SeqCst), error)
+    }
+
+    #[tokio::test]
+    async fn call_level_max_retries_sets_exact_attempts_until_exhausted() {
+        for status in [429, 503, 529] {
+            for (max_retries, attempts) in [(Some(1), 2), (Some(3), 4), (None, 3)] {
+                let (calls, error) = run(status, true, max_retries).await;
+                assert_eq!(
+                    calls, attempts,
+                    "status {status}, max_retries {max_retries:?}"
+                );
+                let AiMuxError::Retry(retry) = &error else {
+                    panic!("expected retry exhaustion, got {error:?}");
+                };
+                assert_eq!(retry.reason, RetryErrorReason::MaxRetriesExceeded);
+                assert_eq!(retry.errors.len(), attempts);
+                let AiMuxError::ApiCall(last) = retry.last_error() else {
+                    panic!("expected API error");
+                };
+                assert_eq!(last.status_code, Some(status));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn zero_max_retries_and_non_retryable_errors_make_one_attempt() {
+        let (calls, error) = run(503, true, Some(0)).await;
+        assert_eq!(calls, 1);
+        assert!(matches!(&error, AiMuxError::ApiCall(e) if e.status_code == Some(503)));
+        for status in [401, 422, 499] {
+            let (calls, error) = run(status, false, Some(3)).await;
+            assert_eq!(calls, 1, "status {status}");
+            assert!(matches!(&error, AiMuxError::ApiCall(e) if e.status_code == Some(status)));
+        }
+    }
 }

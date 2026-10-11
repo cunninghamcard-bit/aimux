@@ -776,8 +776,8 @@ fn named_settings(
 /// Create a language model from the built-in registry by provider name
 /// (RFC-0017 phase 4). `api_key=None` reads the provider's env var.
 /// `config_json` is a JSON object (`base_url` / `headers` / `organization` /
-/// `project` / `params`; any other key, `max_retries` and `body_overrides`
-/// included, is rejected as an invalid argument); the `base_url` parameter
+/// `project` / `params`; any other key, `max_retries` included, is rejected
+/// as an invalid argument); the `base_url` parameter
 /// wins over the JSON field.
 #[pyfunction]
 #[pyo3(signature = (name, api_key, model_id, base_url=None, config_json=None))]

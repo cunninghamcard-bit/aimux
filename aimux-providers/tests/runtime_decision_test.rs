@@ -604,22 +604,20 @@ fn local_factories_and_wrapper_factories_preserve_credentials_for_replay() {
         .unwrap();
         let model = handle.decision_model("served-alias").unwrap();
         assert_eq!(model.provider(), provider);
-        let record = model.config_snapshot();
-        assert_eq!(record.api_key_source.as_deref(), Some("none"));
+        let record =
+            aimux_core::recording::ProviderRecord::from_model(model.provider(), model.model_id());
         let registry = registry_with(&record.provider_id, handle);
         let rebuilt = aimux_providers::rebuild_decision_provider(&record, &registry).unwrap();
         assert_eq!(rebuilt.provider(), provider);
     }
     let provider = provider_handle("vllm", Some("explicit-key".into()), None).unwrap();
     let model = provider.decision_model("served-alias").unwrap();
-    assert_eq!(
-        model.config_snapshot().api_key_source.as_deref(),
-        Some("explicit")
-    );
     // The explicit key is not in the recording: without a caller registration
     // the model cannot be rebuilt.
     let empty = aimux_core::create_provider_registry(Default::default(), Default::default());
-    assert!(aimux_providers::rebuild_decision_provider(&model.config_snapshot(), &empty).is_err());
+    let record =
+        aimux_core::recording::ProviderRecord::from_model(model.provider(), model.model_id());
+    assert!(aimux_providers::rebuild_decision_provider(&record, &empty).is_err());
 }
 
 #[tokio::test]
@@ -694,6 +692,57 @@ async fn runtime_errors_preserve_native_message_code_and_status() {
         assert!(!error.is_retryable);
         if provider == "cloudflare" {
             assert_eq!(error.provider_code.as_deref(), Some("1234"));
+        }
+    }
+}
+
+/// A6 item 2: decisions retry only on the core call-level `maxRetries`
+/// (default 2); there is no model- or handle-level retry config. Every
+/// attempt fails retryably, so `max_retries = N` makes exactly `N + 1`
+/// requests (N retries).
+#[tokio::test]
+#[serial]
+async fn call_level_max_retries_sets_the_exact_retry_count() {
+    for (max_retries, expected_requests) in [(Some(0), 1), (Some(1), 2), (Some(3), 4), (None, 3)] {
+        let server = MockServer::start().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let responder = calls.clone();
+        Mock::given(method("POST"))
+            .and(path("/v1/systemone"))
+            .respond_with(move |_: &Request| {
+                responder.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(503)
+                    .insert_header("retry-after", "0")
+                    .set_body_json(json!({"error":{"message":"busy"}}))
+            })
+            .mount(&server)
+            .await;
+        let mut request = options();
+        request.max_retries = max_retries;
+        let error = decide(model("vllm", &server).as_ref(), request)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            expected_requests,
+            "max_retries = {max_retries:?}"
+        );
+        if expected_requests == 1 {
+            assert!(
+                matches!(&error, AiMuxError::ApiCall(e) if e.status_code == Some(503)),
+                "{error:?}"
+            );
+        } else {
+            let AiMuxError::Retry(retry) = &error else {
+                panic!("expected retry exhaustion, got {error:?}");
+            };
+            assert_eq!(
+                retry.reason,
+                aimux_core::RetryErrorReason::MaxRetriesExceeded
+            );
+            assert!(
+                matches!(retry.last_error(), AiMuxError::ApiCall(e) if e.status_code == Some(503))
+            );
         }
     }
 }
