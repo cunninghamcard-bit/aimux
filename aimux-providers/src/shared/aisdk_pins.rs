@@ -18,15 +18,15 @@ pub(crate) const MISTRAL: &str = "4.0.54";
 pub(crate) const XAI: &str = "5.0.12";
 
 #[cfg(test)]
+#[path = "../../../fixtures/aisdk/pinned_versions.rs"]
+mod pinned_versions;
+
+#[cfg(test)]
 mod tests {
+    use super::pinned_versions;
+
     #[test]
     fn versions_equal_the_aisdk_pins() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../fixtures/aisdk/VERSIONS.json"
-        );
-        let versions: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         for (package, version) in [
             ("@ai-sdk/anthropic", super::ANTHROPIC),
             ("@ai-sdk/google", super::GOOGLE),
@@ -41,9 +41,14 @@ mod tests {
             ("@ai-sdk/mistral", super::MISTRAL),
             ("@ai-sdk/xai", super::XAI),
         ] {
-            let entry = &versions[package];
-            let pinned = entry["version"].as_str().or_else(|| entry.as_str());
-            assert_eq!(pinned, Some(version), "{package}");
+            assert_eq!(pinned_versions::pinned(package), version, "{package}");
         }
+    }
+
+    /// Every VERSIONS.json entry is the `{version, integrity}` object form.
+    #[test]
+    fn every_versions_entry_is_object_form() {
+        // `all()` panics on any other shape.
+        assert!(pinned_versions::all().len() >= 13);
     }
 }
