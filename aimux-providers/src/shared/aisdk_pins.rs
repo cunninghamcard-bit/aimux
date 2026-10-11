@@ -5,6 +5,7 @@
 //! not ship `fixtures/`.
 
 pub(crate) const ANTHROPIC: &str = "4.0.71";
+pub(crate) const ANTHROPIC_AWS: &str = "2.0.63";
 pub(crate) const GOOGLE: &str = "4.0.87";
 pub(crate) const OPENAI: &str = "4.0.83";
 pub(crate) const OPENAI_COMPATIBLE: &str = "3.0.62";
@@ -29,6 +30,7 @@ mod tests {
     fn versions_equal_the_aisdk_pins() {
         for (package, version) in [
             ("@ai-sdk/anthropic", super::ANTHROPIC),
+            ("@ai-sdk/anthropic-aws", super::ANTHROPIC_AWS),
             ("@ai-sdk/google", super::GOOGLE),
             ("@ai-sdk/openai", super::OPENAI),
             ("@ai-sdk/openai-compatible", super::OPENAI_COMPATIBLE),
@@ -49,6 +51,6 @@ mod tests {
     #[test]
     fn every_versions_entry_is_object_form() {
         // `all()` panics on any other shape.
-        assert_eq!(pinned_versions::all().len(), 15);
+        assert_eq!(pinned_versions::all().len(), 16);
     }
 }

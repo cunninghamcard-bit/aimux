@@ -13,7 +13,7 @@ use crate::shared::ProviderHeaders;
 use aimux_provider_utils::{FetchFunction, HeaderMapOpt, Resolvable, SigV4Fetch, default_fetch};
 
 use crate::anthropic::AnthropicMessagesModel;
-use crate::shared::{AuthScheme, Credential};
+use crate::shared::{AuthScheme, Credential, UserAgentFetch};
 
 use super::AnthropicAwsAuth;
 
@@ -44,6 +44,19 @@ pub(super) fn authenticated(
     if let Some(workspace_id) = workspace_id {
         fixed.push(("anthropic-workspace-id".to_string(), workspace_id));
     }
+    // `@ai-sdk/anthropic-aws@2.0.63` adds its package part in the transport,
+    // after the helper's `ai-sdk-provider-utils/<v>` and before signing
+    // (anthropic-aws-fetch.ts:44 SigV4, :128 API key); the runtime fragment
+    // is left out.
+    let with_user_agent = |inner: FetchFunction| -> FetchFunction {
+        Arc::new(UserAgentFetch {
+            inner,
+            suffix: format!(
+                "ai-sdk-anthropic-aws/{}",
+                crate::shared::aisdk_pins::ANTHROPIC_AWS
+            ),
+        })
+    };
     match auth {
         Some(AnthropicAwsAuth::SigV4(credentials)) => {
             let inner = fetch.unwrap_or_else(default_fetch);
@@ -51,7 +64,7 @@ pub(super) fn authenticated(
                 Arc::new(SigV4Fetch::new(inner, credentials, SIGV4_SERVICE));
             (
                 ProviderHeaders::new(Credential::None, AuthScheme::Bearer, fixed, user_headers),
-                Some(signing),
+                Some(with_user_agent(signing)),
             )
         }
         key => {
@@ -66,7 +79,7 @@ pub(super) fn authenticated(
                     fixed,
                     user_headers,
                 ),
-                fetch,
+                Some(with_user_agent(fetch.unwrap_or_else(default_fetch))),
             )
         }
     }
