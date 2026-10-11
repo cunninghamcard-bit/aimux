@@ -66,14 +66,15 @@ fn convert_usage(usage: &UsageResponse, usage_raw: Option<&Value>) -> Usage {
     let prompt_tokens = usage.prompt_tokens.unwrap_or(0);
     let completion_tokens = usage.completion_tokens.unwrap_or(0);
 
-    // Cache-read tokens: prefer the top-level `cached_tokens` (Moonshot format)
-    // over the nested `prompt_tokens_details.cached_tokens` (OpenAI format).
-    let nested_cached = usage
+    // Cache-read tokens: only the nested `prompt_tokens_details.cached_tokens`
+    // (D28; AI SDK convert-openai-chat-usage.ts:28). A top-level
+    // `cached_tokens` stays in `usage.raw`; Moonshot goes through the compat
+    // `ConvertUsage::MoonshotAI`.
+    let cached = usage
         .prompt_tokens_details
         .as_ref()
         .and_then(|d| d.cached_tokens)
         .unwrap_or(0);
-    let cached = usage.cached_tokens.unwrap_or(nested_cached);
 
     let cache_write = usage
         .prompt_tokens_details
@@ -110,7 +111,7 @@ fn convert_usage(usage: &UsageResponse, usage_raw: Option<&Value>) -> Usage {
             reasoning: Some(reasoning_tokens),
         },
         // M10 (RFC-0016): keep the provider's original usage JSON verbatim —
-        // vendor-specific fields (e.g. Moonshot `cached_tokens`, prompt-cache
+        // vendor-specific fields (e.g. a top-level `cached_tokens`, prompt-cache
         // `prompt_cache_hit_tokens`) are otherwise lost for audit/billing.
         raw: usage_raw.and_then(|value| value.as_object().cloned()),
     }
@@ -748,4 +749,42 @@ pub(crate) async fn list_models_once(
             created: m.created,
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn usage(raw: &Value) -> Usage {
+        let parsed: UsageResponse = serde_json::from_value(raw.clone()).unwrap();
+        convert_usage(&parsed, Some(raw))
+    }
+
+    /// D28: cacheRead comes only from the nested field; a different
+    /// top-level value is ignored but kept in `raw`.
+    #[test]
+    fn nested_cached_tokens_win_over_top_level() {
+        let raw = json!({"prompt_tokens": 100, "completion_tokens": 10, "cached_tokens": 7,
+            "prompt_tokens_details": {"cached_tokens": 25}});
+        let u = usage(&raw);
+        assert_eq!(u.input_tokens.cache_read, Some(25));
+        assert_eq!(u.input_tokens.no_cache, Some(75));
+        assert_eq!(u.raw.unwrap()["cached_tokens"], json!(7));
+    }
+
+    #[test]
+    fn top_level_cached_tokens_alone_are_not_cache_reads() {
+        let u = usage(&json!({"prompt_tokens": 100, "completion_tokens": 10, "cached_tokens": 7}));
+        assert_eq!(u.input_tokens.cache_read, Some(0));
+        assert_eq!(u.input_tokens.no_cache, Some(100));
+    }
+
+    #[test]
+    fn nested_cached_tokens_alone_are_unchanged() {
+        let u = usage(&json!({"prompt_tokens": 100, "completion_tokens": 10,
+            "prompt_tokens_details": {"cached_tokens": 25}}));
+        assert_eq!(u.input_tokens.cache_read, Some(25));
+        assert_eq!(u.input_tokens.no_cache, Some(75));
+    }
 }
