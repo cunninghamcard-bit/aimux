@@ -28,7 +28,8 @@ use aimux_provider_utils::{
 };
 
 use super::config::OpenAIModelConfig;
-use super::convert::{RequestBodyResult, parse_finish_reason};
+use super::convert::RequestBodyResult;
+use super::decode::{convert_usage, finish_reason, parse_finish_reason};
 use super::types::{ChatCompletionResponse, StreamChunk, UsageResponse};
 
 /// An OpenAI chat-completions language model.
@@ -47,72 +48,6 @@ impl OpenAIModel {
 }
 
 // ── Usage conversion ─────────────────────────────────────────────────────────
-
-/// Convert an OpenAI `UsageResponse` into the core `Usage` type.
-///
-/// Mirrors the TS `convertOpenAIChatUsage`:
-/// - `input.total = prompt_tokens`
-/// - `input.noCache = prompt_tokens - cached_tokens - cache_write_tokens`
-/// - `input.cacheRead = cached_tokens`
-/// - `input.cacheWrite = cache_write_tokens`
-///
-/// `usage_raw` is the provider's original `usage` JSON object, preserved
-/// verbatim in `Usage.raw` (M10, RFC-0016). Vendor-specific fields not part
-/// of `UsageResponse` (e.g. prompt-cache hit counters) survive only
-/// through this raw value.
-fn convert_usage(usage: &UsageResponse, usage_raw: Option<&Value>) -> Usage {
-    let prompt_tokens = usage.prompt_tokens.unwrap_or(0);
-    let completion_tokens = usage.completion_tokens.unwrap_or(0);
-
-    // Cache-read tokens: prefer the top-level `cached_tokens` (Moonshot format)
-    // over the nested `prompt_tokens_details.cached_tokens` (OpenAI format).
-    let nested_cached = usage
-        .prompt_tokens_details
-        .as_ref()
-        .and_then(|d| d.cached_tokens)
-        .unwrap_or(0);
-    let cached = usage.cached_tokens.unwrap_or(nested_cached);
-
-    let cache_write = usage
-        .prompt_tokens_details
-        .as_ref()
-        .and_then(|d| d.cache_write_tokens);
-
-    // Use saturating subtraction: some OpenAI-compatible servers (e.g. vLLM
-    // serving Qwen3 reasoning models via Doubleword) report
-    // `reasoning_tokens > completion_tokens`, and cached + cache-write tokens
-    // can exceed `prompt_tokens`. Saturating to 0 avoids a panic on these
-    // real-world responses; the non-underflow path is unchanged.
-    let no_cache = prompt_tokens
-        .saturating_sub(cached)
-        .saturating_sub(cache_write.unwrap_or(0));
-
-    // Reasoning tokens from completion_tokens_details.
-    let reasoning_tokens = usage
-        .completion_tokens_details
-        .as_ref()
-        .and_then(|d| d.reasoning_tokens)
-        .unwrap_or(0);
-    let text_tokens = completion_tokens.saturating_sub(reasoning_tokens);
-
-    Usage {
-        input_tokens: aimux_core::types::InputTokenUsage {
-            total: Some(prompt_tokens),
-            no_cache: Some(no_cache),
-            cache_read: Some(cached),
-            cache_write,
-        },
-        output_tokens: aimux_core::types::OutputTokenUsage {
-            total: Some(completion_tokens),
-            text: Some(text_tokens),
-            reasoning: Some(reasoning_tokens),
-        },
-        // M10 (RFC-0016): keep the provider's original usage JSON verbatim —
-        // vendor-specific fields (e.g. Moonshot `cached_tokens`, prompt-cache
-        // `prompt_cache_hit_tokens`) are otherwise lost for audit/billing.
-        raw: usage_raw.and_then(|value| value.as_object().cloned()),
-    }
-}
 
 #[async_trait]
 impl LanguageModel for OpenAIModel {
@@ -327,14 +262,7 @@ pub(crate) async fn execute_generate(
         }
     }
 
-    let finish_reason = choice
-        .finish_reason
-        .as_deref()
-        .map(parse_finish_reason)
-        .unwrap_or(FinishReason {
-            unified: FinishReasonUnified::Other,
-            raw: None,
-        });
+    let finish_reason = finish_reason(choice.finish_reason.as_deref());
 
     let usage = data.usage.as_ref().map_or_else(Usage::default, |usage| {
         convert_usage(usage, response_value.get("usage"))
@@ -744,10 +672,8 @@ impl Transformer for OpenAIChatStream {
                     raw: None,
                 }
             } else {
-                self.final_finish_reason.unwrap_or(FinishReason {
-                    unified: FinishReasonUnified::Other,
-                    raw: None,
-                })
+                self.final_finish_reason
+                    .unwrap_or_else(|| finish_reason(None))
             },
             usage: self.final_usage,
             provider_metadata: Some(provider_metadata),

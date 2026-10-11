@@ -8,7 +8,7 @@ use aimux_core::language_model_message::{
 use aimux_core::options::{CallOptions, ResponseFormat, ToolChoice};
 use aimux_core::shared::{FileBytes, FileData, JsonObject, SharedProviderOptions};
 use aimux_core::tool::{FunctionTool, Tool};
-use aimux_core::types::{FinishReason, FinishReasonUnified, ReasoningEffort, Warning};
+use aimux_core::types::{ReasoningEffort, Warning};
 use aimux_provider_utils::{get_top_level_media_type, resolve_full_media_type};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -1207,22 +1207,6 @@ pub(crate) fn build_request_body_with_chat_options(
     apply_tools(&mut body, options, &mut warnings)?;
 
     Ok(RequestBodyResult { body, warnings })
-}
-
-/// Parse OpenAI finish reason string into `FinishReason`.
-#[must_use]
-pub fn parse_finish_reason(s: &str) -> FinishReason {
-    let unified = match s {
-        "stop" => FinishReasonUnified::Stop,
-        "length" => FinishReasonUnified::Length,
-        "tool_calls" => FinishReasonUnified::ToolCalls,
-        "content_filter" => FinishReasonUnified::ContentFilter,
-        _ => FinishReasonUnified::Other,
-    };
-    FinishReason {
-        unified,
-        raw: Some(s.to_string()),
-    }
 }
 
 #[cfg(test)]

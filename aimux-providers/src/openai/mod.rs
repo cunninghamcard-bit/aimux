@@ -15,6 +15,7 @@ pub(crate) mod config;
 pub mod convert;
 mod convert_common;
 pub mod decision;
+mod decode;
 pub mod embedding;
 pub mod files;
 pub mod image;
