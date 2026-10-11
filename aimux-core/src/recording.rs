@@ -215,10 +215,6 @@ pub struct ProviderRecord {
     /// registry. Absent for every other operation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
-    /// Where the credential came from, never its value: `"env:VAR"`,
-    /// `"explicit"` or `"none"` (#226).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_key_source: Option<String>,
     /// Decision capabilities and default protocol (#226).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<serde_json::Value>,
@@ -237,7 +233,6 @@ impl ProviderRecord {
             provider: provider.to_string(),
             model_id: model_id.to_string(),
             base_url: None,
-            api_key_source: None,
             profile: None,
             provider_options: None,
         }

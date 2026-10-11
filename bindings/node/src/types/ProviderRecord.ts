@@ -27,11 +27,6 @@ modelId: string,
  */
 baseUrl?: string | null, 
 /**
- * Where the credential came from, never its value: `"env:VAR"`,
- * `"explicit"` or `"none"` (#226).
- */
-apiKeySource?: string | null, 
-/**
  * Decision capabilities and default protocol (#226).
  */
 profile?: JsonValue | null, 

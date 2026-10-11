@@ -10,16 +10,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use aimux_core::decision_model::{
-    DecisionCallOptions, DecisionCapabilities, DecisionModel, DecisionResult,
-};
+use aimux_core::decision_model::DecisionModel;
 use aimux_core::provider::ProviderDiscovery;
 use aimux_core::{
     AiMuxError, EmbeddingModel, EvaluationModel, Files, ImageModel, LanguageModel, Provider,
     RerankingModel, SearchModel, Skills, SpeechModel, TranscriptionModel, VideoModel,
 };
 use aimux_provider_utils::HeaderMapOpt;
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::openai::OpenAIProviderSettings;
@@ -104,7 +101,6 @@ fn provider_handle_with(
         .into_iter()
         .map(|(name, value)| (name, Some(value)))
         .collect();
-    let mut api_key_source = None;
     let inner: Arc<dyn Provider> = if name == "openai" {
         let auth_none = api_key.is_none() && options.base_url.is_some();
         let provider = crate::create_openai(OpenAIProviderSettings {
@@ -141,12 +137,8 @@ fn provider_handle_with(
                 .or_else(|| non_empty_env(url_env))
                 .unwrap_or_else(|| (*default_url).into());
             // Explicit key, else the placeholder `not-needed` (sent as
-            // `Authorization: Bearer not-needed`), recorded with source
-            // `none`. No `{NAME}_API_KEY` is read.
-            let api_key = api_key.unwrap_or_else(|| {
-                api_key_source = Some("none".into());
-                PLACEHOLDER_API_KEY.into()
-            });
+            // `Authorization: Bearer not-needed`). No `{NAME}_API_KEY` is read.
+            let api_key = api_key.unwrap_or_else(|| PLACEHOLDER_API_KEY.into());
             Arc::new(create_openai_compatible(
                 OpenAICompatibleProviderSettings {
                     name: name.into(),
@@ -168,30 +160,17 @@ fn provider_handle_with(
             )?
         }
     };
-    Ok(Box::new(ProviderHandle {
-        inner,
-        api_key_source,
-    }))
+    Ok(Box::new(ProviderHandle { inner }))
 }
 
-/// A provider with #226's handle-level decision settings.
+/// The resolved provider behind a by-name handle.
 struct ProviderHandle {
     inner: Arc<dyn Provider>,
-    /// Credential source when the handle resolved the key itself (the
-    /// placeholder or an environment variable); `None` keeps the model's own.
-    api_key_source: Option<String>,
 }
 
 impl Provider for ProviderHandle {
     fn decision_model(&self, id: &str) -> Result<Box<dyn DecisionModel>, AiMuxError> {
-        let model = self.inner.decision_model(id)?;
-        if self.api_key_source.is_none() {
-            return Ok(model);
-        }
-        Ok(Box::new(HandleDecisionModel {
-            inner: model,
-            api_key_source: self.api_key_source.clone(),
-        }))
+        self.inner.decision_model(id)
     }
     fn language_model(&self, id: &str) -> Result<Arc<dyn LanguageModel>, AiMuxError> {
         self.inner.language_model(id)
@@ -234,35 +213,6 @@ impl Provider for ProviderHandle {
     }
 }
 
-/// A decision model with the handle's credential source.
-struct HandleDecisionModel {
-    inner: Box<dyn DecisionModel>,
-    api_key_source: Option<String>,
-}
-
-#[async_trait]
-impl DecisionModel for HandleDecisionModel {
-    fn provider(&self) -> &str {
-        self.inner.provider()
-    }
-    fn model_id(&self) -> &str {
-        self.inner.model_id()
-    }
-    fn capabilities(&self) -> DecisionCapabilities {
-        self.inner.capabilities()
-    }
-    fn config_snapshot(&self) -> aimux_core::recording::ProviderRecord {
-        let mut snapshot = self.inner.config_snapshot();
-        if let Some(source) = &self.api_key_source {
-            snapshot.api_key_source = Some(source.clone());
-        }
-        snapshot
-    }
-    async fn do_decide(&self, options: &DecisionCallOptions) -> Result<DecisionResult, AiMuxError> {
-        self.inner.do_decide(options).await
-    }
-}
-
 #[cfg(test)]
 mod env_tests {
     //! A6 item 4 / D23. The env a key could come from is an injected plain
@@ -270,12 +220,13 @@ mod env_tests {
     //! environment and never `std::env::set_var`.
     use std::sync::{Arc, Mutex};
 
-    use aimux_core::decision_model::decide;
+    use aimux_core::decision_model::{DecisionCallOptions, decide};
     use aimux_core::recording::{self, RingRecorder};
     use aimux_core::replay::MockDecisionReplayModel;
     use aimux_provider_utils::{
         Fetch, FetchError, FetchFunction, FetchRequest, FetchResponse, ReqwestFetch,
     };
+    use async_trait::async_trait;
     use serde_json::Value;
     use serial_test::serial;
     use wiremock::matchers::{method, path};

@@ -61,7 +61,7 @@ fn body_overrides_is_an_unknown_field() {
 }
 
 #[test]
-fn config_snapshot_matches_model_identity() {
+fn recorded_identity_matches_model_identity() {
     for (name, key) in [
         ("openai", Some("sk-test")),
         ("vllm", Some("sk-test")),
@@ -71,15 +71,16 @@ fn config_snapshot_matches_model_identity() {
             .unwrap()
             .decision_model("served-alias")
             .unwrap();
-        let snap = model.config_snapshot();
+        // What `decide` records: provider name + model name only (A6 item 1).
+        let snap =
+            aimux_core::recording::ProviderRecord::from_model(model.provider(), model.model_id());
         assert_eq!(snap.provider, model.provider());
         assert_eq!(snap.provider_id, name);
         assert_eq!(snap.model_id, model.model_id());
-        assert!(snap.base_url.is_some());
-        assert_eq!(
-            snap.api_key_source.as_deref(),
-            Some(if key.is_some() { "explicit" } else { "none" })
-        );
+        let json = serde_json::to_value(&snap).unwrap();
+        assert!(json.get("apiKeySource").is_none(), "{json}");
+        assert!(json.get("baseUrl").is_none(), "{json}");
+        let _ = key;
     }
 }
 
@@ -140,15 +141,11 @@ async fn recorded_decision_file_contains_no_raw_credentials() {
     let record: Value = serde_json::from_str(written.lines().next().unwrap()).unwrap();
     let provider = &record["provider"];
     assert_eq!(provider["providerId"], "openai");
-    assert_eq!(provider["apiKeySource"], "explicit");
-    assert_eq!(
-        provider["providerOptions"]["headers"]["x-api-key"],
-        "[REDACTED]"
-    );
-    assert_eq!(
-        provider["providerOptions"]["headers"]["X-Client"],
-        "decision-tests"
-    );
+    assert_eq!(provider["modelId"], "gpt-6-luna");
+    // Identity only (A6 item 1): no credential source, base URL or headers.
+    assert!(provider.get("apiKeySource").is_none(), "{provider}");
+    assert!(provider.get("baseUrl").is_none(), "{provider}");
+    assert!(provider.get("providerOptions").is_none(), "{provider}");
     println!(
         "checked {} ({} bytes): no raw Authorization / x-api-key values",
         path.display(),
@@ -157,7 +154,7 @@ async fn recorded_decision_file_contains_no_raw_credentials() {
 }
 
 /// #226 (D15): a keyless local runtime sends the placeholder credential
-/// `Authorization: Bearer not-needed`; the snapshot records source `none`.
+/// `Authorization: Bearer not-needed`.
 #[tokio::test]
 #[serial]
 async fn keyless_local_runtime_sends_placeholder_bearer() {
@@ -177,10 +174,6 @@ async fn keyless_local_runtime_sends_placeholder_bearer() {
     .unwrap()
     .decision_model("served-alias")
     .unwrap();
-    assert_eq!(
-        model.config_snapshot().api_key_source.as_deref(),
-        Some("none")
-    );
     let mut options: DecisionCallOptions =
         serde_json::from_value(
             serde_json::from_str::<Value>(include_str!("fixtures/runtime_decisions.json")).unwrap()
@@ -205,7 +198,7 @@ async fn keyless_local_runtime_sends_placeholder_bearer() {
 }
 
 /// Explicit `Authorization` and `x-api-key` request headers reach the wire but
-/// are recorded under their names with the value `[REDACTED]`.
+/// their values never appear in the recording.
 #[tokio::test]
 #[serial]
 async fn recorded_explicit_auth_headers_are_redacted() {
@@ -252,7 +245,10 @@ async fn recorded_explicit_auth_headers_are_redacted() {
         assert!(!written.contains(secret), "{secret} leaked: {written}");
     }
     let record: Value = serde_json::from_str(written.lines().next().unwrap()).unwrap();
-    let headers = &record["provider"]["providerOptions"]["headers"];
-    assert_eq!(headers["Authorization"], "[REDACTED]");
-    assert_eq!(headers["x-api-key"], "[REDACTED]");
+    // The provider record is identity only (A6 item 1): the connection
+    // headers are no longer copied into it at all.
+    assert!(
+        record["provider"].get("providerOptions").is_none(),
+        "{record}"
+    );
 }

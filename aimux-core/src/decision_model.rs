@@ -550,15 +550,6 @@ pub trait DecisionModel: Send + Sync {
     fn provider(&self) -> &str;
     fn model_id(&self) -> &str;
     fn capabilities(&self) -> DecisionCapabilities;
-    /// The provider snapshot written into decision recordings (#226): identity
-    /// plus connection metadata (base URL, credential *source*, capabilities,
-    /// redacted options). Never carries a credential value.
-    fn config_snapshot(&self) -> crate::recording::ProviderRecord {
-        let mut snapshot =
-            crate::recording::ProviderRecord::from_model(self.provider(), self.model_id());
-        snapshot.profile = Some(serde_json::json!({"decision_capabilities": self.capabilities()}));
-        snapshot
-    }
     /// Perform one provider attempt.
     /// # Errors
     /// Returns provider, transport or invalid response errors.
@@ -672,8 +663,10 @@ async fn decide_with_retry_delay(
             model.model_id(),
             &capabilities,
         );
-        ctx.recorder
-            .record_provider(&ctx.call_id, &model.config_snapshot().redacted());
+        ctx.recorder.record_provider(
+            &ctx.call_id,
+            &crate::recording::ProviderRecord::from_model(model.provider(), model.model_id()),
+        );
         ctx
     });
     let result = timeout::run(

@@ -604,22 +604,20 @@ fn local_factories_and_wrapper_factories_preserve_credentials_for_replay() {
         .unwrap();
         let model = handle.decision_model("served-alias").unwrap();
         assert_eq!(model.provider(), provider);
-        let record = model.config_snapshot();
-        assert_eq!(record.api_key_source.as_deref(), Some("none"));
+        let record =
+            aimux_core::recording::ProviderRecord::from_model(model.provider(), model.model_id());
         let registry = registry_with(&record.provider_id, handle);
         let rebuilt = aimux_providers::rebuild_decision_provider(&record, &registry).unwrap();
         assert_eq!(rebuilt.provider(), provider);
     }
     let provider = provider_handle("vllm", Some("explicit-key".into()), None).unwrap();
     let model = provider.decision_model("served-alias").unwrap();
-    assert_eq!(
-        model.config_snapshot().api_key_source.as_deref(),
-        Some("explicit")
-    );
     // The explicit key is not in the recording: without a caller registration
     // the model cannot be rebuilt.
     let empty = aimux_core::create_provider_registry(Default::default(), Default::default());
-    assert!(aimux_providers::rebuild_decision_provider(&model.config_snapshot(), &empty).is_err());
+    let record =
+        aimux_core::recording::ProviderRecord::from_model(model.provider(), model.model_id());
+    assert!(aimux_providers::rebuild_decision_provider(&record, &empty).is_err());
 }
 
 #[tokio::test]

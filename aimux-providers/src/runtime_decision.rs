@@ -632,13 +632,6 @@ impl DecisionModel for RuntimeDecisionModel {
     fn model_id(&self) -> &str {
         &self.model_id
     }
-    fn config_snapshot(&self) -> aimux_core::recording::ProviderRecord {
-        self.endpoint.snapshot(
-            self.provider(),
-            self.model_id(),
-            json!({"decision_default_protocol":"systemone", "decision_capabilities":self.capabilities()}),
-        )
-    }
     fn capabilities(&self) -> DecisionCapabilities {
         let provider = self.provider();
         DecisionCapabilities {

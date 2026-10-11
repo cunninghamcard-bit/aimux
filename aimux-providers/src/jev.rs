@@ -92,24 +92,6 @@ impl DecisionModel for JevDecisionModel {
     fn model_id(&self) -> &str {
         &self.model_id
     }
-    fn config_snapshot(&self) -> aimux_core::recording::ProviderRecord {
-        let mut snapshot =
-            aimux_core::recording::ProviderRecord::from_model(self.provider(), self.model_id());
-        snapshot.base_url = Some(self.config.endpoint.clone());
-        snapshot.api_key_source = Some(
-            if self.config.api_key.is_empty() {
-                "none"
-            } else {
-                "explicit"
-            }
-            .into(),
-        );
-        snapshot.profile = Some(serde_json::json!({"decision_capabilities": self.capabilities()}));
-        snapshot.provider_options = Some(aimux_core::recording::redact_provider_options(
-            serde_json::json!({"headers": self.config.headers}),
-        ));
-        snapshot
-    }
     fn capabilities(&self) -> DecisionCapabilities {
         DecisionCapabilities {
             supports_images: false,
