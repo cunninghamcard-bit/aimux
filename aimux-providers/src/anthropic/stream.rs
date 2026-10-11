@@ -377,6 +377,7 @@ pub(crate) fn stream_parts_for_result_block(
     let tool_result =
         |tool_name: String, (result, is_error): (Value, Option<bool>), tool_use_id: &str| {
             StreamPart::ToolResult(ToolResult {
+                provider_executed: None,
                 tool_call_id: tool_use_id.to_string(),
                 tool_name,
                 result,
@@ -396,6 +397,7 @@ pub(crate) fn stream_parts_for_result_block(
             let name = names.to_custom_tool_name("web_search").to_string();
             let Some(results) = content.as_array() else {
                 return vec![StreamPart::ToolResult(ToolResult {
+                    provider_executed: None,
                     tool_call_id: tool_use_id.clone(),
                     tool_name: name,
                     result: json!({
@@ -497,6 +499,7 @@ pub(crate) fn stream_parts_for_result_block(
         } => {
             let call = mcp_tool_calls.get(tool_use_id);
             vec![StreamPart::ToolResult(ToolResult {
+                provider_executed: None,
                 tool_call_id: tool_use_id.clone(),
                 tool_name: call.map(|(name, _)| name.clone()).unwrap_or_default(),
                 result: content.clone(),
@@ -701,10 +704,11 @@ pub(crate) fn parse_anthropic_content(
                         || name.clone(),
                         |name| names.to_custom_tool_name(name).to_string(),
                     ),
-                    input: toolset_name.as_ref().map_or_else(
+                    input: (toolset_name.as_ref().map_or_else(
                         || input.to_string(),
                         |_| toolset_member_input(name, input).to_string(),
-                    ),
+                    ))
+                    .into(),
                     provider_executed: None,
                     dynamic: None,
                     provider_metadata: tool_call_metadata(
@@ -738,7 +742,7 @@ pub(crate) fn parse_anthropic_content(
                 content.push(GenerateContent::ToolCall(RawToolCall {
                     tool_call_id: id.clone(),
                     tool_name: names.to_custom_tool_name(provider_name).to_string(),
-                    input: normalized_server_tool_input(name, input).to_string(),
+                    input: normalized_server_tool_input(name, input).to_string().into(),
                     provider_executed: Some(true),
                     dynamic: (provider_name == "code_execution"
                         && names.mark_code_execution_dynamic())
@@ -756,7 +760,7 @@ pub(crate) fn parse_anthropic_content(
                 content.push(GenerateContent::ToolCall(RawToolCall {
                     tool_call_id: id.clone(),
                     tool_name: name.clone(),
-                    input: input.to_string(),
+                    input: input.to_string().into(),
                     provider_executed: Some(true),
                     dynamic: Some(true),
                     provider_metadata: Some(
@@ -793,6 +797,7 @@ pub(crate) fn parse_anthropic_content(
                 match payload.as_array() {
                     Some(results) => {
                         content.push(GenerateContent::ToolResult(ToolResult {
+                            provider_executed: None,
                             tool_call_id: tool_use_id.clone(),
                             tool_name: names.to_custom_tool_name("web_search").to_string(),
                             result: Value::Array(
@@ -827,6 +832,7 @@ pub(crate) fn parse_anthropic_content(
                         }
                     }
                     None => content.push(GenerateContent::ToolResult(ToolResult {
+                        provider_executed: None,
                         tool_call_id: tool_use_id.clone(),
                         tool_name: names.to_custom_tool_name("web_search").to_string(),
                         result: json!({
@@ -851,6 +857,7 @@ pub(crate) fn parse_anthropic_content(
                 }
                 let (result, is_error) = map_web_fetch_result(payload);
                 content.push(GenerateContent::ToolResult(ToolResult {
+                    provider_executed: None,
                     tool_call_id: tool_use_id.clone(),
                     tool_name: names.to_custom_tool_name("web_fetch").to_string(),
                     result,
@@ -866,6 +873,7 @@ pub(crate) fn parse_anthropic_content(
             } => {
                 let (result, is_error) = map_code_execution_result(payload);
                 content.push(GenerateContent::ToolResult(ToolResult {
+                    provider_executed: None,
                     tool_call_id: tool_use_id.clone(),
                     tool_name: names.to_custom_tool_name("code_execution").to_string(),
                     result,
@@ -886,6 +894,7 @@ pub(crate) fn parse_anthropic_content(
                 content: payload,
             } => {
                 content.push(GenerateContent::ToolResult(ToolResult {
+                    provider_executed: None,
                     tool_call_id: tool_use_id.clone(),
                     tool_name: names.to_custom_tool_name("code_execution").to_string(),
                     result: payload.clone(),
@@ -905,6 +914,7 @@ pub(crate) fn parse_anthropic_content(
                     server_tool_calls.get(tool_use_id.as_str()).copied(),
                 );
                 content.push(GenerateContent::ToolResult(ToolResult {
+                    provider_executed: None,
                     tool_call_id: tool_use_id.clone(),
                     tool_name: names.to_custom_tool_name(provider_name).to_string(),
                     result,
@@ -920,6 +930,7 @@ pub(crate) fn parse_anthropic_content(
             } => {
                 let (result, is_error) = map_advisor_result(payload);
                 content.push(GenerateContent::ToolResult(ToolResult {
+                    provider_executed: None,
                     tool_call_id: tool_use_id.clone(),
                     tool_name: names.to_custom_tool_name("advisor").to_string(),
                     result,
@@ -938,6 +949,7 @@ pub(crate) fn parse_anthropic_content(
             } => {
                 let call = mcp_tool_calls.get(tool_use_id.as_str());
                 content.push(GenerateContent::ToolResult(ToolResult {
+                    provider_executed: None,
                     tool_call_id: tool_use_id.clone(),
                     tool_name: call
                         .map(|(name, _)| (*name).to_string())
@@ -1417,7 +1429,7 @@ impl AnthropicMessagesStream {
                 controller.enqueue(StreamPart::ToolCall(RawToolCall {
                     tool_call_id: id.clone(),
                     tool_name: name.clone(),
-                    input: input.to_string(),
+                    input: input.to_string().into(),
                     provider_executed: Some(true),
                     dynamic: Some(true),
                     provider_metadata: Some(
@@ -1639,7 +1651,7 @@ impl AnthropicMessagesStream {
                 controller.enqueue(StreamPart::ToolCall(RawToolCall {
                     tool_call_id: id,
                     tool_name: name,
-                    input,
+                    input: input.into(),
                     provider_executed,
                     dynamic,
                     provider_metadata,

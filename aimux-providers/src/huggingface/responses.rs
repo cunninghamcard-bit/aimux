@@ -442,7 +442,7 @@ impl Transformer for HuggingFaceResponsesStream {
                                     controller.enqueue(StreamPart::ToolCall(RawToolCall {
                                         tool_call_id: call_id.clone(),
                                         tool_name: name.clone(),
-                                        input,
+                                        input: input.into(),
                                         provider_executed: None,
                                         dynamic: None,
                                         provider_metadata: None,
@@ -452,6 +452,7 @@ impl Transformer for HuggingFaceResponsesStream {
                                         item.get("output").and_then(|v| v.as_str())
                                     {
                                         controller.enqueue(StreamPart::ToolResult(ToolResult {
+                                            provider_executed: None,
                                             tool_call_id: call_id,
                                             tool_name: name.clone(),
                                             result: Value::String(output.to_string()),
@@ -1014,7 +1015,7 @@ fn build_generate_content(response: &Value) -> Result<Vec<GenerateContent>, AiMu
                 content.push(GenerateContent::ToolCall(RawToolCall {
                     tool_call_id: call_id.to_string(),
                     tool_name: name.to_string(),
-                    input,
+                    input: input.into(),
                     provider_executed: None,
                     dynamic: None,
                     provider_metadata: None,
@@ -1032,7 +1033,7 @@ fn build_generate_content(response: &Value) -> Result<Vec<GenerateContent>, AiMu
                 content.push(GenerateContent::ToolCall(RawToolCall {
                     tool_call_id: id.to_string(),
                     tool_name: name.to_string(),
-                    input,
+                    input: input.into(),
                     provider_executed: Some(true),
                     dynamic: Some(true),
                     provider_metadata: None,
@@ -1040,6 +1041,7 @@ fn build_generate_content(response: &Value) -> Result<Vec<GenerateContent>, AiMu
 
                 if let Some(output) = part.get("output").filter(|v| !v.is_null()) {
                     content.push(GenerateContent::ToolResult(ToolResult {
+                        provider_executed: None,
                         tool_call_id: id.to_string(),
                         tool_name: name.to_string(),
                         result: output.clone(),
@@ -1057,7 +1059,7 @@ fn build_generate_content(response: &Value) -> Result<Vec<GenerateContent>, AiMu
                 content.push(GenerateContent::ToolCall(RawToolCall {
                     tool_call_id: id.to_string(),
                     tool_name: "list_tools".to_string(),
-                    input: json!({ "server_label": server_label }).to_string(),
+                    input: json!({ "server_label": server_label }).to_string().into(),
                     provider_executed: Some(true),
                     dynamic: Some(true),
                     provider_metadata: None,
@@ -1065,6 +1067,7 @@ fn build_generate_content(response: &Value) -> Result<Vec<GenerateContent>, AiMu
 
                 if let Some(tools) = part.get("tools").filter(|v| !v.is_null()) {
                     content.push(GenerateContent::ToolResult(ToolResult {
+                        provider_executed: None,
                         tool_call_id: id.to_string(),
                         tool_name: "list_tools".to_string(),
                         result: json!({ "tools": tools }),
