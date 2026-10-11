@@ -656,84 +656,49 @@ fn reject_removed_keys(raw: &serde_json::Map<String, serde_json::Value>) -> Opti
     })
 }
 
-/// The JS object is read as a raw JSON map (`undefined` values skipped, like
-/// absent keys), checked by [`reject_removed_keys`], then deserialized with
-/// serde `deny_unknown_fields`: the struct above is the single list of
-/// accepted keys.
-impl FromNapiValue for ProviderConfig {
-    unsafe fn from_napi_value(env: sys::napi_env, napi_val: sys::napi_value) -> Result<Self> {
-        let obj = unsafe { Object::from_napi_value(env, napi_val)? };
-        let names = obj.get_property_names()?;
-        let mut raw = serde_json::Map::new();
-        for i in 0..names.get_array_length()? {
-            let name: String = names.get_element(i)?;
-            let value: Unknown = obj.get_named_property(&name)?;
-            if value.get_type()? == ValueType::Undefined {
-                continue;
+/// The constructors take their config argument as raw JSON (napi skips
+/// `undefined` properties, like absent keys), so converting it never refuses
+/// the call synchronously: every refusal happens here, inside the async body,
+/// and rejects the returned promise with `InvalidArgumentError`. A JS string
+/// is a base URL only where `allow_url` (the `string | ProviderConfig`
+/// constructors). Otherwise the value must be an object, checked by
+/// [`reject_removed_keys`], then deserialized with serde
+/// `deny_unknown_fields`: the struct above is the single list of accepted keys.
+fn parse_config(value: serde_json::Value, allow_url: bool) -> MResult<NativeArg> {
+    let invalid = |message: String| AiMuxBindingError::from(AiMuxError::InvalidArgument(message));
+    match value {
+        serde_json::Value::String(url) if allow_url => Ok(NativeArg::Url(url)),
+        serde_json::Value::Object(raw) => {
+            if let Some(message) = reject_removed_keys(&raw) {
+                return Err(invalid(message));
             }
-            let value = unsafe { serde_json::Value::from_napi_value(env, value.raw())? };
-            raw.insert(name, value);
+            serde_json::from_value::<ProviderConfig>(serde_json::Value::Object(raw))
+                .map(NativeArg::Config)
+                .map_err(|error| invalid(error.to_string()))
         }
-        // A refused object (call-level key, unknown field, mistyped value)
-        // throws `InvalidArgumentError` right here; nothing is kept on the
-        // config itself.
-        let invalid = |message: String| -> Result<Self> {
-            let env = Env::from_raw(env);
-            Err(crate::error::create_throwable(
-                &env,
-                &AiMuxBindingError::from(AiMuxError::InvalidArgument(message)),
-            )?)
-        };
-        if let Some(message) = reject_removed_keys(&raw) {
-            return invalid(message);
-        }
-        match serde_json::from_value::<Self>(serde_json::Value::Object(raw)) {
-            Ok(config) => Ok(config),
-            Err(error) => invalid(error.to_string()),
-        }
+        other => Err(invalid(format!(
+            "config must be {}, got {}",
+            if allow_url {
+                "a base URL string or a ProviderConfig object"
+            } else {
+                "a ProviderConfig object"
+            },
+            match other {
+                serde_json::Value::Null => "null",
+                serde_json::Value::Bool(_) => "a boolean",
+                serde_json::Value::Number(_) => "a number",
+                serde_json::Value::String(_) => "a string",
+                serde_json::Value::Array(_) => "an array",
+                serde_json::Value::Object(_) => "an object",
+            }
+        ))),
     }
 }
 
-impl ValidateNapiValue for ProviderConfig {}
-
-/// The native constructors' 3rd argument: a base URL string or a
-/// [`ProviderConfig`]. Unlike napi's `Either`, which swallows the member
-/// error and reports "Value is none of these types", this dispatches on the
-/// JS type so a refused config object surfaces its own
-/// `InvalidArgumentError`.
-pub enum ConfigArg {
+/// A parsed config argument.
+enum NativeArg {
     Url(String),
     Config(ProviderConfig),
-}
-
-impl TypeName for ConfigArg {
-    fn type_name() -> &'static str {
-        "string | ProviderConfig"
-    }
-
-    fn value_type() -> ValueType {
-        ValueType::Unknown
-    }
-}
-
-impl ValidateNapiValue for ConfigArg {}
-
-impl FromNapiValue for ConfigArg {
-    unsafe fn from_napi_value(env: sys::napi_env, napi_val: sys::napi_value) -> Result<Self> {
-        let value = unsafe { Unknown::from_napi_value(env, napi_val)? };
-        match value.get_type()? {
-            ValueType::String => Ok(Self::Url(unsafe {
-                String::from_napi_value(env, napi_val)?
-            })),
-            ValueType::Object => Ok(Self::Config(unsafe {
-                ProviderConfig::from_napi_value(env, napi_val)?
-            })),
-            _ => Err(Error::new(
-                Status::InvalidArg,
-                "config must be a base URL string or a ProviderConfig object".to_owned(),
-            )),
-        }
-    }
 }
 
 /// What the native constructors take from their 3rd argument (a base URL
@@ -748,7 +713,11 @@ struct NativeConfig {
     project: Option<String>,
 }
 
-fn native_config(config: Option<ConfigArg>) -> MResult<NativeConfig> {
+fn native_config(config: Option<serde_json::Value>) -> MResult<NativeConfig> {
+    native_from(config.map(|value| parse_config(value, true)).transpose()?)
+}
+
+fn native_from(config: Option<NativeArg>) -> MResult<NativeConfig> {
     let mut native = NativeConfig {
         base_url: None,
         headers: None,
@@ -757,8 +726,8 @@ fn native_config(config: Option<ConfigArg>) -> MResult<NativeConfig> {
     };
     match config {
         None => {}
-        Some(ConfigArg::Url(url)) => native.base_url = Some(url),
-        Some(ConfigArg::Config(cfg)) => {
+        Some(NativeArg::Url(url)) => native.base_url = Some(url),
+        Some(NativeArg::Config(cfg)) => {
             native.base_url = cfg.base_url;
             if let Some(json_str) = &cfg.headers {
                 let h: std::collections::HashMap<String, String> =
@@ -1053,7 +1022,9 @@ pub fn list_sessions() -> AimuxResult<String> {
 pub async fn openai(
     api_key: String,
     model_id: String,
-    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<ConfigArg>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<
+        serde_json::Value,
+    >,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1084,7 +1055,9 @@ pub async fn openai(
 pub async fn anthropic(
     api_key: String,
     model_id: String,
-    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<ConfigArg>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<
+        serde_json::Value,
+    >,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1117,11 +1090,13 @@ pub async fn anthropic(
 pub async fn deepseek(
     api_key: String,
     model_id: String,
-    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<ConfigArg>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<
+        serde_json::Value,
+    >,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
-            let settings = named_settings(Some(api_key), config)?;
+            let settings = named_settings(Some(api_key), config, true)?;
             let model = create_named_provider("deepseek", settings)
                 .and_then(|p| p.language_model(&model_id))
                 .map_err(|e| AiMuxBindingError::from(&e))?;
@@ -1144,7 +1119,9 @@ pub async fn deepseek(
 pub async fn google(
     api_key: String,
     model_id: String,
-    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<ConfigArg>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<
+        serde_json::Value,
+    >,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1177,7 +1154,9 @@ pub async fn google(
 pub async fn cohere(
     api_key: String,
     model_id: String,
-    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<ConfigArg>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<
+        serde_json::Value,
+    >,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1210,7 +1189,9 @@ pub async fn cohere(
 pub async fn mistral(
     api_key: String,
     model_id: String,
-    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<ConfigArg>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<
+        serde_json::Value,
+    >,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1243,7 +1224,9 @@ pub async fn mistral(
 pub async fn xai(
     api_key: String,
     model_id: String,
-    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<ConfigArg>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<
+        serde_json::Value,
+    >,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1278,7 +1261,9 @@ pub async fn bedrock(
     secret_access_key: String,
     region: String,
     model_id: String,
-    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<ConfigArg>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<
+        serde_json::Value,
+    >,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1322,7 +1307,9 @@ pub async fn vertex(
     project: String,
     location: String,
     model_id: String,
-    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<ConfigArg>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<
+        serde_json::Value,
+    >,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1359,7 +1346,9 @@ pub async fn anthropic_aws(
     api_key: String,
     region: String,
     model_id: String,
-    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<ConfigArg>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<
+        serde_json::Value,
+    >,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1402,7 +1391,9 @@ pub async fn azure(
     resource_name: String,
     deployment: String,
     api_version: Option<String>,
-    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<ConfigArg>,
+    #[napi(ts_arg_type = "string | ProviderConfig | undefined | null")] config: Option<
+        serde_json::Value,
+    >,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
@@ -1448,11 +1439,11 @@ pub async fn provider(
     name: String,
     api_key: Option<String>,
     model_id: String,
-    config: Option<ProviderConfig>,
+    #[napi(ts_arg_type = "ProviderConfig | undefined | null")] config: Option<serde_json::Value>,
 ) -> AimuxResult<Model> {
     AimuxResult({
         let __r: crate::error::MResult<Model> = async {
-            let settings = named_settings(api_key, config.map(ConfigArg::Config))?;
+            let settings = named_settings(api_key, config, false)?;
             let model = create_named_provider(&name, settings)
                 .and_then(|p| p.language_model(&model_id))
                 .map_err(|e| AiMuxBindingError::from(&e))?;
@@ -1560,11 +1551,11 @@ impl ProviderHandle {
 pub async fn create_provider(
     name: String,
     api_key: Option<String>,
-    config: Option<ProviderConfig>,
+    #[napi(ts_arg_type = "ProviderConfig | undefined | null")] config: Option<serde_json::Value>,
 ) -> AimuxResult<ProviderHandle> {
     AimuxResult({
         let __r: crate::error::MResult<ProviderHandle> = async {
-            let settings = named_settings(api_key, config.map(ConfigArg::Config))?;
+            let settings = named_settings(api_key, config, false)?;
             let inner =
                 create_named_provider(&name, settings).map_err(|e| AiMuxBindingError::from(&e))?;
             Ok(ProviderHandle { inner })
@@ -1594,12 +1585,19 @@ pub async fn get_model_specs(source_url: Option<String>) -> AimuxResult<String> 
 /// The settings of a by-name provider from a Node `ProviderConfig` (3rd
 /// factory arg). Organization and project become their headers, below the
 /// caller's own.
-fn named_settings(api_key: Option<String>, config: Option<ConfigArg>) -> MResult<PresetSettings> {
+fn named_settings(
+    api_key: Option<String>,
+    config: Option<serde_json::Value>,
+    allow_url: bool,
+) -> MResult<PresetSettings> {
+    let config = config
+        .map(|value| parse_config(value, allow_url))
+        .transpose()?;
     let params = match &config {
-        Some(ConfigArg::Config(cfg)) => cfg.params.clone().unwrap_or_default(),
+        Some(NativeArg::Config(cfg)) => cfg.params.clone().unwrap_or_default(),
         _ => Default::default(),
     };
-    let native = native_config(config)?;
+    let native = native_from(config)?;
     let mut headers = aimux_provider_utils::HeaderMapOpt::new();
     for (name, value) in [
         ("OpenAI-Organization", native.organization),

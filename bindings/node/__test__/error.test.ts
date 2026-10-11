@@ -7,6 +7,7 @@ import test from 'ava'
 import { createServer, type Server } from 'node:http'
 import {
   openai,
+  anthropic,
   provider,
   createProvider,
   mockReplay,
@@ -293,9 +294,11 @@ for (const key of ['bodyOverrides', 'body_overrides', 'notAField']) {
       () => createProvider('groq', 'sk-test-fake-key', config),
       () => openai('sk-test-fake-key', 'gpt-4o', config),
     ]) {
-      // Native constructors refuse while converting the argument (a sync
-      // throw); the async wrappers reject. Either way it is the typed error.
-      const err = (await t.throwsAsync(async () => make())) as AimuxError
+      // A refused config rejects the returned promise; it never throws
+      // synchronously.
+      const p = make()
+      t.true(p instanceof Promise)
+      const err = (await t.throwsAsync(p)) as AimuxError
       t.true(err instanceof InvalidArgumentError)
       t.regex(err.message, new RegExp(`unknown field \`${key}\``))
       t.notRegex(err.message, /no longer supported/)
@@ -318,10 +321,31 @@ test('provider config maxRetries points to the call options, not a generic unkno
     () => createProvider('groq', 'sk-test-fake-key', config),
     () => openai('sk-test-fake-key', 'gpt-4o', config),
   ]) {
-    const err = (await t.throwsAsync(async () => make())) as AimuxError
+    const p = make()
+    t.true(p instanceof Promise)
+    const err = (await t.throwsAsync(p)) as AimuxError
     t.true(err instanceof InvalidArgumentError)
     t.regex(err.message, /call-level option: pass it in the call options \(`maxRetries`\)/)
     t.notRegex(err.message, /unknown field/)
+  }
+})
+
+test('a config of the wrong type rejects the promise, never throws synchronously', async (t) => {
+  for (const [make, pattern] of [
+    // provider / createProvider take a ProviderConfig only: a string is wrong.
+    [() => provider('groq', 'sk-test-fake-key', 'llama-3.3-70b', 'oops' as any), /a ProviderConfig object, got a string/],
+    [() => createProvider('groq', 'sk-test-fake-key', 'oops' as any), /a ProviderConfig object, got a string/],
+    // `string | ProviderConfig` constructors: a string is a base URL, so use
+    // a number and an array.
+    [() => openai('sk-test-fake-key', 'gpt-4o', 42 as any), /base URL string or a ProviderConfig object, got a number/],
+    [() => openai('sk-test-fake-key', 'gpt-4o', [] as any), /base URL string or a ProviderConfig object, got an array/],
+    [() => anthropic('sk-test-fake-key', 'claude', 42 as any), /got a number/],
+  ] as const) {
+    const p = make()
+    t.true(p instanceof Promise)
+    const err = (await t.throwsAsync(p)) as AimuxError
+    t.true(err instanceof InvalidArgumentError, String(err))
+    t.regex(err.message, pattern)
   }
 })
 
