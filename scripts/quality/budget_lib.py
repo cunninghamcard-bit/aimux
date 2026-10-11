@@ -25,6 +25,21 @@ BUDGET_UNREGISTERED = "BUDGET_UNREGISTERED"
 ARTIFACT_MISSING = "ARTIFACT_MISSING"
 BUDGET_INVALID = "BUDGET_INVALID"
 
+# Categories that --report-only must never let through (RFC-0038a §9.4: a
+# missing exact B/H is "register first, not report-only").
+NEVER_REPORT_ONLY = frozenset({BUDGET_UNREGISTERED, BUDGET_INVALID})
+
+# The only inventory entries allowed to carry status 'unregistered' (PHASES
+# 1.9; completing them is unit 1.9b). This list lives in code, not config, so
+# a config-only PR cannot flip a mapped artifact to 'unregistered' and skip
+# the gate (RFC-0038a §1 :17, §12 :428). Shrinking it is fine; growing it is a
+# code change that needs review.
+UNREGISTERED_ALLOWLIST = frozenset({
+    "aimux-java/checksum/jvm/default/release",
+    "aimux-kotlin/checksum/jvm/default/release",
+    "aimux-ffi/c-header/any/default/release",
+})
+
 
 class SchemaError(ValueError):
     pass
@@ -139,6 +154,11 @@ def validate_manifest(doc: dict) -> dict:
                 raise SchemaError(f"{where}: unregistered artifact must not carry 'workflow'")
             if not a.get("reason"):
                 raise SchemaError(f"{where}: unregistered artifact needs a 'reason'")
+            if aid not in UNREGISTERED_ALLOWLIST:
+                raise SchemaError(
+                    f"{where}: {aid} may not be 'unregistered'; only the fixed "
+                    f"allowlist in budget_lib.UNREGISTERED_ALLOWLIST may be"
+                )
         else:
             raise SchemaError(f"{where}.status: must be mapped or unregistered")
         if "path" in a and "*" in a["path"]:
@@ -153,6 +173,9 @@ def validate_budgets(doc: dict, manifest: dict) -> dict:
         (artifact_id(a), metric): spec["product_cap_bytes"]
         for a in manifest["artifacts"]
         for metric, spec in a["metrics"].items()
+    }
+    unregistered = {
+        artifact_id(a) for a in manifest["artifacts"] if a["status"] == STATUS_UNREGISTERED
     }
     seen = set()
     for i, b in enumerate(doc["budgets"]):
@@ -169,6 +192,10 @@ def validate_budgets(doc: dict, manifest: dict) -> dict:
         seen.add(key)
         if key not in caps:
             raise SchemaError(f"{where}: {key} is not in the artifact manifest")
+        if b["artifact_id"] in unregistered:
+            raise SchemaError(
+                f"{where}: {b['artifact_id']} is 'unregistered' in the manifest but has a budget"
+            )
         B = _require_bytes(b["baseline_bytes"], f"{where}.B")
         H = _require_bytes(b["hard_cap_bytes"], f"{where}.H")
         C = _require_bytes(b["product_cap_bytes"], f"{where}.C")
@@ -356,6 +383,13 @@ def compare(manifest: dict, budgets: dict, report: dict) -> dict:
     for a in manifest["artifacts"]:
         aid = artifact_id(a)
         if a["status"] == STATUS_UNREGISTERED:
+            # Defence in depth for callers that skipped validation: only the
+            # allowlist may be skipped, and never while a budget exists.
+            has_budget = any(k[0] == aid for k in bud)
+            if aid not in UNREGISTERED_ALLOWLIST or has_budget:
+                for metric in a["metrics"]:
+                    failures.append({"artifact_id": aid, "metric": metric, "category": BUDGET_INVALID})
+                continue
             unregistered.append({"artifact_id": aid, "reason": a["reason"]})
             continue
         for metric in a["metrics"]:
@@ -378,3 +412,11 @@ def compare(manifest: dict, budgets: dict, report: dict) -> dict:
             else:
                 failures.append({**rec, "category": BUDGET_EXCEEDED})
     return {"failures": failures, "passed": passed, "unregistered": unregistered}
+
+
+def exit_code(result: dict, report_only: bool) -> int:
+    """0 = pass. --report-only still fails on NEVER_REPORT_ONLY categories."""
+    failures = result["failures"]
+    if report_only:
+        failures = [f for f in failures if f["category"] in NEVER_REPORT_ONLY]
+    return 1 if failures else 0

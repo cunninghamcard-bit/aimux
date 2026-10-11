@@ -2,6 +2,7 @@
 
 import io
 import json
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -16,9 +17,14 @@ import budget_lib as bl  # noqa: E402
 REPO = HERE.parents[2]
 
 
-def _manifest(cap, status="mapped", metric="raw"):
+HEADER = ("aimux-ffi", "c-header", "any")  # in UNREGISTERED_ALLOWLIST
+HEADER_ID = "aimux-ffi/c-header/any/default/release"
+SCRIPTS = HERE.parent
+
+
+def _manifest(cap, status="mapped", metric="raw", ident=("pkg", "bin", "t")):
     a = {
-        "package": "pkg", "kind": "bin", "target": "t", "feature_set": "default",
+        "package": ident[0], "kind": ident[1], "target": ident[2], "feature_set": "default",
         "build_variant": "release", "metrics": {metric: {"product_cap_bytes": cap}},
         "status": status, "path": "f.bin",
     }
@@ -119,10 +125,113 @@ class NegativeGate(unittest.TestCase):
         self.assertEqual(res["failures"][0]["category"], bl.ARTIFACT_MISSING)
 
     def test_inventory_unregistered_never_fails(self):
-        m = _manifest(10, status="unregistered")
+        m = bl.validate_manifest(_manifest(10, status="unregistered", ident=HEADER))
         res = bl.compare(m, {"schema_version": 1, "budgets": []}, {"schema_version": 1, "measurements": []})
         self.assertEqual(res["failures"], [])
-        self.assertEqual(res["unregistered"][0]["artifact_id"], "pkg/bin/t/default/release")
+        self.assertEqual(res["unregistered"][0]["artifact_id"], HEADER_ID)
+
+
+def _write(d, name, doc):
+    p = Path(d) / name
+    p.write_text(json.dumps(doc))
+    return str(p)
+
+
+def _cli(d, manifest, budgets, report, *extra):
+    return subprocess.run(
+        [sys.executable, str(SCRIPTS / "check-budgets.py"),
+         "--manifest", _write(d, "m.json", manifest),
+         "--budgets", _write(d, "b.json", budgets),
+         "--report", _write(d, "r.json", report), *extra],
+        capture_output=True, text=True,
+    )
+
+
+class UnregisteredBypass(unittest.TestCase):
+    """A mapped artifact must not escape the gate by being relabelled
+    'unregistered' (RFC-0038a §1 :17, §9.4 :377, §12 :428)."""
+
+    def test_allowlist_is_exactly_the_three(self):
+        self.assertEqual(bl.UNREGISTERED_ALLOWLIST, frozenset({
+            "aimux-java/checksum/jvm/default/release",
+            "aimux-kotlin/checksum/jvm/default/release",
+            "aimux-ffi/c-header/any/default/release",
+        }))
+
+    def test_repo_unregistered_set_equals_allowlist(self):
+        m = bl.load_json(REPO / "quality/artifacts.json")
+        got = {bl.artifact_id(a) for a in m["artifacts"] if a["status"] == "unregistered"}
+        self.assertEqual(got, set(bl.UNREGISTERED_ALLOWLIST))
+
+    def test_non_allowlisted_unregistered_is_rejected(self):
+        with self.assertRaises(bl.SchemaError):
+            bl.validate_manifest(_manifest(10, status="unregistered"))
+
+    def test_every_repo_mapped_item_flipped_is_rejected(self):
+        m = bl.load_json(REPO / "quality/artifacts.json")
+        for i, a in enumerate(m["artifacts"]):
+            if a["status"] != "mapped":
+                continue
+            mut = json.loads(json.dumps(m))
+            x = mut["artifacts"][i]
+            x["status"] = "unregistered"
+            del x["workflow"]
+            x["reason"] = "bypass attempt"
+            with self.assertRaises(bl.SchemaError, msg=bl.artifact_id(a)):
+                bl.validate_manifest(mut)
+
+    def test_allowlisted_unregistered_with_budget_is_rejected(self):
+        m = bl.validate_manifest(_manifest(10**6, status="unregistered", ident=HEADER))
+        b = _budgets(1000, 10**6)
+        b["budgets"][0]["artifact_id"] = HEADER_ID
+        with self.assertRaises(bl.SchemaError):
+            bl.validate_budgets(b, m)
+        # compare() also refuses if validation was skipped.
+        res = bl.compare(m, b, {"schema_version": 1, "measurements": []})
+        self.assertEqual(res["failures"][0]["category"], bl.BUDGET_INVALID)
+        self.assertEqual(res["unregistered"], [])
+
+    def test_exact_mutation_mapped_to_unregistered_keeps_budget_10e12_fails(self):
+        # Registered + budgeted item; flip to unregistered, keep budget,
+        # feed 10^12 bytes.
+        C = 10**9
+        m = _manifest(C)
+        b = _budgets(1000, C)
+        rep = _report(10**12)
+        self.assertEqual(bl.compare(bl.validate_manifest(m), b, rep)["failures"][0]["category"],
+                         bl.BUDGET_EXCEEDED)
+        a = m["artifacts"][0]
+        a["status"] = "unregistered"
+        del a["workflow"]
+        a["reason"] = "temporarily not measured"
+        with self.assertRaises(bl.SchemaError):
+            bl.validate_manifest(m)
+        res = bl.compare(m, b, rep)  # validation skipped: still fails
+        self.assertTrue(res["failures"])
+        self.assertEqual(res["passed"], [])
+        with tempfile.TemporaryDirectory() as d:
+            for extra in ((), ("--report-only",)):
+                p = _cli(d, m, b, rep, *extra)
+                self.assertNotEqual(p.returncode, 0, (extra, p.stdout, p.stderr))
+
+    def test_report_only_fails_on_budget_unregistered(self):
+        m = _manifest(10)
+        empty = {"schema_version": 1, "budgets": []}
+        res = bl.compare(m, empty, _report(1))
+        self.assertEqual(res["failures"][0]["category"], bl.BUDGET_UNREGISTERED)
+        self.assertEqual(bl.exit_code(res, report_only=True), 1)
+        with tempfile.TemporaryDirectory() as d:
+            p = _cli(d, m, empty, _report(1), "--report-only")
+            self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+
+    def test_report_only_lets_size_exceeded_through_but_normal_mode_fails(self):
+        m, b, rep = _manifest(10**9), _budgets(1000, 10**9), _report(1101)
+        res = bl.compare(m, b, rep)
+        self.assertEqual(bl.exit_code(res, report_only=True), 0)
+        self.assertEqual(bl.exit_code(res, report_only=False), 1)
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(_cli(d, m, b, rep, "--report-only").returncode, 0)
+            self.assertEqual(_cli(d, m, b, rep).returncode, 1)
 
 
 class StrictSchema(unittest.TestCase):
@@ -161,7 +270,7 @@ class StrictSchema(unittest.TestCase):
             bl.validate_manifest(m)
 
     def test_unregistered_requires_reason(self):
-        m = _manifest(10, status="unregistered")
+        m = _manifest(10, status="unregistered", ident=HEADER)
         del m["artifacts"][0]["reason"]
         with self.assertRaises(bl.SchemaError):
             bl.validate_manifest(m)
