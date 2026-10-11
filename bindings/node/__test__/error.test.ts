@@ -356,3 +356,24 @@ test('provider config keys set to undefined are treated as absent', async (t) =>
   })
   t.truthy(model)
 })
+
+test('a boolean config rejects the promise', async (t) => {
+  for (const make of [
+    () => provider('groq', 'sk-test-fake-key', 'llama-3.3-70b', true as any),
+    () => createProvider('groq', 'sk-test-fake-key', true as any),
+    () => openai('sk-test-fake-key', 'gpt-4o', true as any),
+  ]) {
+    const p = make()
+    t.true(p instanceof Promise)
+    const err = (await t.throwsAsync(p)) as AimuxError
+    t.true(err instanceof InvalidArgumentError, String(err))
+    t.regex(err.message, /got a boolean/)
+  }
+})
+
+// TS types allow `| null` for the optional config: null means absent.
+test('a null config resolves as if absent', async (t) => {
+  t.truthy(await provider('groq', 'sk-test-fake-key', 'llama-3.3-70b', null as any))
+  t.truthy(await createProvider('groq', 'sk-test-fake-key', null as any))
+  t.truthy(await openai('sk-test-fake-key', 'gpt-4o', null as any))
+})
