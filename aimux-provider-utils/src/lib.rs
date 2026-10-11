@@ -4,9 +4,8 @@
 //!
 //! Provides the pluggable [`Fetch`] transport, one-exchange HTTP helpers,
 //! response handlers, API key and setting loading, [`Resolvable`] values and
-//! layered header management, URL utilities and the streamed tool-call
-//! tracker for the OpenAI chat-completions wire format — the Rust equivalents
-//! of `@ai-sdk/provider-utils`. Operation retry and timeout live in
+//! layered header management and URL utilities — the Rust equivalents of
+//! `@ai-sdk/provider-utils`. Operation retry and timeout live in
 //! `aimux-core`.
 
 pub mod api_key;
