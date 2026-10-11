@@ -506,12 +506,6 @@ export interface ProviderConfig {
    * is reported instead of ignored.
    */
   maxRetries?: number
-  /**
-   * Rejected with `InvalidArgumentError`: request-body overrides were
-   * removed. The field exists only so passing it is reported instead of
-   * ignored.
-   */
-  bodyOverrides?: string
 }
 
 /** 刷盘全局 recorder(阻塞至 JSONL 落盘;ring 模式为 no-op)。 */

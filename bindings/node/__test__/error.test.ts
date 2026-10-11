@@ -8,6 +8,7 @@ import { createServer, type Server } from 'node:http'
 import {
   openai,
   provider,
+  createProvider,
   mockReplay,
   streamText,
   AimuxError,
@@ -280,4 +281,30 @@ test.serial('a missing provider setting is a LoadSettingError at call time', asy
   } finally {
     if (saved !== undefined) process.env.AZURE_RESOURCE_NAME = saved
   }
+})
+
+// A6 item 3: `bodyOverrides` no longer exists, so it fails like any other
+// unknown config key (not with a dedicated "no longer supported" message).
+for (const key of ['bodyOverrides', 'body_overrides', 'notAField']) {
+  test(`provider() rejects config key ${key} as an unknown field`, async (t) => {
+    const config = { [key]: '{"temperature":0}' } as any
+    for (const make of [
+      () => provider('groq', 'sk-test-fake-key', 'llama-3.3-70b', config),
+      () => createProvider('groq', 'sk-test-fake-key', config),
+      () => openai('sk-test-fake-key', 'gpt-4o', config),
+    ]) {
+      const err = (await t.throwsAsync(make)) as AimuxError
+      t.true(err instanceof InvalidArgumentError)
+      t.regex(err.message, new RegExp(`unknown field \`${key}\``))
+      t.notRegex(err.message, /no longer supported/)
+    }
+  })
+}
+
+test('provider() still accepts the known config keys', async (t) => {
+  const model = await provider('groq', 'sk-test-fake-key', 'llama-3.3-70b', {
+    baseUrl: 'http://127.0.0.1:1',
+    headers: '{"X-Test":"1"}',
+  })
+  t.truthy(model)
 })

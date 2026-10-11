@@ -626,7 +626,7 @@ impl AsyncGenerator for StreamTextGenerator {
 /// Passed as the 3rd argument to `openai()` / `anthropic()` / `deepseek()`.
 /// For backward compatibility a bare string is still accepted (treated as
 /// `baseUrl`). See RFC-0017.
-#[napi(object)]
+#[napi(object, object_from_js = false)]
 pub struct ProviderConfig {
     /// Base URL for API calls (e.g. a relay/proxy endpoint).
     pub base_url: Option<String>,
@@ -646,33 +646,76 @@ pub struct ProviderConfig {
     /// (`maxRetries` in the call options). The field exists only so passing it
     /// is reported instead of ignored.
     pub max_retries: Option<u32>,
-    /// Rejected with `InvalidArgumentError`: request-body overrides were
-    /// removed. The field exists only so passing it is reported instead of
-    /// ignored.
-    pub body_overrides: Option<String>,
+    /// Keys of the JS object that are not fields above, reported as unknown
+    /// fields instead of being dropped.
+    #[napi(skip)]
+    pub unknown_fields: Vec<String>,
 }
 
+/// The JS names of the [`ProviderConfig`] fields.
+const PROVIDER_CONFIG_FIELDS: &[&str] = &[
+    "baseUrl",
+    "headers",
+    "organization",
+    "project",
+    "params",
+    "maxRetries",
+];
+
+impl FromNapiValue for ProviderConfig {
+    unsafe fn from_napi_value(env: sys::napi_env, napi_val: sys::napi_value) -> Result<Self> {
+        let obj = unsafe { Object::from_napi_value(env, napi_val)? };
+        let names = obj.get_property_names()?;
+        let mut unknown_fields = Vec::new();
+        for i in 0..names.get_array_length()? {
+            let name: String = names.get_element(i)?;
+            if !PROVIDER_CONFIG_FIELDS.contains(&name.as_str()) {
+                unknown_fields.push(name);
+            }
+        }
+        Ok(Self {
+            base_url: obj.get("baseUrl")?,
+            headers: obj.get("headers")?,
+            organization: obj.get("organization")?,
+            project: obj.get("project")?,
+            params: obj.get("params")?,
+            max_retries: obj.get("maxRetries")?,
+            unknown_fields,
+        })
+    }
+}
+
+impl ValidateNapiValue for ProviderConfig {}
+
 impl ProviderConfig {
-    /// Fail on the two removed keys instead of dropping them silently.
+    /// Fail on an unknown key or on `max_retries` instead of dropping them
+    /// silently.
     fn reject_removed_keys(&self) -> MResult<()> {
-        let removed = if self.max_retries.is_some() {
+        let message = if let Some(name) = self.unknown_fields.first() {
+            format!(
+                "unknown field `{name}`, expected one of {}",
+                PROVIDER_CONFIG_FIELDS
+                    .iter()
+                    .map(|f| format!("`{f}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        } else if self.max_retries.is_some() {
             "`max_retries` is a call-level option: pass it in the call options (`maxRetries`), \
              not in the provider configuration"
-        } else if self.body_overrides.is_some() {
-            "`body_overrides` is no longer supported: request-body overrides were removed from \
-             the provider configuration and the call options"
+                .to_string()
         } else {
             return Ok(());
         };
         Err(AiMuxBindingError::from(&AiMuxError::InvalidArgument(
-            removed.into(),
+            message,
         )))
     }
 }
 
 /// What the native constructors take from their 3rd argument (a base URL
 /// string, or a [`ProviderConfig`]). Every native constructor goes through
-/// here, so `maxRetries` / `bodyOverrides` are rejected for all of them and
+/// here, so `maxRetries` and unknown keys are rejected for all of them and
 /// none of them drops a key silently.
 struct NativeConfig {
     base_url: Option<String>,
