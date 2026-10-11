@@ -19,7 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handled like the AI SDK (`@ai-sdk/provider-utils` 5.0.53): an ambiguous
   continuation or a blank name with no match is dropped; a delta with no name
   and no open call, or a `type` other than `function`, ends the stream with
-  `InvalidResponseData` (differential test, #44).
+  `InvalidResponseData`. Evidence: the parity test against the real AI SDK
+  tracker in #44 (an evidence-only PR, not merged); no tracker code changed.
 
 - aimux's public JSON equals the AI SDK's JSON. Struct fields serialize
   camelCase (`toolCallId`, `providerOptions`, `inputTokens`); unions carry the
