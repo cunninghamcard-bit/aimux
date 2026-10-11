@@ -730,9 +730,21 @@ async fn call_level_max_retries_sets_the_exact_retry_count() {
             "max_retries = {max_retries:?}"
         );
         if expected_requests == 1 {
-            assert!(matches!(error, AiMuxError::ApiCall(_)), "{error:?}");
+            assert!(
+                matches!(&error, AiMuxError::ApiCall(e) if e.status_code == Some(503)),
+                "{error:?}"
+            );
         } else {
-            assert!(matches!(error, AiMuxError::Retry(_)), "{error:?}");
+            let AiMuxError::Retry(retry) = &error else {
+                panic!("expected retry exhaustion, got {error:?}");
+            };
+            assert_eq!(
+                retry.reason,
+                aimux_core::RetryErrorReason::MaxRetriesExceeded
+            );
+            assert!(
+                matches!(retry.last_error(), AiMuxError::ApiCall(e) if e.status_code == Some(503))
+            );
         }
     }
 }

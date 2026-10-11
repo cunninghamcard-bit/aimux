@@ -46,6 +46,15 @@ pub(crate) fn prepare_retries(
 }
 
 impl PreparedRetries {
+    /// Replace the delay before the first retry. Crate-internal: only this
+    /// crate's tests use it (zero delay); callers set nothing but `max_retries`.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_initial_delay(mut self, delay: Duration) -> Self {
+        self.initial_delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+        self
+    }
+
     /// Retry a complete operation using API-call retryability and response hints.
     ///
     /// # Errors

@@ -352,15 +352,20 @@ async fn invalid_requests_never_reach_http() {
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
+/// Jev maps statuses to the standard retry rules. Retry counting itself is
+/// covered without delay in aimux-core (`decision_model::retry_tests`); here
+/// classification uses `max_retries = 0` (no backoff wait) and a single
+/// `max_retries = 1` run proves a 503 is retried and then exhausted (one
+/// real default backoff wait).
 #[tokio::test]
 async fn official_provider_failures_use_standard_retry_rules_and_preserve_codes() {
-    for (status, code, attempts) in [
-        (401, "authentication_error", 1),
-        (422, "validation_error", 1),
-        (429, "rate_limit", 3),
-        (529, "overloaded", 3),
-        (503, "unavailable", 3),
-        (499, "cancelled", 1),
+    for (status, code, retryable) in [
+        (401, "authentication_error", false),
+        (422, "validation_error", false),
+        (429, "rate_limit", true),
+        (529, "overloaded", true),
+        (503, "unavailable", true),
+        (499, "cancelled", false),
     ] {
         let server = MockServer::start().await;
         mount(
@@ -369,20 +374,42 @@ async fn official_provider_failures_use_standard_retry_rules_and_preserve_codes(
             json!({"error":{"message":"test failure", "code":code}}),
         )
         .await;
-        let error = decide(model(&server).as_ref(), options())
-            .await
-            .unwrap_err();
-        let error = match error {
-            AiMuxError::Retry(error) => error.last_error().clone(),
-            error => error,
-        };
-        let AiMuxError::ApiCall(error) = error else {
+        let mut request = options();
+        request.max_retries = Some(if retryable { 0 } else { 2 });
+        let AiMuxError::ApiCall(error) =
+            decide(model(&server).as_ref(), request).await.unwrap_err()
+        else {
             panic!("expected API error")
         };
         assert_eq!(error.status_code, Some(status));
         assert_eq!(error.provider_code.as_deref(), Some(code));
-        assert_eq!(server.received_requests().await.unwrap().len(), attempts);
+        assert_eq!(error.is_retryable, retryable, "status {status}");
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
+
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        503,
+        json!({"error":{"message":"test failure", "code":"unavailable"}}),
+    )
+    .await;
+    let mut request = options();
+    request.max_retries = Some(1);
+    let error = decide(model(&server).as_ref(), request).await.unwrap_err();
+    let AiMuxError::Retry(retry) = &error else {
+        panic!("expected retry exhaustion, got {error:?}")
+    };
+    assert_eq!(
+        retry.reason,
+        aimux_core::RetryErrorReason::MaxRetriesExceeded
+    );
+    let AiMuxError::ApiCall(last) = retry.last_error() else {
+        panic!("expected API error")
+    };
+    assert_eq!(last.status_code, Some(503));
+    assert_eq!(last.provider_code.as_deref(), Some("unavailable"));
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
 }
 
 #[test]
