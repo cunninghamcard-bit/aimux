@@ -524,19 +524,35 @@ pub struct ToolResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolResultSource {
     /// Executed by the client. `dynamic` is always written as a boolean
-    /// (`execute-tool-call.ts:169,199`); `providerExecuted` is not written,
-    /// except an input `"providerExecuted": false`, which is kept
-    /// (`explicit_not_provider_executed`; A7: providerExecuted is passed through).
+    /// (`execute-tool-call.ts:169,199`). `provider_executed` is plain data,
+    /// written as given (A7: providerExecuted is passed through); client
+    /// results from core never set it.
     Client {
         dynamic: bool,
-        explicit_not_provider_executed: bool,
+        provider_executed: Option<bool>,
     },
     /// Executed by the provider. `dynamic` is passed through as given.
-    /// `marked` is whether `"providerExecuted": true` is written: core sets it
-    /// when converting provider output ([`ToolResult::into_core`]); V4
-    /// provider-layer output has no such field, so provider converters build
-    /// `marked: false` ([`ToolResultSource::provider`]).
-    Provider { dynamic: Option<bool>, marked: bool },
+    Provider {
+        dynamic: Option<bool>,
+        mark: ProviderExecutedMark,
+    },
+}
+
+/// Whether a provider-executed result has been through core conversion.
+///
+/// Transitional: provider converters and core share `ToolResult` today, so a
+/// V4 provider-layer result (no `providerExecuted`, as in @ai-sdk/provider
+/// 4.0.21 `language-model-v4-tool-result.ts`) and a core result
+/// (`providerExecuted: true`) are told apart here. Follow-up unit E.3b
+/// switches the provider side to #16's V4 tool-result type once #16 merges
+/// (the 3.3 split), and this marker goes away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderExecutedMark {
+    /// V4 provider-layer output: `providerExecuted` is not written.
+    Unmarked,
+    /// Core output: `"providerExecuted": true` is written
+    /// ([`ToolResult::into_core`]).
+    Marked,
 }
 
 impl ToolResultSource {
@@ -545,7 +561,7 @@ impl ToolResultSource {
     pub fn provider(dynamic: Option<bool>) -> Self {
         Self::Provider {
             dynamic,
-            marked: false,
+            mark: ProviderExecutedMark::Unmarked,
         }
     }
 }
@@ -594,7 +610,7 @@ impl ToolResult {
         };
         self.source = ToolResultSource::Provider {
             dynamic,
-            marked: true,
+            mark: ProviderExecutedMark::Marked,
         };
         self
     }
@@ -605,11 +621,11 @@ impl From<ToolResultWire> for ToolResult {
         let source = match wire.provider_executed {
             Some(true) => ToolResultSource::Provider {
                 dynamic: wire.dynamic,
-                marked: true,
+                mark: ProviderExecutedMark::Marked,
             },
-            other => ToolResultSource::Client {
+            provider_executed => ToolResultSource::Client {
                 dynamic: wire.dynamic == Some(true),
-                explicit_not_provider_executed: other == Some(false),
+                provider_executed,
             },
         };
         Self {
@@ -629,12 +645,12 @@ impl From<ToolResult> for ToolResultWire {
         let (dynamic, provider_executed) = match result.source {
             ToolResultSource::Client {
                 dynamic,
-                explicit_not_provider_executed,
-            } => (
-                Some(dynamic),
-                explicit_not_provider_executed.then_some(false),
+                provider_executed,
+            } => (Some(dynamic), provider_executed),
+            ToolResultSource::Provider { dynamic, mark } => (
+                dynamic,
+                (mark == ProviderExecutedMark::Marked).then_some(true),
             ),
-            ToolResultSource::Provider { dynamic, marked } => (dynamic, marked.then_some(true)),
         };
         Self {
             tool_call_id: result.tool_call_id,

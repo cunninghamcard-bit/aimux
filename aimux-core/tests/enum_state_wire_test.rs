@@ -314,3 +314,30 @@ fn baseline_equals_samples() {
         assert_eq!(sample, baseline, "{name}");
     }
 }
+
+/// Client results: `providerExecuted` is plain data. Absent and `false`
+/// (with the normalized `dynamic`) round-trip byte for byte.
+#[test]
+fn client_tool_result_provider_executed_is_plain_data() {
+    use aimux_core::tool::ToolResultSource;
+    for (json, provider_executed) in [
+        (
+            r#"{"toolCallId":"call_1","toolName":"web_search","result":{"hits":3},"dynamic":false}"#,
+            None,
+        ),
+        (
+            r#"{"toolCallId":"call_1","toolName":"web_search","result":{"hits":3},"dynamic":false,"providerExecuted":false}"#,
+            Some(false),
+        ),
+    ] {
+        let result: ToolResult = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            result.source,
+            ToolResultSource::Client {
+                dynamic: false,
+                provider_executed
+            }
+        );
+        assert_eq!(serde_json::to_string(&result).unwrap(), json);
+    }
+}
