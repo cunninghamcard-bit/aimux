@@ -251,7 +251,7 @@ fn load_registry() -> Vec<PresetEntry> {
             ),
         };
         // bedrock-mantle-provider.ts:237 (getHeaders) and
-        // inject-fetch-headers.ts:23 (the transport).
+        // amazon-bedrock-sigv4-fetch.ts:133 (the API-key transport).
         let user_agent = match row.profile.get("user_agent").copied() {
             None => (
                 "openai-compatible",
@@ -414,6 +414,7 @@ fn assemble(
             let fetch: FetchFunction = std::sync::Arc::new(crate::shared::UserAgentFetch {
                 inner,
                 suffix: format!("ai-sdk-{package}/{version}"),
+                provider_utils: Some(crate::shared::aisdk_pins::AMAZON_BEDROCK_PROVIDER_UTILS),
             });
             Some(fetch)
         }

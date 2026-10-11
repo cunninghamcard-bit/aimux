@@ -1,7 +1,10 @@
 {
   "@ai-sdk/amazon-bedrock": {
     "version": "5.0.100",
-    "integrity": "sha512-lu4qObueHsPzOkaPoXOU4U55waGY8M35y/AqpRawV8AqhWxQoKloejyS8Z8beeGeoHldUnq0bdDhv/Yl5FttmA=="
+    "integrity": "sha512-lu4qObueHsPzOkaPoXOU4U55waGY8M35y/AqpRawV8AqhWxQoKloejyS8Z8beeGeoHldUnq0bdDhv/Yl5FttmA==",
+    "dependencies": {
+      "@ai-sdk/provider-utils": "5.0.51"
+    }
   },
   "@ai-sdk/anthropic": {
     "version": "4.0.71",

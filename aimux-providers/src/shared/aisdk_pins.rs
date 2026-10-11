@@ -9,6 +9,11 @@ pub(crate) const GOOGLE: &str = "4.0.87";
 pub(crate) const OPENAI: &str = "4.0.83";
 pub(crate) const OPENAI_COMPATIBLE: &str = "3.0.62";
 pub(crate) const AMAZON_BEDROCK: &str = "5.0.100";
+/// The `@ai-sdk/provider-utils` that `@ai-sdk/amazon-bedrock@5.0.100` pins
+/// exactly (its package.json `dependencies`), so the version its
+/// `ai-sdk-provider-utils/<v>` part names. Not the workspace-wide
+/// `@ai-sdk/provider-utils` pin.
+pub(crate) const AMAZON_BEDROCK_PROVIDER_UTILS: &str = "5.0.51";
 pub(crate) const AZURE: &str = "4.0.84";
 pub(crate) const COHERE: &str = "4.0.52";
 pub(crate) const DEEPSEEK: &str = "3.0.56";
@@ -43,6 +48,14 @@ mod tests {
         ] {
             assert_eq!(pinned_versions::pinned(package), version, "{package}");
         }
+    }
+
+    #[test]
+    fn amazon_bedrock_provider_utils_equals_its_pinned_dependency() {
+        assert_eq!(
+            pinned_versions::pinned_dependency("@ai-sdk/amazon-bedrock", "@ai-sdk/provider-utils"),
+            super::AMAZON_BEDROCK_PROVIDER_UTILS
+        );
     }
 
     /// Every VERSIONS.json entry is the `{version, integrity}` object form.

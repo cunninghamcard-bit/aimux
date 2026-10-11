@@ -42,6 +42,19 @@ struct SignedRequest {
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Headers aws4fetch never signs (lowercase names).
+const UNSIGNABLE_HEADERS: &[&str] = &[
+    "authorization",
+    "content-type",
+    "content-length",
+    "user-agent",
+    "presigned-expires",
+    "expect",
+    "x-amzn-trace-id",
+    "range",
+    "connection",
+];
+
 /// Sign an HTTP request using AWS SigV4, stamped with the current time.
 ///
 /// # Arguments
@@ -74,6 +87,7 @@ fn sign_request(
 }
 
 /// Sign an HTTP request with an explicit signing time and a byte body.
+#[cfg(test)]
 #[must_use]
 fn sign_request_at(
     credentials: &AwsCredentials,
@@ -83,6 +97,31 @@ fn sign_request_at(
     body: &[u8],
     extra_headers: &[(String, String)],
     now: DateTime<Utc>,
+) -> SignedRequest {
+    sign_request_with(
+        credentials,
+        service,
+        method,
+        url,
+        body,
+        extra_headers,
+        now,
+        true,
+    )
+}
+
+/// [`sign_request_at`], optionally without `x-amz-content-sha256` (neither
+/// sent nor signed), which is what aws4fetch does for every service but s3.
+#[allow(clippy::too_many_arguments)]
+fn sign_request_with(
+    credentials: &AwsCredentials,
+    service: &str,
+    method: &str,
+    url: &str,
+    body: &[u8],
+    extra_headers: &[(String, String)],
+    now: DateTime<Utc>,
+    content_sha256: bool,
 ) -> SignedRequest {
     let parsed =
         url::Url::parse(url).unwrap_or_else(|_| url::Url::parse("http://localhost").unwrap());
@@ -110,9 +149,11 @@ fn sign_request_at(
     // Always include host, x-amz-date, and x-amz-content-sha256.
     let mut canonical_headers: Vec<(String, String)> = vec![
         ("host".to_string(), host.to_string()),
-        ("x-amz-content-sha256".to_string(), body_hash.clone()),
         ("x-amz-date".to_string(), amz_date.clone()),
     ];
+    if content_sha256 {
+        canonical_headers.push(("x-amz-content-sha256".to_string(), body_hash.clone()));
+    }
 
     if let Some(ref token) = credentials.session_token {
         canonical_headers.push(("x-amz-security-token".to_string(), token.clone()));
@@ -294,6 +335,7 @@ pub struct SigV4Fetch {
     credentials: Resolvable<AwsCredentials>,
     service: String,
     clock: Clock,
+    content_sha256: bool,
 }
 
 impl SigV4Fetch {
@@ -310,7 +352,17 @@ impl SigV4Fetch {
             credentials,
             service: service.into(),
             clock: Utc::now,
+            content_sha256: true,
         }
+    }
+
+    /// Sign like aws4fetch (the AI SDK's signer) for a non-s3 service: no
+    /// `x-amz-content-sha256` header is sent or signed, so a request without
+    /// a session token signs exactly `host;x-amz-date`.
+    #[must_use]
+    pub fn without_content_sha256(mut self) -> Self {
+        self.content_sha256 = false;
+        self
     }
 
     /// Replace the signing clock (deterministic signatures in tests).
@@ -337,7 +389,10 @@ impl Fetch for SigV4Fetch {
         })?;
         let mut extra_headers = Vec::with_capacity(request.headers.len());
         for (name, value) in &request.headers {
-            if name == http::header::AUTHORIZATION {
+            // aws4fetch's UNSIGNABLE_HEADERS (aws4fetch 1.0.20, used by
+            // amazon-bedrock-sigv4-fetch.ts and anthropic-aws-fetch.ts):
+            // these are sent but not signed; `user-agent` among them.
+            if UNSIGNABLE_HEADERS.contains(&name.as_str()) {
                 continue;
             }
             let value = value.to_str().map_err(|_| {
@@ -345,7 +400,7 @@ impl Fetch for SigV4Fetch {
             })?;
             extra_headers.push((name.as_str().to_string(), value.to_string()));
         }
-        let signed = sign_request_at(
+        let signed = sign_request_with(
             &credentials,
             &self.service,
             request.method.as_str(),
@@ -353,6 +408,7 @@ impl Fetch for SigV4Fetch {
             &request.body,
             &extra_headers,
             (self.clock)(),
+            self.content_sha256,
         );
         for (name, value) in signed.headers {
             let name = http::HeaderName::try_from(name.as_str()).map_err(|error| {
