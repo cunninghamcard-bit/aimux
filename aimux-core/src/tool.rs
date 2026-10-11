@@ -233,39 +233,260 @@ pub struct RawToolCall {
     pub provider_metadata: Option<ProviderMetadata>,
 }
 
+// A7 (D2): static calls are tools declared up front; dynamic calls are tools
+// defined at runtime (e.g. MCP). Only a dynamic call can be invalid, and an
+// invalid call always carries its error (D26). The JSON shape is unchanged and
+// follows the AI SDK canonical form (D25): a static call writes no `dynamic`
+// (an input `"dynamic": false` is dropped), a dynamic call writes
+// `"dynamic": true`, `invalid` is only written as `true` with its `error`, and
+// `providerExecuted` is passed through as given. (Plain comments: the `///`
+// line is the generated `ToolCall.ts` doc and must stay unchanged.)
 /// A tool call requested by the model.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct ToolCall {
+#[serde(try_from = "ToolCallWire", into = "ToolCallWire")]
+#[ts(export, as = "ToolCallWire")]
+pub enum ToolCall {
+    /// A call to a tool declared in the request.
+    Static(StaticToolCall),
+    /// A call to a tool defined at runtime.
+    Dynamic(DynamicToolCall),
+}
+
+/// A call to a statically declared tool. Always valid: a static call that
+/// fails parsing or validation is reported as a dynamic invalid call.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StaticToolCall {
     /// Provider-assigned call id.
     pub tool_call_id: String,
     /// Tool name.
     pub tool_name: String,
+    /// Parsed arguments.
+    pub input: Value,
+    /// Whether the tool call will be executed by the provider (passed through).
+    pub provider_executed: Option<bool>,
+    /// Additional provider-specific metadata associated with this call.
+    pub provider_metadata: Option<ProviderMetadata>,
+}
+
+/// A call to a tool defined at runtime (e.g. MCP tools).
+#[derive(Debug, Clone)]
+pub struct DynamicToolCall {
+    /// Provider-assigned call id.
+    pub tool_call_id: String,
+    /// Tool name.
+    pub tool_name: String,
+    /// Parsed arguments, or the original string when the call is invalid and
+    /// the provider input was not valid JSON.
+    pub input: Value,
+    /// Whether the tool call will be executed by the provider (passed through).
+    pub provider_executed: Option<bool>,
+    /// Additional provider-specific metadata associated with this call.
+    pub provider_metadata: Option<ProviderMetadata>,
+    /// Whether lookup, parsing and validation succeeded.
+    pub validity: ToolCallValidity,
+}
+
+/// Outcome of resolving a dynamic tool call.
+#[derive(Debug, Clone)]
+pub enum ToolCallValidity {
+    /// The call can be executed.
+    Valid,
+    /// Lookup, JSON parsing, or schema validation still failed after the
+    /// optional repair attempt.
+    Invalid {
+        /// Typed failure associated with the invalid call.
+        error: AiMuxError,
+    },
+}
+
+impl TryFrom<ToolCallWire> for ToolCall {
+    type Error = String;
+
+    fn try_from(wire: ToolCallWire) -> Result<Self, String> {
+        let invalid = wire.invalid == Some(true);
+        if wire.dynamic != Some(true) {
+            if invalid {
+                // D26: only a dynamic call can be invalid (#200:2290).
+                return Err("tool call: `invalid: true` requires `dynamic: true`".into());
+            }
+            return Ok(Self::Static(StaticToolCall {
+                tool_call_id: wire.tool_call_id,
+                tool_name: wire.tool_name,
+                input: wire.input,
+                provider_executed: wire.provider_executed,
+                provider_metadata: wire.provider_metadata,
+            }));
+        }
+        let validity = match (invalid, wire.error) {
+            (true, Some(error)) => ToolCallValidity::Invalid { error },
+            // D26: an invalid call always carries its error.
+            (true, None) => return Err("tool call: `invalid: true` requires `error`".into()),
+            (false, _) => ToolCallValidity::Valid,
+        };
+        Ok(Self::Dynamic(DynamicToolCall {
+            tool_call_id: wire.tool_call_id,
+            tool_name: wire.tool_name,
+            input: wire.input,
+            provider_executed: wire.provider_executed,
+            provider_metadata: wire.provider_metadata,
+            validity,
+        }))
+    }
+}
+
+impl From<ToolCall> for ToolCallWire {
+    fn from(call: ToolCall) -> Self {
+        match call {
+            ToolCall::Static(call) => Self {
+                tool_call_id: call.tool_call_id,
+                tool_name: call.tool_name,
+                input: call.input,
+                provider_executed: call.provider_executed,
+                dynamic: None,
+                provider_metadata: call.provider_metadata,
+                invalid: None,
+                error: None,
+            },
+            ToolCall::Dynamic(call) => {
+                let (invalid, error) = match call.validity {
+                    ToolCallValidity::Valid => (None, None),
+                    ToolCallValidity::Invalid { error } => (Some(true), Some(error)),
+                };
+                Self {
+                    tool_call_id: call.tool_call_id,
+                    tool_name: call.tool_name,
+                    input: call.input,
+                    provider_executed: call.provider_executed,
+                    dynamic: Some(true),
+                    provider_metadata: call.provider_metadata,
+                    invalid,
+                    error,
+                }
+            }
+        }
+    }
+}
+
+impl ToolCall {
+    /// Provider-assigned call id.
+    #[must_use]
+    pub fn tool_call_id(&self) -> &str {
+        match self {
+            Self::Static(call) => &call.tool_call_id,
+            Self::Dynamic(call) => &call.tool_call_id,
+        }
+    }
+
+    /// Tool name.
+    #[must_use]
+    pub fn tool_name(&self) -> &str {
+        match self {
+            Self::Static(call) => &call.tool_name,
+            Self::Dynamic(call) => &call.tool_name,
+        }
+    }
+
+    /// Parsed arguments (the original string for an unparsable invalid call).
+    #[must_use]
+    pub fn input(&self) -> &Value {
+        match self {
+            Self::Static(call) => &call.input,
+            Self::Dynamic(call) => &call.input,
+        }
+    }
+
+    /// Mutable arguments.
+    pub fn input_mut(&mut self) -> &mut Value {
+        match self {
+            Self::Static(call) => &mut call.input,
+            Self::Dynamic(call) => &mut call.input,
+        }
+    }
+
+    /// Whether the provider executes the call, as the provider reported it.
+    #[must_use]
+    pub fn provider_executed(&self) -> Option<bool> {
+        match self {
+            Self::Static(call) => call.provider_executed,
+            Self::Dynamic(call) => call.provider_executed,
+        }
+    }
+
+    /// Provider-specific metadata.
+    #[must_use]
+    pub fn provider_metadata(&self) -> Option<&ProviderMetadata> {
+        match self {
+            Self::Static(call) => call.provider_metadata.as_ref(),
+            Self::Dynamic(call) => call.provider_metadata.as_ref(),
+        }
+    }
+
+    /// Mutable provider-specific metadata.
+    pub fn provider_metadata_mut(&mut self) -> &mut Option<ProviderMetadata> {
+        match self {
+            Self::Static(call) => &mut call.provider_metadata,
+            Self::Dynamic(call) => &mut call.provider_metadata,
+        }
+    }
+
+    /// Whether the tool is dynamic (defined at runtime).
+    #[must_use]
+    pub fn is_dynamic(&self) -> bool {
+        matches!(self, Self::Dynamic(_))
+    }
+
+    /// Whether the call is invalid (always a dynamic call).
+    #[must_use]
+    pub fn is_invalid(&self) -> bool {
+        self.error().is_some()
+    }
+
+    /// The failure of an invalid call.
+    #[must_use]
+    pub fn error(&self) -> Option<&AiMuxError> {
+        match self {
+            Self::Dynamic(DynamicToolCall {
+                validity: ToolCallValidity::Invalid { error },
+                ..
+            }) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+/// The JSON form of [`ToolCall`]: the pre-enum struct, unchanged, so the wire
+/// and `ToolCall.ts` stay the same (A7). Private; conversions apply A7 D25/D26.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+struct ToolCallWire {
+    /// Provider-assigned call id.
+    tool_call_id: String,
+    /// Tool name.
+    tool_name: String,
     /// Parsed arguments, or the original string when `invalid` is true and the
     /// provider input was not valid JSON.
-    pub input: Value,
+    input: Value,
     /// Whether the tool call will be executed by the provider.
     #[ts(optional)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_executed: Option<bool>,
+    provider_executed: Option<bool>,
     /// Whether the tool is dynamic (defined at runtime, e.g. MCP tools).
     #[ts(optional)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dynamic: Option<bool>,
+    dynamic: Option<bool>,
     /// Additional provider-specific metadata associated with this call.
     #[ts(optional)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_metadata: Option<ProviderMetadata>,
+    provider_metadata: Option<ProviderMetadata>,
     /// Set when lookup, JSON parsing, or schema validation still failed after
     /// the optional repair attempt.
     #[ts(optional)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub invalid: Option<bool>,
+    invalid: Option<bool>,
     /// Typed failure associated with an invalid tool call.
     #[ts(optional)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<AiMuxError>,
+    error: Option<AiMuxError>,
 }
 
 /// A tool result produced by a provider-executed tool (e.g. xAI `file_search`,

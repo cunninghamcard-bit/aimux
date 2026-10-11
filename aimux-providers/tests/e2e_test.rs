@@ -12,7 +12,7 @@ use aimux_core::generate::{GenerateTextOptions, generate_text, stream_text};
 use aimux_core::language_model_message::ToolResultOutput;
 use aimux_core::message::{MessageContent, ModelMessage, Role};
 use aimux_core::stream_part::TextStreamPart;
-use aimux_core::tool::{FunctionTool, Tool, ToolCall, ToolChoice};
+use aimux_core::tool::{FunctionTool, Tool, ToolChoice};
 use aimux_core::types::FinishReasonUnified;
 use aimux_providers::anthropic::{AnthropicProvider, AnthropicProviderSettings, create_anthropic};
 use aimux_providers::openai::{OpenAIProvider, OpenAIProviderSettings, create_openai};
@@ -194,8 +194,8 @@ async fn e2e_openai_generate_with_tools() {
     // The first call should return a tool call
     assert_eq!(result.finish_reason.unified, FinishReasonUnified::ToolCalls);
     assert_eq!(result.tool_calls.len(), 1);
-    assert_eq!(result.tool_calls[0].tool_name, "get_weather");
-    assert_eq!(result.tool_calls[0].input["location"], "Tokyo");
+    assert_eq!(result.tool_calls[0].tool_name(), "get_weather");
+    assert_eq!(result.tool_calls[0].input()["location"], "Tokyo");
 }
 
 #[tokio::test]
@@ -590,9 +590,9 @@ async fn e2e_openai_tool_call_round_trip() {
         FinishReasonUnified::ToolCalls
     );
     assert_eq!(result1.tool_calls.len(), 1);
-    assert_eq!(result1.tool_calls[0].tool_name, "get_weather");
-    assert_eq!(result1.tool_calls[0].input["location"], "Tokyo");
-    assert_eq!(result1.tool_calls[0].tool_call_id, "call_abc");
+    assert_eq!(result1.tool_calls[0].tool_name(), "get_weather");
+    assert_eq!(result1.tool_calls[0].input()["location"], "Tokyo");
+    assert_eq!(result1.tool_calls[0].tool_call_id(), "call_abc");
 
     // Step 2: user executes the tool, then builds the full conversation:
     //   user → assistant(tool_call) → tool(result)
@@ -783,7 +783,7 @@ async fn e2e_openai_tool_choice_required() {
 
     // Model returned a tool call
     assert_eq!(result.tool_calls.len(), 1);
-    assert_eq!(result.tool_calls[0].tool_name, "get_weather");
+    assert_eq!(result.tool_calls[0].tool_name(), "get_weather");
 
     // Verify the request body carries tool_choice: "required"
     let requests = server
@@ -879,9 +879,7 @@ async fn e2e_openai_stream_tool_calls() {
 
     // If a complete ToolCall part exists, verify its fields
     let tool_call = parts.iter().find_map(|p| match p {
-        TextStreamPart::ToolCall(ToolCall {
-            tool_name, input, ..
-        }) => Some((tool_name, input)),
+        TextStreamPart::ToolCall(call) => Some((call.tool_name(), call.input())),
         _ => None,
     });
     if let Some((tool_name, input)) = tool_call {

@@ -580,11 +580,14 @@ async fn should_handle_mcp_tools_with_annotations() {
         .await
         .expect("dynamic MCP call should pass Core validation without local tools");
     let call = result.tool_calls.first().expect("MCP tool call");
-    assert_eq!(call.tool_name, "search");
-    assert_eq!(call.provider_executed, Some(true));
-    assert_eq!(call.dynamic, Some(true));
-    assert_eq!(call.invalid, None);
-    assert_eq!(call.input, json!({ "query": "San Francisco tech events" }));
+    assert_eq!(call.tool_name(), "search");
+    assert_eq!(call.provider_executed(), Some(true));
+    assert!(call.is_dynamic());
+    assert!(!call.is_invalid());
+    assert_eq!(
+        *call.input(),
+        json!({ "query": "San Francisco tech events" })
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════════

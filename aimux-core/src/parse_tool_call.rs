@@ -16,7 +16,7 @@ use ts_rs::TS;
 use crate::content::ContentPart;
 use crate::error::AiMuxError;
 use crate::result::{GenerateContent, TextContent};
-use crate::tool::{RawToolCall, Tool, ToolCall};
+use crate::tool::{DynamicToolCall, RawToolCall, StaticToolCall, Tool, ToolCall, ToolCallValidity};
 
 /// Context supplied to a one-shot tool-call repair callback.
 #[derive(Debug, Clone)]
@@ -282,15 +282,23 @@ fn contains_forbidden_prototype(value: &Value) -> bool {
 }
 
 fn parsed_tool_call(tool_call: RawToolCall, input: Value, dynamic: Option<bool>) -> ToolCall {
-    ToolCall {
-        tool_call_id: tool_call.tool_call_id,
-        tool_name: tool_call.tool_name,
-        input,
-        provider_executed: tool_call.provider_executed,
-        dynamic,
-        provider_metadata: tool_call.provider_metadata,
-        invalid: None,
-        error: None,
+    if dynamic == Some(true) {
+        ToolCall::Dynamic(DynamicToolCall {
+            tool_call_id: tool_call.tool_call_id,
+            tool_name: tool_call.tool_name,
+            input,
+            provider_executed: tool_call.provider_executed,
+            provider_metadata: tool_call.provider_metadata,
+            validity: ToolCallValidity::Valid,
+        })
+    } else {
+        ToolCall::Static(StaticToolCall {
+            tool_call_id: tool_call.tool_call_id,
+            tool_name: tool_call.tool_name,
+            input,
+            provider_executed: tool_call.provider_executed,
+            provider_metadata: tool_call.provider_metadata,
+        })
     }
 }
 
@@ -303,11 +311,14 @@ fn invalid_tool_call(tool_call: RawToolCall, error: AiMuxError) -> ToolCall {
     // called with perfectly good arguments must still parse here.
     let input = serde_json::from_str(&tool_call.input)
         .unwrap_or_else(|_| Value::String(tool_call.input.to_string()));
-    ToolCall {
-        invalid: Some(true),
-        error: Some(error),
-        ..parsed_tool_call(tool_call, input, Some(true))
-    }
+    ToolCall::Dynamic(DynamicToolCall {
+        tool_call_id: tool_call.tool_call_id,
+        tool_name: tool_call.tool_name,
+        input,
+        provider_executed: tool_call.provider_executed,
+        provider_metadata: tool_call.provider_metadata,
+        validity: ToolCallValidity::Invalid { error },
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -378,32 +389,32 @@ pub(crate) fn raw_tool_call_text(error: &AiMuxError) -> Option<String> {
 /// That only matters for re-deriving the original error, which is read off the
 /// call instead.
 fn raw_from_invalid(tool_call: &ToolCall) -> Result<(RawToolCall, AiMuxError), AiMuxError> {
-    if tool_call.invalid != Some(true) {
+    if !tool_call.is_invalid() {
         return Err(AiMuxError::InvalidArgument(format!(
             "tool call '{}' is not invalid; nothing to repair",
-            tool_call.tool_call_id
+            tool_call.tool_call_id()
         )));
     }
-    let error = tool_call.error.clone().ok_or_else(|| {
+    let error = tool_call.error().cloned().ok_or_else(|| {
         AiMuxError::InvalidArgument(format!(
             "invalid tool call '{}' carries no error",
-            tool_call.tool_call_id
+            tool_call.tool_call_id()
         ))
     })?;
     Ok((
         RawToolCall {
-            tool_call_id: tool_call.tool_call_id.clone(),
-            tool_name: tool_call.tool_name.clone(),
+            tool_call_id: tool_call.tool_call_id().to_string(),
+            tool_name: tool_call.tool_name().to_string(),
             // An invalid call keeps unparsable argument text as a JSON string
             // (see `invalid_tool_call`); that text is the raw input.
-            input: (raw_tool_call_text(&error).unwrap_or_else(|| match &tool_call.input {
+            input: (raw_tool_call_text(&error).unwrap_or_else(|| match tool_call.input() {
                 Value::String(text) => text.clone(),
                 input => input.to_string(),
             }))
             .into(),
-            provider_executed: tool_call.provider_executed,
-            dynamic: tool_call.dynamic,
-            provider_metadata: tool_call.provider_metadata.clone(),
+            provider_executed: tool_call.provider_executed(),
+            dynamic: Some(true),
+            provider_metadata: tool_call.provider_metadata().cloned(),
         },
         error,
     ))
@@ -573,16 +584,15 @@ pub fn apply_tool_call_repair_to_result(
         .map_err(|error| AiMuxError::InvalidArgument(format!("result.toolCalls: {error}")))?;
 
     let repaired = apply_tool_call_repair(&original, tools, reply)?;
-    if repaired.tool_call_id != tool_call_id
+    if repaired.tool_call_id() != tool_call_id
         && calls.iter().enumerate().any(|(index, call)| {
             index != target_index
-                && call.get("toolCallId").and_then(Value::as_str)
-                    == Some(repaired.tool_call_id.as_str())
+                && call.get("toolCallId").and_then(Value::as_str) == Some(repaired.tool_call_id())
         })
     {
         return Err(AiMuxError::InvalidArgument(format!(
             "result: repaired tool call id '{}' already exists",
-            repaired.tool_call_id
+            repaired.tool_call_id()
         )));
     }
     calls[target_index] = serde_json::to_value(&repaired)
@@ -590,8 +600,7 @@ pub fn apply_tool_call_repair_to_result(
 
     // The replayed transcript must agree with `toolCalls`, or the next turn
     // sends the model the unrepaired arguments.
-    let replay_input =
-        crate::response_messages::response_tool_call_input(&repaired.input, repaired.invalid);
+    let replay_input = crate::response_messages::response_tool_call_input(&repaired);
     for part in target
         .get_mut("responseMessages")
         .and_then(Value::as_array_mut)
@@ -612,9 +621,12 @@ pub fn apply_tool_call_repair_to_result(
         // the same entry as `toolCalls`.
         part.insert(
             "toolCallId".to_string(),
-            repaired.tool_call_id.clone().into(),
+            repaired.tool_call_id().to_string().into(),
         );
-        part.insert("toolName".to_string(), repaired.tool_name.clone().into());
+        part.insert(
+            "toolName".to_string(),
+            repaired.tool_name().to_string().into(),
+        );
         part.insert("input".to_string(), replay_input.clone());
     }
 
@@ -635,14 +647,14 @@ pub fn apply_tool_call_repair_to_result(
             GenerateContent::ToolApprovalRequest(approval) => &mut approval.tool_call,
             _ => continue,
         };
-        if call.tool_call_id != tool_call_id {
+        if call.tool_call_id() != tool_call_id {
             continue;
         }
         *call = repaired.clone();
         *entry = serde_json::to_value(&content)
             .map_err(|error| AiMuxError::InvalidArgument(format!("content: {error}")))?;
     }
-    if repaired.tool_call_id != tool_call_id {
+    if repaired.tool_call_id() != tool_call_id {
         for part in target
             .get_mut("responseMessages")
             .and_then(Value::as_array_mut)
@@ -664,7 +676,7 @@ pub fn apply_tool_call_repair_to_result(
             if approved_id != tool_call_id {
                 continue;
             }
-            approved_id.clone_from(&repaired.tool_call_id);
+            *approved_id = repaired.tool_call_id().to_string();
             *part = serde_json::to_value(&approval).map_err(|error| {
                 AiMuxError::InvalidArgument(format!("response message: {error}"))
             })?;
@@ -717,7 +729,7 @@ mod tests {
             None,
         )
         .await;
-        assert_eq!(call.invalid, Some(true));
+        assert!(call.is_invalid());
         let mut builder = ResponseMessageBuilder::default();
         builder.tool_call(&call);
         if with_approval {

@@ -702,21 +702,15 @@ impl StreamState {
             }
             TextStreamPart::ToolInputEnd { .. } => {}
 
-            TextStreamPart::ToolCall(ToolCall {
-                tool_call_id,
-                tool_name,
-                input,
-                invalid,
-                error,
-                ..
-            }) => {
+            TextStreamPart::ToolCall(call) => {
+                let tool_call_id = &call.tool_call_id().to_string();
+                let tool_name = &call.tool_name().to_string();
                 // Complete tool call (e.g. from non-streaming-style providers).
                 // A provider may carry all input on its start frame and emit no
                 // deltas. In that case the final call is the first point where
                 // the OpenAI adapter can forward those arguments.
                 if self.tool_call_opened.contains(tool_call_id) {
-                    let full_arguments =
-                        parsed_tool_call_arguments(input, *invalid, error.as_ref());
+                    let full_arguments = parsed_tool_call_arguments(call);
                     let missing_arguments = self
                         .tool_calls
                         .get(tool_call_id)
@@ -761,7 +755,7 @@ impl StreamState {
                             index,
                             id: tool_call_id.clone(),
                             name: tool_name.clone(),
-                            arguments: parsed_tool_call_arguments(input, *invalid, error.as_ref()),
+                            arguments: parsed_tool_call_arguments(call),
                         },
                     );
                     self.tool_call_order.push(tool_call_id.clone());
@@ -1028,13 +1022,8 @@ fn now_unix() -> u64 {
 ///
 /// Older errors without raw argument text fall back to serializing the
 /// parsed input as JSON.
-pub(crate) fn parsed_tool_call_arguments(
-    input: &Value,
-    invalid: Option<bool>,
-    error: Option<&AiMuxError>,
-) -> String {
-    if invalid == Some(true)
-        && let Some(error) = error
+pub(crate) fn parsed_tool_call_arguments(call: &ToolCall) -> String {
+    if let Some(error) = call.error()
         && let Some(raw) = raw_tool_call_text(error)
     {
         // Blank text still fails validation against a schema with required
@@ -1049,7 +1038,7 @@ pub(crate) fn parsed_tool_call_arguments(
     }
     // `Value` Display is compact JSON, the `JSON.stringify` equivalent —
     // correct for every shape, `null` included.
-    input.to_string()
+    call.input().to_string()
 }
 
 /// Generate a short random ID (24 hex chars, similar to OpenAI's chatcmpl IDs).
