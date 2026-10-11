@@ -789,7 +789,9 @@ pub(crate) async fn generate_text_from_language_model_prompt(
                     signature: None,
                 });
             }
-            GenerateContent::ToolResult(result) => rm.tool_result(result.clone()),
+            // Provider output becomes step content: mark it provider-executed
+            // (A7 E.3; convert-language-model-content.ts:113).
+            GenerateContent::ToolResult(result) => rm.tool_result(result.clone().into_core()),
         }
     }
 

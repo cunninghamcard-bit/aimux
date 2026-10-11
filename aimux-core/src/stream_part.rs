@@ -392,7 +392,8 @@ impl StreamPart<ToolCall, ToolApprovalRequestOutput, ReasoningFileOutput> {
                     Self::ResponseMetadata(_) | Self::Finish { .. } => None,
                     Self::ToolCall(value) => Some(TextStreamPart::ToolCall(value)),
                     Self::ToolApprovalRequest(value) => Some(TextStreamPart::ToolApprovalRequest(value)),
-                    Self::ToolResult(value) => Some(TextStreamPart::ToolResult(value)),
+                    // A7 E.3: provider output -> core stream part (stream-language-model-call.ts:772,788).
+                    Self::ToolResult(value) => Some(TextStreamPart::ToolResult(value.into_core())),
                     Self::File(value) => Some(TextStreamPart::File(value)),
                     Self::ReasoningFile(value) => Some(TextStreamPart::ReasoningFile(value)),
                     Self::Source(value) => Some(TextStreamPart::Source(value)),

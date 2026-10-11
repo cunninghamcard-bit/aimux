@@ -489,11 +489,21 @@ struct ToolCallWire {
     error: Option<AiMuxError>,
 }
 
+// A7 E.3: a tool result is split by who executed it. Client-executed results
+// (`execute-tool-call.ts:169,199`) always write `dynamic` as a boolean and do
+// not write `providerExecuted`. Provider-executed results pass `dynamic`
+// through (`stream-language-model-call.ts:774,789`). The V4 provider layer
+// has no `providerExecuted` on tool results (`language-model-v4-tool-result.ts`,
+// @ai-sdk/provider 4.0.21); core sets it to `true` when it converts provider
+// output (`convert-language-model-content.ts:113`, `stream-language-model-
+// call.ts:772`): see [`ToolResult::into_core`]. JSON goes through the private
+// `ToolResultWire`, so `ToolResult.ts` is unchanged. (Plain comments: the `///`
+// lines are the generated `ToolResult.ts` doc and must stay unchanged.)
 /// A tool result produced by a provider-executed tool (e.g. xAI `file_search`,
 /// web search), carried next to the [`RawToolCall`] it answers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
+#[serde(from = "ToolResultWire", into = "ToolResultWire")]
+#[ts(export, as = "ToolResultWire")]
 pub struct ToolResult {
     /// Must match the corresponding call's `tool_call_id`.
     pub tool_call_id: String,
@@ -501,27 +511,176 @@ pub struct ToolResult {
     /// The tool's output (usually a JSON-serializable value or plain text).
     pub result: Value,
     /// Whether the result is an error or error message.
+    pub is_error: Option<bool>,
+    /// Whether the result is preliminary (replaces prior, e.g. image previews).
+    pub preliminary: Option<bool>,
+    /// Who executed the tool (A7 E.3).
+    pub source: ToolResultSource,
+    /// Additional provider-specific metadata for the tool result.
+    pub provider_metadata: Option<ProviderMetadata>,
+}
+
+/// Who executed a [`ToolResult`] (A7 E.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolResultSource {
+    /// Executed by the client. `dynamic` is always written as a boolean
+    /// (`execute-tool-call.ts:169,199`); `providerExecuted` is not written,
+    /// except an input `"providerExecuted": false`, which is kept
+    /// (`explicit_not_provider_executed`; A7: providerExecuted is passed through).
+    Client {
+        dynamic: bool,
+        explicit_not_provider_executed: bool,
+    },
+    /// Executed by the provider. `dynamic` is passed through as given.
+    /// `marked` is whether `"providerExecuted": true` is written: core sets it
+    /// when converting provider output ([`ToolResult::into_core`]); V4
+    /// provider-layer output has no such field, so provider converters build
+    /// `marked: false` ([`ToolResultSource::provider`]).
+    Provider { dynamic: Option<bool>, marked: bool },
+}
+
+impl ToolResultSource {
+    /// A provider-layer (V4) result: provider-executed, not yet marked.
+    #[must_use]
+    pub fn provider(dynamic: Option<bool>) -> Self {
+        Self::Provider {
+            dynamic,
+            marked: false,
+        }
+    }
+}
+
+impl ToolResult {
+    /// Whether the tool is dynamic (defined at runtime, e.g. MCP tools).
+    #[must_use]
+    pub fn is_dynamic(&self) -> bool {
+        match self.source {
+            ToolResultSource::Client { dynamic, .. } => dynamic,
+            ToolResultSource::Provider { dynamic, .. } => dynamic == Some(true),
+        }
+    }
+
+    /// Whether the provider executed the tool.
+    #[must_use]
+    pub fn is_provider_executed(&self) -> bool {
+        matches!(self.source, ToolResultSource::Provider { .. })
+    }
+
+    /// `dynamic` as written on the wire.
+    #[must_use]
+    pub fn dynamic(&self) -> Option<bool> {
+        match self.source {
+            ToolResultSource::Client { dynamic, .. } => Some(dynamic),
+            ToolResultSource::Provider { dynamic, .. } => dynamic,
+        }
+    }
+
+    /// `providerExecuted` as written on the wire.
+    #[must_use]
+    pub fn provider_executed(&self) -> Option<bool> {
+        ToolResultWire::from(self.clone()).provider_executed
+    }
+
+    /// Core conversion of provider output into step content / text stream
+    /// parts: the result is provider-executed and is marked
+    /// `providerExecuted: true` (AI SDK `convert-language-model-content.ts:
+    /// 113,129,149,165`, `stream-language-model-call.ts:772,788`). `dynamic`
+    /// is passed through.
+    #[must_use]
+    pub fn into_core(mut self) -> Self {
+        let dynamic = match self.source {
+            ToolResultSource::Provider { dynamic, .. } => dynamic,
+            ToolResultSource::Client { dynamic, .. } => dynamic.then_some(true),
+        };
+        self.source = ToolResultSource::Provider {
+            dynamic,
+            marked: true,
+        };
+        self
+    }
+}
+
+impl From<ToolResultWire> for ToolResult {
+    fn from(wire: ToolResultWire) -> Self {
+        let source = match wire.provider_executed {
+            Some(true) => ToolResultSource::Provider {
+                dynamic: wire.dynamic,
+                marked: true,
+            },
+            other => ToolResultSource::Client {
+                dynamic: wire.dynamic == Some(true),
+                explicit_not_provider_executed: other == Some(false),
+            },
+        };
+        Self {
+            tool_call_id: wire.tool_call_id,
+            tool_name: wire.tool_name,
+            result: wire.result,
+            is_error: wire.is_error,
+            preliminary: wire.preliminary,
+            source,
+            provider_metadata: wire.provider_metadata,
+        }
+    }
+}
+
+impl From<ToolResult> for ToolResultWire {
+    fn from(result: ToolResult) -> Self {
+        let (dynamic, provider_executed) = match result.source {
+            ToolResultSource::Client {
+                dynamic,
+                explicit_not_provider_executed,
+            } => (
+                Some(dynamic),
+                explicit_not_provider_executed.then_some(false),
+            ),
+            ToolResultSource::Provider { dynamic, marked } => (dynamic, marked.then_some(true)),
+        };
+        Self {
+            tool_call_id: result.tool_call_id,
+            tool_name: result.tool_name,
+            result: result.result,
+            is_error: result.is_error,
+            preliminary: result.preliminary,
+            dynamic,
+            provider_executed,
+            provider_metadata: result.provider_metadata,
+        }
+    }
+}
+
+/// The JSON form of [`ToolResult`]: the E.3a struct, unchanged, so the wire
+/// and `ToolResult.ts` stay the same (A7). Private.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+struct ToolResultWire {
+    /// Must match the corresponding call's `tool_call_id`.
+    tool_call_id: String,
+    tool_name: String,
+    /// The tool's output (usually a JSON-serializable value or plain text).
+    result: Value,
+    /// Whether the result is an error or error message.
     #[ts(optional)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub is_error: Option<bool>,
+    is_error: Option<bool>,
     /// Whether the result is preliminary (replaces prior, e.g. image previews).
     #[ts(optional)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preliminary: Option<bool>,
+    preliminary: Option<bool>,
     /// Whether the tool is dynamic (defined at runtime, e.g. MCP tools).
     #[ts(optional)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dynamic: Option<bool>,
+    dynamic: Option<bool>,
     /// Whether the tool was executed by the provider (AI SDK
     /// `generate-text/tool-result.ts:17,32`; #200:2292). Passed through as
     /// given: absent / false / true.
     #[ts(optional)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_executed: Option<bool>,
+    provider_executed: Option<bool>,
     /// Additional provider-specific metadata for the tool result.
     #[ts(optional)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_metadata: Option<ProviderMetadata>,
+    provider_metadata: Option<ProviderMetadata>,
 }
 
 /// How the model should choose tools.

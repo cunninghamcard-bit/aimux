@@ -910,7 +910,6 @@ impl Transformer for OpenAIResponsesStream {
 
                     "response.image_generation_call.partial_image" => {
                         controller.enqueue(StreamPart::ToolResult(aimux_core::tool::ToolResult {
-                            provider_executed: None,
                             tool_call_id: parsed["item_id"].as_str().unwrap_or_default().to_owned(),
                             tool_name: tool_names
                                 .get("image_generation")
@@ -919,7 +918,7 @@ impl Transformer for OpenAIResponsesStream {
                             result: json!({"result": parsed["partial_image_b64"]}),
                             preliminary: Some(true),
                             is_error: None,
-                            dynamic: None,
+                            source: aimux_core::tool::ToolResultSource::provider(None),
                             provider_metadata: None,
                         }));
                     }

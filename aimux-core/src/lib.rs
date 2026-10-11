@@ -145,6 +145,7 @@ pub mod prelude {
     pub use crate::tool::{
         DynamicToolCall, FunctionTool, FunctionToolInputExample, ProviderTool, RawArguments,
         RawToolCall, StaticToolCall, Tool, ToolCall, ToolCallValidity, ToolResult,
+        ToolResultSource,
     };
     pub use crate::transcription_model::{
         AudioChunk, InputAudioFormat, TranscriptionCallOptions, TranscriptionModel,

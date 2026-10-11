@@ -189,43 +189,90 @@ fn tool_call_semantic_samples_match_by_json_value() {
     }
 }
 
-/// E.3a: `ToolResult.providerExecuted` is passed through, so every sample
-/// (including the providerExecuted x dynamic rows) round-trips byte for byte;
-/// the rows that existed at 8455db9a still equal their baseline. The
-/// `normalized/` lines (A7 D25 + correction: client-executed always writes
-/// `dynamic`, provider-executed passes it through) are a fixed point here;
-/// `serialize(x) == normalize(x)` is E.3's enum.
+/// E.3: `ToolResult` is split by source (A7). Every sample serializes to its
+/// `normalized/` line (client-executed: `dynamic` always a boolean;
+/// provider-executed: `dynamic` passed through), and normalized lines are a
+/// fixed point. The 8455db9a baseline stays as the record of the old output.
 #[test]
-fn tool_result_samples_match_baseline() {
+fn tool_result_samples_match_normalized() {
     let sample = dir().join("tool_result.jsonl");
+    let normalized = lines(&dir().join("normalized").join("tool_result.jsonl"));
     let out = round_trip::<ToolResult>(&sample);
-    assert_eq!(out, lines(&sample), "tool_result.jsonl: passthrough");
-    let baseline = lines(&dir().join("baseline").join("tool_result.jsonl"));
-    assert_eq!(baseline.len(), 8, "8455db9a baseline rows");
-    assert_eq!(
-        &out[..baseline.len()],
-        &baseline[..],
-        "old rows vs 8455db9a"
-    );
+    assert_eq!(out.len(), normalized.len());
+    for (i, (got, want)) in out.iter().zip(&normalized).enumerate() {
+        assert_eq!(got, want, "tool_result.jsonl line {}", i + 1);
+    }
     check_normalized::<ToolResult>("tool_result");
 }
 
-/// E.3a: absent / false / true round-trip byte for byte, including a
-/// provider-executed result without `dynamic` (A7 correction).
+/// providerExecuted absent / false / true round-trip as given; client results
+/// never gain the field; a provider-executed result without `dynamic`
+/// round-trips byte for byte (A7 correction).
 #[test]
 fn tool_result_provider_executed_is_passed_through() {
     let base = r#""toolCallId":"call_1","toolName":"web_search","result":{"hits":3}"#;
-    for (extra, want) in [
-        ("", None),
-        (r#","providerExecuted":false"#, Some(false)),
-        (r#","providerExecuted":true"#, Some(true)),
-        (r#","dynamic":true,"providerExecuted":true"#, Some(true)),
+    for (input, output, provider) in [
+        ("", r#","dynamic":false"#, false),
+        (r#","dynamic":true"#, r#","dynamic":true"#, false),
+        (
+            r#","providerExecuted":false"#,
+            r#","dynamic":false,"providerExecuted":false"#,
+            false,
+        ),
+        (
+            r#","providerExecuted":true"#,
+            r#","providerExecuted":true"#,
+            true,
+        ),
+        (
+            r#","dynamic":false,"providerExecuted":true"#,
+            r#","dynamic":false,"providerExecuted":true"#,
+            true,
+        ),
     ] {
-        let json = format!("{{{base}{extra}}}");
+        let json = format!("{{{base}{input}}}");
         let result: ToolResult = serde_json::from_str(&json).unwrap();
-        assert_eq!(result.provider_executed, want, "{json}");
-        assert_eq!(serde_json::to_string(&result).unwrap(), json);
+        assert_eq!(result.is_provider_executed(), provider, "{json}");
+        assert_eq!(
+            serde_json::to_string(&result).unwrap(),
+            format!("{{{base}{output}}}"),
+            "{json}"
+        );
     }
+}
+
+/// D25: absent and `false` give the same client variant and the same JSON.
+#[test]
+fn tool_result_absent_and_false_dynamic_are_the_same_variant() {
+    let base = r#""toolCallId":"call_1","toolName":"web_search","result":{"hits":3}"#;
+    let a: ToolResult = serde_json::from_str(&format!("{{{base}}}")).unwrap();
+    let b: ToolResult = serde_json::from_str(&format!("{{{base},\"dynamic\":false}}")).unwrap();
+    assert_eq!(a, b);
+    assert_eq!(a.source, b.source);
+}
+
+/// A7 E.3: provider-layer (V4) results carry no providerExecuted; core
+/// conversion marks them `true` and passes `dynamic` through.
+#[test]
+fn provider_layer_result_is_marked_by_core_conversion() {
+    use aimux_core::tool::ToolResultSource;
+    let v4 = ToolResult {
+        tool_call_id: "ws_1".into(),
+        tool_name: "webSearch".into(),
+        result: serde_json::json!({}),
+        is_error: None,
+        preliminary: None,
+        source: ToolResultSource::provider(None),
+        provider_metadata: None,
+    };
+    assert_eq!(
+        serde_json::to_string(&v4).unwrap(),
+        r#"{"toolCallId":"ws_1","toolName":"webSearch","result":{}}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&v4.into_core()).unwrap(),
+        r#"{"toolCallId":"ws_1","toolName":"webSearch","result":{},"providerExecuted":true}"#
+    );
 }
 
 #[test]

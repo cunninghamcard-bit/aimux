@@ -258,20 +258,21 @@ fn tool_results(content: &[GenerateContent]) -> Vec<ToolResultView<'_>> {
     content
         .iter()
         .filter_map(|c| match c {
-            GenerateContent::ToolResult(ToolResult {
-                tool_call_id,
-                tool_name,
-                result,
-                is_error,
-                dynamic,
-                provider_metadata,
-                ..
-            }) => Some((
+            GenerateContent::ToolResult(
+                tool_result @ ToolResult {
+                    tool_call_id,
+                    tool_name,
+                    result,
+                    is_error,
+                    provider_metadata,
+                    ..
+                },
+            ) => Some((
                 tool_call_id.as_str(),
                 tool_name.as_str(),
                 result,
                 *is_error,
-                *dynamic,
+                tool_result.dynamic(),
                 provider_metadata.as_ref(),
             )),
             _ => None,
