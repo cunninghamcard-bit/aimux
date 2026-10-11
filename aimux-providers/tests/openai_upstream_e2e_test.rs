@@ -195,6 +195,28 @@ async fn chat_error_response() {
     assert_eq!(error.message, message);
     assert_eq!(error.status_code, Some(429));
     assert_eq!(error.data, Some(response));
+    // AI SDK api-call-error.ts:28-32: 408/409/429/5xx are retryable.
+    assert!(error.is_retryable);
+}
+
+/// A 400 is not retryable (AI SDK api-call-error.ts:28-32).
+#[tokio::test]
+async fn chat_error_response_400_is_not_retryable() {
+    let response =
+        json!({"error":{"message":"Invalid request","type":"invalid_request_error","code":null}});
+    let mut canned = Canned::json(&response);
+    canned.status = 400;
+    let fetch = MockFetch::new(vec![canned]);
+    let error = provider(&fetch)
+        .chat("test-model")
+        .do_generate(&options())
+        .await
+        .unwrap_err();
+    let AiMuxError::ApiCall(error) = error else {
+        panic!("expected API error")
+    };
+    assert_eq!(error.status_code, Some(400));
+    assert!(!error.is_retryable);
 }
 
 /// TS: "should generate text" (src/responses/openai-responses-language-model.test.ts)
