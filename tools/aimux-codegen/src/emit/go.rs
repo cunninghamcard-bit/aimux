@@ -72,6 +72,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"reflect"
+	"strings"
 )
 
 // U8 is one element of a Rust Vec<u8>: serde writes a JSON array of numbers,
@@ -81,6 +83,9 @@ type U8 uint8
 func (u U8) MarshalJSON() ([]byte, error) { return json.Marshal(uint8(u)) }
 
 func (u *U8) UnmarshalJSON(b []byte) error {
+	if isNull(b) {
+		return fmt.Errorf("invalid type: null, expected u8")
+	}
 	var v uint8
 	if err := json.Unmarshal(b, &v); err != nil {
 		return err
@@ -120,6 +125,9 @@ type requirer interface{ wireRequired() []string }
 // decodeStrict decodes like serde would for one untagged arm: a JSON kind
 // mismatch, a missing required key or a nested decode error rejects it.
 func decodeStrict(b []byte, v any) error {
+	if err := rejectNull(b, reflect.TypeOf(v).Elem()); err != nil {
+		return err
+	}
 	if err := json.Unmarshal(b, v); err != nil {
 		return err
 	}
@@ -132,6 +140,70 @@ func decodeStrict(b []byte, v any) error {
 			if _, ok := obj[k]; !ok {
 				return fmt.Errorf("missing key %q", k)
 			}
+		}
+	}
+	return nil
+}
+
+var (
+	rawType         = reflect.TypeOf(json.RawMessage(nil))
+	unmarshalerType = reflect.TypeOf((*json.Unmarshaler)(nil)).Elem()
+)
+
+// rejectNull fails where serde rejects a JSON null: anywhere the Rust type
+// is not an Option or a JSON value (Go: pointer, interface, RawMessage,
+// TriState). encoding/json would silently accept such a null as the zero
+// value, also inside arrays ([null]) and maps. Types with their own
+// UnmarshalJSON check their own contents.
+func rejectNull(b []byte, t reflect.Type) error {
+	b = bytes.TrimSpace(b)
+	if t == rawType || t.Kind() == reflect.Pointer || t.Kind() == reflect.Interface {
+		return nil
+	}
+	if isNull(b) {
+		if strings.HasPrefix(t.Name(), "TriState[") {
+			return nil
+		}
+		return fmt.Errorf("invalid type: null, expected %s", t)
+	}
+	if len(b) == 0 || reflect.PointerTo(t).Implements(unmarshalerType) {
+		return nil
+	}
+	var inner []json.RawMessage
+	switch {
+	case b[0] == '[' && (t.Kind() == reflect.Slice || t.Kind() == reflect.Array):
+		if json.Unmarshal(b, &inner) != nil {
+			return nil
+		}
+	case b[0] == '{' && t.Kind() == reflect.Map:
+		var obj map[string]json.RawMessage
+		if json.Unmarshal(b, &obj) != nil {
+			return nil
+		}
+		for _, it := range obj {
+			inner = append(inner, it)
+		}
+	case b[0] == '{' && t.Kind() == reflect.Struct:
+		var obj map[string]json.RawMessage
+		if json.Unmarshal(b, &obj) != nil {
+			return nil
+		}
+		for i := 0; i < t.NumField(); i++ {
+			f := t.Field(i)
+			name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+			if it, ok := obj[name]; ok && name != "" && name != "-" {
+				if err := rejectNull(it, f.Type); err != nil {
+					return fmt.Errorf("%s: %w", name, err)
+				}
+			}
+		}
+		return nil
+	default:
+		return nil
+	}
+	for _, it := range inner {
+		if err := rejectNull(it, t.Elem()); err != nil {
+			return err
 		}
 	}
 	return nil

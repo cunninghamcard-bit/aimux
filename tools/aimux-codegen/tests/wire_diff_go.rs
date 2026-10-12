@@ -1253,3 +1253,77 @@ fn verdict_and_doc_checks_each_catch_their_mutation() {
     assert!(doc_problem(Some(&stale), &doc).is_some());
     assert!(doc_problem(None, &doc).is_some());
 }
+
+/// Untagged decode error parity (reviewer A): for null-bearing inputs the
+/// generated Go must accept exactly when real serde deserialization accepts.
+/// encoding/json alone accepts `null` and `[null]` as zero values.
+fn null_parity_cases() -> Vec<Fixture> {
+    use aimux_core::decision_model::DecisionValue;
+    use aimux_core::evaluation_model::EvaluationInput;
+    use aimux_core::shared::FileBytes;
+    let fb: Back = back::<FileBytes>;
+    let io: Back = back::<ImageOutputs>;
+    let ei: Back = back::<EvaluationInput>;
+    let dv: Back = back::<DecisionValue>;
+    [
+        ("null-FileBytes", "FileBytes", json!(null), fb),
+        ("null-FileBytes-elem", "FileBytes", json!([null]), fb),
+        ("null-FileBytes-ok", "FileBytes", json!([1, 2]), fb),
+        ("null-ImageOutputs", "ImageOutputs", json!(null), io),
+        ("null-ImageOutputs-elem", "ImageOutputs", json!([null]), io),
+        (
+            "null-ImageOutputs-inner",
+            "ImageOutputs",
+            json!([[null]]),
+            io,
+        ),
+        ("null-ImageOutputs-ok", "ImageOutputs", json!([[1]]), io),
+        ("null-EvaluationInput", "EvaluationInput", json!(null), ei),
+        (
+            "null-EvaluationInput-array",
+            "EvaluationInput",
+            json!([null]),
+            ei,
+        ),
+        (
+            "null-EvaluationInput-object",
+            "EvaluationInput",
+            json!({"a": null}),
+            ei,
+        ),
+        ("null-DecisionValue", "DecisionValue", json!(null), dv),
+        ("null-DecisionValue-ok", "DecisionValue", json!(true), dv),
+    ]
+    .into_iter()
+    .map(|(label, ty, json, b)| Fixture {
+        label,
+        ty,
+        json,
+        back: Some(b),
+    })
+    .collect()
+}
+
+/// `(label, serde accepts, generated Go accepts)` per null-parity case.
+fn null_parity(mutate: impl Fn(String) -> String) -> Vec<(String, bool, bool)> {
+    let cases = null_parity_cases();
+    let run = run_go("nulls", &cases, mutate);
+    cases
+        .iter()
+        .zip(&run.results)
+        .map(|(f, r)| {
+            assert_eq!(f.label, r.label);
+            let serde_ok = (f.back.unwrap())(&f.json).is_ok();
+            (f.label.to_string(), serde_ok, r.gen_err.is_empty())
+        })
+        .collect()
+}
+
+#[test]
+fn untagged_decode_rejects_null_exactly_like_serde() {
+    let got = null_parity(|s| s);
+    let diverge: Vec<_> = got.iter().filter(|(_, s, g)| s != g).collect();
+    assert!(diverge.is_empty(), "serde vs generated Go: {diverge:#?}");
+    // Both outcomes occur, so parity is not vacuous.
+    assert!(got.iter().any(|(_, s, _)| *s) && got.iter().any(|(_, s, _)| !*s));
+}
