@@ -14,7 +14,7 @@ status=0
 found=0
 while IFS=: read -r file line text; do
   found=$((found + 1))
-  ref=$(printf '%s' "$text" | sed -n 's/.*dtolnay\/rust-toolchain@\([^[:space:]#"'"'"']*\).*/\1/p')
+  ref=$(printf '%s' "$text" | sed -n 's/.*dtolnay\/rust-toolchain@\([^[:space:]#"'"'"']*\).*/\1/Ip')
   if [ -z "$ref" ]; then
     echo "$file:$line: dtolnay/rust-toolchain without @$channel" >&2
     status=1
@@ -25,7 +25,7 @@ while IFS=: read -r file line text; do
     echo "$file:$line: dtolnay/rust-toolchain@$ref does not match rust-toolchain.toml channel $channel" >&2
     status=1
   fi
-done < <(grep -n 'dtolnay/rust-toolchain' .github/workflows/*.yml || true)
+done < <(grep -in 'dtolnay/rust-toolchain' .github/workflows/*.yml || true)
 if [ "$found" -eq 0 ]; then
   echo "no dtolnay/rust-toolchain@ steps found in .github/workflows/*.yml" >&2
   exit 1
