@@ -7,7 +7,7 @@ use std::process::ExitCode;
 
 use aimux_codegen::manifest::{self, Inputs};
 
-const USAGE: &str = "usage: aimux-codegen [--check] [--spec DIR] [--out DIR] [--src DIR] [--versions FILE] [--list FILE] | --emit go [--emit-out DIR] [--src DIR]";
+const USAGE: &str = "usage: aimux-codegen [--check] [--spec DIR] [--out DIR] [--src DIR] [--versions FILE] [--list FILE] | --emit go|swift [--emit-out DIR] [--src DIR]";
 
 fn main() -> ExitCode {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -78,6 +78,7 @@ fn main() -> ExitCode {
 fn emit_lang(lang: &str, inputs: &Inputs, out_root: &std::path::Path) -> ExitCode {
     let emitter: &dyn aimux_codegen::emit::Emitter = match lang {
         "go" => &aimux_codegen::emit::go::Go,
+        "swift" => &aimux_codegen::emit::swift::Swift,
         other => {
             eprintln!("unknown --emit language {other}; {USAGE}");
             return ExitCode::from(2);

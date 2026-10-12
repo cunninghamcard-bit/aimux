@@ -10,6 +10,7 @@ use crate::Output;
 use crate::wire::WireModel;
 
 pub mod go;
+pub mod swift;
 
 /// One target language.
 pub trait Emitter {
@@ -17,6 +18,15 @@ pub trait Emitter {
     fn lang(&self) -> &'static str;
     /// Files to write, paths relative to the language directory.
     fn emit(&self, model: &WireModel) -> Vec<Output>;
+    /// Model constructs this language refuses to emit; [`write`] runs it
+    /// first and writes nothing on an error.
+    ///
+    /// # Errors
+    ///
+    /// One message per refused construct.
+    fn check(&self, _model: &WireModel) -> Result<(), Vec<String>> {
+        Ok(())
+    }
 }
 
 /// `<workspace>/target/codegen-out`.
@@ -57,6 +67,9 @@ pub fn write(
     // dangling link in it is refused. The bindings checks run on the
     // resolved root.
     let root = resolve(out_root)?;
+    emitter
+        .check(model)
+        .map_err(|e| format!("{} emitter: {}", emitter.lang(), e.join("; ")))?;
     guard(&root)?;
     let lang = Path::new(emitter.lang());
     guard_below(&root, lang)?;
