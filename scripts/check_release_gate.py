@@ -1,66 +1,65 @@
 #!/usr/bin/env python3
 """Fail unless every job in .github/workflows/release.yml transitively
-`needs` the check-toolchain job (which runs check_toolchain_pin.sh).
+`needs` the check-toolchain job (which runs check_toolchain_pin.sh), and
+nothing lets a job run past or swallow a failed gate:
 
-Stdlib only, so it runs on any runner without installs. It reads the
-top-level `jobs:` mapping (job keys at 2-space indent) and each job's
-`needs:` at 4-space indent, in scalar, flow-list or block-list form.
+- no job `if:` uses always(), cancelled() / !cancelled() or failure()
+  (each runs a job even though a job it needs failed);
+- no `continue-on-error` on any job or on any check-toolchain step.
+
+Needs PyYAML; exits nonzero if it can't be imported.
 """
 import re
 import sys
 from pathlib import Path
 
+try:
+    import yaml
+except ImportError as error:
+    sys.exit(f"check_release_gate: cannot import PyYAML ({error}); install python3-yaml")
+
 GATE = "check-toolchain"
+BYPASS = re.compile(r"\b(always|cancelled|failure)\s*\(\s*\)")
 path = Path(sys.argv[1] if len(sys.argv) > 1 else
             Path(__file__).resolve().parent.parent / ".github/workflows/release.yml")
 
-jobs: dict[str, list[str]] = {}
-in_jobs = False
-job = None
-block_needs = False
-for raw in path.read_text().splitlines():
-    line = raw.split(" #", 1)[0].rstrip() if not raw.lstrip().startswith("#") else ""
-    if not line.strip():
-        continue
-    if not line.startswith(" "):
-        in_jobs = line == "jobs:"
-        job = None
-        continue
-    if not in_jobs:
-        continue
-    if m := re.fullmatch(r"  ([A-Za-z0-9_-]+):", line):
-        job = m.group(1)
-        jobs[job] = []
-        block_needs = False
-        continue
-    if job is None:
-        continue
-    if m := re.fullmatch(r"    needs:\s*(.*)", line):
-        value = m.group(1).strip()
-        block_needs = value == ""
-        if value.startswith("["):
-            jobs[job] += [v.strip().strip("'\"") for v in value.strip("[]").split(",") if v.strip()]
-        elif value:
-            jobs[job].append(value.strip("'\""))
-        continue
-    if block_needs and (m := re.fullmatch(r"\s{6,}-\s*(\S+)", line)):
-        jobs[job].append(m.group(1).strip("'\""))
-        continue
-    if re.match(r"    \S", line):
-        block_needs = False
-
-if not jobs:
-    sys.exit(f"{path}: no jobs found")
+doc = yaml.safe_load(path.read_text()) or {}
+jobs = doc.get("jobs") or {}
+if not isinstance(jobs, dict) or not jobs:
+    sys.exit(f"{path}: no jobs parsed")
 if GATE not in jobs:
     sys.exit(f"{path}: job '{GATE}' is missing")
 
 
-def gated(name: str, seen: frozenset = frozenset()) -> bool:
+def needs(name):
+    value = jobs[name].get("needs") or []
+    return [value] if isinstance(value, str) else list(value)
+
+
+def gated(name, seen=frozenset()):
     return any(n == GATE or (n in jobs and n not in seen and gated(n, seen | {name}))
-               for n in jobs[name])
+               for n in needs(name))
 
 
+def continues(value):
+    # `continue-on-error: true`, or an expression that may evaluate true.
+    return value is not None and value is not False and str(value).strip().lower() != "false"
+
+
+errors = []
 ungated = [j for j in jobs if j != GATE and not gated(j)]
 if ungated:
-    sys.exit(f"{path}: UNGATED jobs (do not transitively need '{GATE}'): {', '.join(ungated)}")
+    errors.append(f"UNGATED jobs (do not transitively need '{GATE}'): {', '.join(ungated)}")
+for name, job in jobs.items():
+    condition = str(job.get("if", ""))
+    if BYPASS.search(condition):
+        errors.append(f"job '{name}' if: {condition!r} bypasses a failed '{GATE}'")
+    if continues(job.get("continue-on-error")):
+        errors.append(f"job '{name}' has continue-on-error: {job.get('continue-on-error')!r}")
+for index, step in enumerate(jobs[GATE].get("steps") or []):
+    if continues(step.get("continue-on-error")):
+        errors.append(f"job '{GATE}' step {index} has continue-on-error: {step.get('continue-on-error')!r}")
+
+if errors:
+    sys.exit("\n".join(f"{path}: {e}" for e in errors))
 print(f"release gate OK: all {len(jobs) - 1} release.yml jobs transitively need {GATE}")

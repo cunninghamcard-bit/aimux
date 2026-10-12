@@ -27,6 +27,7 @@ jobs:
       - name: Workflow toolchain refs match rust-toolchain.toml
         run: |
           bash scripts/check_toolchain_pin.sh
+          python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update -q && sudo apt-get install -yq python3-yaml; }
           python3 scripts/check_release_gate.py
       - name: Check formatting
         run: cargo fmt --all -- --check
