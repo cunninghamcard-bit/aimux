@@ -10,7 +10,7 @@ except the file-size table (split scope is D10).
 |---|---|
 | FFI `aimux_*_new` (name ends in `_new`) | 29 |
 | FFI `aimux_*_new*` (incl. `_new_with_base` etc.) | 51 |
-| .rs files > 1000 lines (all tracked) | 39 |
+| .rs files > 1000 lines (all tracked) | 40 |
 | .rs files > 1000 lines (excluding `*/tests/*`) | 24 |
 | ts-rs `#[derive(TS)]` sites | 201 |
 | `from_resolved` occurrences | 0 |
@@ -148,6 +148,7 @@ except the file-size table (split scope is D10).
 | aimux-providers/src/google/convert.rs | 1893 | src |
 | aimux-core/src/replay.rs | 1830 | src |
 | aimux-providers/src/anthropic/stream.rs | 1785 | src |
+| tools/aimux-codegen/tests/wire_diff_swift.rs | 1743 | test |
 | aimux-providers/src/openai/responses/responses_convert.rs | 1742 | src |
 | aimux-providers/src/bedrock/convert.rs | 1699 | src |
 | bindings/node/src/lib.rs | 1694 | src |
