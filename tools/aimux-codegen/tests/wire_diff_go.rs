@@ -479,6 +479,21 @@ fn uncovered(fixtures: &[Fixture]) -> Vec<String> {
         .collect()
 }
 
+/// Covered types (hand-written with a generated counterpart) that have no
+/// `empty-<Type>` fixture.
+fn without_empty(fixtures: &[Fixture]) -> Vec<String> {
+    let gen_t = generated_types();
+    hand_types()
+        .into_iter()
+        .filter(|t| gen_t.contains(t))
+        .filter(|t| {
+            !fixtures
+                .iter()
+                .any(|f| f.ty == t && f.label == format!("empty-{t}"))
+        })
+        .collect()
+}
+
 /// Output of one fixture through both Go type sets.
 #[derive(serde::Deserialize, Debug)]
 struct GoResult {
@@ -1093,6 +1108,19 @@ fn every_hand_written_type_with_a_generated_counterpart_has_a_fixture() {
         .filter(|x| x.ty != "VideoPollOptions")
         .collect();
     assert_eq!(uncovered(&without), vec!["VideoPollOptions".to_string()]);
+}
+
+#[test]
+fn every_covered_type_has_an_empty_value_fixture() {
+    let f = fixtures();
+    assert_eq!(without_empty(&f), Vec::<String>::new());
+    // Mutation: deleting one empty fixture is reported, by name, even
+    // though the type still has its cov- fixture.
+    let without: Vec<Fixture> = f
+        .into_iter()
+        .filter(|x| x.label != "empty-ChatCompletion")
+        .collect();
+    assert_eq!(without_empty(&without), vec!["ChatCompletion".to_string()]);
 }
 
 /// (a) Both directions: serde JSON → Go decode → Go encode equals the serde
