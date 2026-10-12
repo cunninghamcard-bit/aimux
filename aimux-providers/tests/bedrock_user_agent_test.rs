@@ -241,6 +241,7 @@ async fn anthropic_aws_user_agent_with(
         base_url: Some(server.uri()),
         region: Some("us-east-1".to_string()),
         auth: Some(auth),
+        workspace_id: Some("ws".to_string()),
         headers,
         ..Default::default()
     })
@@ -286,7 +287,13 @@ async fn anthropic_aws_sigv4_user_agent() {
             region: "us-east-1".into(),
         })))
         .await;
-    assert!(authorization.unwrap().starts_with("AWS4-HMAC-SHA256 "));
+    let authorization = authorization.unwrap();
+    // @ai-sdk/anthropic-aws@2.0.63 (aws4fetch) signs exactly these.
+    assert!(
+        authorization
+            .contains(" SignedHeaders=anthropic-version;anthropic-workspace-id;host;x-amz-date, "),
+        "{authorization}"
+    );
     assert_eq!(ua, ANTHROPIC_AWS_UA);
 }
 
