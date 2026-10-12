@@ -402,11 +402,12 @@ fn serde_attribute_mutations_change_the_modelled_field() {
             serde_json::Value::Null,
         ),
         (
+            // 2.2: flatten must name a struct DTO, so the probe uses one.
             "flatten",
-            "tool.rs",
-            "#[serde(default, skip_serializing_if = \"Option::is_none\")]",
-            "#[serde(flatten, default, skip_serializing_if = \"Option::is_none\")]",
-            |m| find_field(find_type(m, "FunctionTool"), "description")["flatten"].clone(),
+            "model_catalogue.rs",
+            "#[serde(default)]\n    pub limits: ModelLimits,",
+            "#[serde(default, flatten)]\n    pub limits: ModelLimits,",
+            |m| find_field(find_type(m, "ModelSpec"), "limits")["flatten"].clone(),
             serde_json::Value::Null,
             serde_json::json!(true),
         ),

@@ -37,12 +37,13 @@
       "shape": {
         "kind": "enum",
         "representation": {
-          "style": "external"
+          "style": "internal",
+          "tag": "name"
         },
         "variants": [
           {
             "rust": "ApiCall",
-            "wire": "ApiCall",
+            "wire": "AI_APICallError",
             "shape": {
               "kind": "newtype",
               "inner": {
@@ -55,7 +56,7 @@
           },
           {
             "rust": "Retry",
-            "wire": "Retry",
+            "wire": "AI_RetryError",
             "shape": {
               "kind": "newtype",
               "inner": {
@@ -68,49 +69,67 @@
           },
           {
             "rust": "JsonParse",
-            "wire": "JsonParse",
-            "shape": {
-              "kind": "newtype",
-              "inner": {
-                "prim": "String"
-              }
-            }
-          },
-          {
-            "rust": "NoOutputGenerated",
-            "wire": "NoOutputGenerated",
-            "shape": {
-              "kind": "newtype",
-              "inner": {
-                "prim": "String"
-              }
-            }
-          },
-          {
-            "rust": "InvalidResponseData",
-            "wire": "InvalidResponseData",
-            "shape": {
-              "kind": "newtype",
-              "inner": {
-                "prim": "String"
-              }
-            }
-          },
-          {
-            "rust": "ToolCallNotFoundForApproval",
-            "wire": "ToolCallNotFoundForApproval",
+            "wire": "AI_JSONParseError",
             "shape": {
               "kind": "struct",
               "fields": [
                 {
-                  "wire": "tool_call_id",
+                  "wire": "message",
+                  "rust": "message",
+                  "type": {
+                    "prim": "String"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "rust": "NoOutputGenerated",
+            "wire": "AI_NoOutputGeneratedError",
+            "shape": {
+              "kind": "struct",
+              "fields": [
+                {
+                  "wire": "message",
+                  "rust": "message",
+                  "type": {
+                    "prim": "String"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "rust": "InvalidResponseData",
+            "wire": "AI_InvalidResponseDataError",
+            "shape": {
+              "kind": "struct",
+              "fields": [
+                {
+                  "wire": "message",
+                  "rust": "message",
+                  "type": {
+                    "prim": "String"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "rust": "ToolCallNotFoundForApproval",
+            "wire": "AI_ToolCallNotFoundForApprovalError",
+            "shape": {
+              "kind": "struct",
+              "fields": [
+                {
+                  "wire": "toolCallId",
                   "rust": "tool_call_id",
                   "type": {
                     "prim": "String"
                   }
                 },
                 {
-                  "wire": "approval_id",
+                  "wire": "approvalId",
                   "rust": "approval_id",
                   "type": {
                     "prim": "String"
@@ -121,19 +140,19 @@
           },
           {
             "rust": "NoSuchTool",
-            "wire": "NoSuchTool",
+            "wire": "AI_NoSuchToolError",
             "shape": {
               "kind": "struct",
               "fields": [
                 {
-                  "wire": "tool_name",
+                  "wire": "toolName",
                   "rust": "tool_name",
                   "type": {
                     "prim": "String"
                   }
                 },
                 {
-                  "wire": "available_tools",
+                  "wire": "availableTools",
                   "rust": "available_tools",
                   "type": {
                     "option": {
@@ -146,7 +165,7 @@
                   "default": true
                 },
                 {
-                  "wire": "tool_input",
+                  "wire": "toolInput",
                   "rust": "tool_input",
                   "type": {
                     "option": {
@@ -161,19 +180,19 @@
           },
           {
             "rust": "InvalidToolInput",
-            "wire": "InvalidToolInput",
+            "wire": "AI_InvalidToolInputError",
             "shape": {
               "kind": "struct",
               "fields": [
                 {
-                  "wire": "tool_name",
+                  "wire": "toolName",
                   "rust": "tool_name",
                   "type": {
                     "prim": "String"
                   }
                 },
                 {
-                  "wire": "tool_input",
+                  "wire": "toolInput",
                   "rust": "tool_input",
                   "type": {
                     "prim": "String"
@@ -191,12 +210,12 @@
           },
           {
             "rust": "ToolCallRepair",
-            "wire": "ToolCallRepair",
+            "wire": "AI_ToolCallRepairError",
             "shape": {
               "kind": "struct",
               "fields": [
                 {
-                  "wire": "original_error",
+                  "wire": "originalError",
                   "rust": "original_error",
                   "type": {
                     "ref": {
@@ -220,32 +239,44 @@
           },
           {
             "rust": "InvalidArgument",
-            "wire": "InvalidArgument",
-            "shape": {
-              "kind": "newtype",
-              "inner": {
-                "prim": "String"
-              }
-            }
-          },
-          {
-            "rust": "InvalidPrompt",
-            "wire": "InvalidPrompt",
-            "shape": {
-              "kind": "newtype",
-              "inner": {
-                "prim": "String"
-              }
-            }
-          },
-          {
-            "rust": "LoadApiKey",
-            "wire": "LoadApiKey",
+            "wire": "AI_InvalidArgumentError",
             "shape": {
               "kind": "struct",
               "fields": [
                 {
-                  "wire": "env_var",
+                  "wire": "message",
+                  "rust": "message",
+                  "type": {
+                    "prim": "String"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "rust": "InvalidPrompt",
+            "wire": "AI_InvalidPromptError",
+            "shape": {
+              "kind": "struct",
+              "fields": [
+                {
+                  "wire": "message",
+                  "rust": "message",
+                  "type": {
+                    "prim": "String"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "rust": "LoadApiKey",
+            "wire": "AI_LoadAPIKeyError",
+            "shape": {
+              "kind": "struct",
+              "fields": [
+                {
+                  "wire": "envVar",
                   "rust": "env_var",
                   "type": {
                     "prim": "String"
@@ -263,19 +294,19 @@
           },
           {
             "rust": "LoadSetting",
-            "wire": "LoadSetting",
+            "wire": "AI_LoadSettingError",
             "shape": {
               "kind": "struct",
               "fields": [
                 {
-                  "wire": "env_var",
+                  "wire": "envVar",
                   "rust": "env_var",
                   "type": {
                     "prim": "String"
                   }
                 },
                 {
-                  "wire": "name",
+                  "wire": "settingName",
                   "rust": "name",
                   "type": {
                     "prim": "String"
@@ -286,39 +317,51 @@
           },
           {
             "rust": "TokenExpired",
-            "wire": "TokenExpired",
-            "shape": {
-              "kind": "newtype",
-              "inner": {
-                "prim": "String"
-              }
-            }
-          },
-          {
-            "rust": "UnsupportedFunctionality",
-            "wire": "UnsupportedFunctionality",
-            "shape": {
-              "kind": "newtype",
-              "inner": {
-                "prim": "String"
-              }
-            }
-          },
-          {
-            "rust": "NoSuchModel",
-            "wire": "NoSuchModel",
+            "wire": "AI_TokenExpiredError",
             "shape": {
               "kind": "struct",
               "fields": [
                 {
-                  "wire": "model_id",
+                  "wire": "message",
+                  "rust": "message",
+                  "type": {
+                    "prim": "String"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "rust": "UnsupportedFunctionality",
+            "wire": "AI_UnsupportedFunctionalityError",
+            "shape": {
+              "kind": "struct",
+              "fields": [
+                {
+                  "wire": "message",
+                  "rust": "message",
+                  "type": {
+                    "prim": "String"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "rust": "NoSuchModel",
+            "wire": "AI_NoSuchModelError",
+            "shape": {
+              "kind": "struct",
+              "fields": [
+                {
+                  "wire": "modelId",
                   "rust": "model_id",
                   "type": {
                     "prim": "String"
                   }
                 },
                 {
-                  "wire": "model_type",
+                  "wire": "modelType",
                   "rust": "model_type",
                   "type": {
                     "prim": "String"
@@ -330,33 +373,33 @@
           },
           {
             "rust": "NoSuchProvider",
-            "wire": "NoSuchProvider",
+            "wire": "AI_NoSuchProviderError",
             "shape": {
               "kind": "struct",
               "fields": [
                 {
-                  "wire": "provider_id",
+                  "wire": "providerId",
                   "rust": "provider_id",
                   "type": {
                     "prim": "String"
                   }
                 },
                 {
-                  "wire": "model_id",
+                  "wire": "modelId",
                   "rust": "model_id",
                   "type": {
                     "prim": "String"
                   }
                 },
                 {
-                  "wire": "model_type",
+                  "wire": "modelType",
                   "rust": "model_type",
                   "type": {
                     "prim": "String"
                   }
                 },
                 {
-                  "wire": "available_providers",
+                  "wire": "availableProviders",
                   "rust": "available_providers",
                   "type": {
                     "array": {
@@ -369,32 +412,50 @@
           },
           {
             "rust": "Timeout",
-            "wire": "Timeout",
+            "wire": "TimeoutError",
             "shape": {
-              "kind": "newtype",
-              "inner": {
-                "prim": "String"
-              }
+              "kind": "struct",
+              "fields": [
+                {
+                  "wire": "message",
+                  "rust": "message",
+                  "type": {
+                    "prim": "String"
+                  }
+                }
+              ]
             }
           },
           {
             "rust": "Aborted",
-            "wire": "Aborted",
+            "wire": "AbortError",
             "shape": {
-              "kind": "newtype",
-              "inner": {
-                "prim": "String"
-              }
+              "kind": "struct",
+              "fields": [
+                {
+                  "wire": "message",
+                  "rust": "message",
+                  "type": {
+                    "prim": "String"
+                  }
+                }
+              ]
             }
           },
           {
             "rust": "Other",
-            "wire": "Other",
+            "wire": "AI_Error",
             "shape": {
-              "kind": "newtype",
-              "inner": {
-                "prim": "String"
-              }
+              "kind": "struct",
+              "fields": [
+                {
+                  "wire": "message",
+                  "rust": "message",
+                  "type": {
+                    "prim": "String"
+                  }
+                }
+              ]
             }
           }
         ]
@@ -511,23 +572,10 @@
       },
       "tsOverride": "`${number}:${number}`",
       "shape": {
-        "kind": "struct",
-        "fields": [
-          {
-            "wire": "width",
-            "rust": "width",
-            "type": {
-              "prim": "u32"
-            }
-          },
-          {
-            "wire": "height",
-            "rust": "height",
-            "type": {
-              "prim": "u32"
-            }
-          }
-        ]
+        "kind": "newtype",
+        "inner": {
+          "prim": "String"
+        }
       }
     },
     {
@@ -1068,6 +1116,11 @@
             "omitWhenEmpty": true,
             "default": true
           }
+        ],
+        "skipped": [
+          "abort_signal",
+          "call_id",
+          "recording_context"
         ]
       }
     },
@@ -2514,6 +2567,10 @@
             "omitWhenEmpty": true,
             "default": true
           }
+        ],
+        "skipped": [
+          "recording_context",
+          "abort_signal"
         ]
       }
     },
@@ -3234,6 +3291,9 @@
             "omitWhenEmpty": true,
             "default": true
           }
+        ],
+        "skipped": [
+          "abort_signal"
         ]
       }
     },
@@ -3516,6 +3576,9 @@
             "omitWhenEmpty": true,
             "default": true
           }
+        ],
+        "skipped": [
+          "abort_signal"
         ]
       }
     },
@@ -4318,10 +4381,7 @@
             "shape": {
               "kind": "newtype",
               "inner": {
-                "ref": {
-                  "name": "C",
-                  "args": []
-                }
+                "generic": "C"
               }
             }
           },
@@ -4370,10 +4430,7 @@
             "shape": {
               "kind": "newtype",
               "inner": {
-                "ref": {
-                  "name": "R",
-                  "args": []
-                }
+                "generic": "R"
               }
             }
           },
@@ -4413,10 +4470,7 @@
             "shape": {
               "kind": "newtype",
               "inner": {
-                "ref": {
-                  "name": "A",
-                  "args": []
-                }
+                "generic": "A"
               }
             }
           },
@@ -4882,6 +4936,10 @@
             "omitWhenEmpty": true,
             "default": true
           }
+        ],
+        "skipped": [
+          "abort_signal",
+          "repair_tool_call"
         ]
       }
     },
@@ -5473,6 +5531,9 @@
             "omitWhenEmpty": true,
             "default": true
           }
+        ],
+        "skipped": [
+          "abort_signal"
         ]
       }
     },
@@ -7921,6 +7982,9 @@
             "omitWhenEmpty": true,
             "default": true
           }
+        ],
+        "skipped": [
+          "abort_signal"
         ]
       }
     },
@@ -8631,6 +8695,9 @@
             "omitWhenEmpty": true,
             "default": true
           }
+        ],
+        "skipped": [
+          "abort_signal"
         ]
       }
     },
@@ -9035,23 +9102,10 @@
       },
       "tsOverride": "`${number}x${number}`",
       "shape": {
-        "kind": "struct",
-        "fields": [
-          {
-            "wire": "width",
-            "rust": "width",
-            "type": {
-              "prim": "u32"
-            }
-          },
-          {
-            "wire": "height",
-            "rust": "height",
-            "type": {
-              "prim": "u32"
-            }
-          }
-        ]
+        "kind": "newtype",
+        "inner": {
+          "prim": "String"
+        }
       }
     },
     {
@@ -9320,6 +9374,9 @@
             "omitWhenEmpty": true,
             "default": true
           }
+        ],
+        "skipped": [
+          "abort_signal"
         ]
       }
     },
@@ -9811,10 +9868,7 @@
             "shape": {
               "kind": "newtype",
               "inner": {
-                "ref": {
-                  "name": "C",
-                  "args": []
-                }
+                "generic": "C"
               }
             }
           },
@@ -9850,10 +9904,7 @@
             "shape": {
               "kind": "newtype",
               "inner": {
-                "ref": {
-                  "name": "R",
-                  "args": []
-                }
+                "generic": "R"
               }
             }
           },
@@ -9893,10 +9944,7 @@
             "shape": {
               "kind": "newtype",
               "inner": {
-                "ref": {
-                  "name": "A",
-                  "args": []
-                }
+                "generic": "A"
               }
             }
           },
@@ -11980,6 +12028,10 @@
             "omitWhenEmpty": true,
             "default": true
           }
+        ],
+        "skipped": [
+          "monotonic_sent_ms",
+          "scope_key"
         ]
       }
     },
@@ -12177,6 +12229,9 @@
             "omitWhenEmpty": true,
             "default": true
           }
+        ],
+        "skipped": [
+          "abort_signal"
         ]
       }
     },
@@ -12807,6 +12862,9 @@
             "omitWhenEmpty": true,
             "default": true
           }
+        ],
+        "skipped": [
+          "abort_signal"
         ]
       }
     },
@@ -13595,6 +13653,9 @@
             "omitWhenEmpty": true,
             "default": true
           }
+        ],
+        "skipped": [
+          "abort_signal"
         ]
       }
     },

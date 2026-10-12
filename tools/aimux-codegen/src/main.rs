@@ -7,7 +7,7 @@ use std::process::ExitCode;
 
 use aimux_codegen::manifest::{self, Inputs};
 
-const USAGE: &str = "usage: aimux-codegen [--check] [--spec DIR] [--out DIR] [--src DIR] [--versions FILE] [--list FILE]";
+const USAGE: &str = "usage: aimux-codegen [--check] [--spec DIR] [--out DIR] [--src DIR] [--versions FILE] [--list FILE] | --emit go [--emit-out DIR] [--src DIR]";
 
 fn main() -> ExitCode {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -15,6 +15,8 @@ fn main() -> ExitCode {
     let mut out = root.join("generated");
     let mut inputs = Inputs::from_workspace(&root.join("../.."));
     let mut check = false;
+    let mut emit: Option<String> = None;
+    let mut emit_out = aimux_codegen::emit::default_out_root(&root.join("../.."));
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut path = |current: PathBuf| args.next().map_or(current, PathBuf::from);
@@ -25,11 +27,16 @@ fn main() -> ExitCode {
             "--src" => inputs.src_root = path(inputs.src_root),
             "--versions" => inputs.versions = path(inputs.versions),
             "--list" => inputs.list = path(inputs.list),
+            "--emit" => emit = args.next(),
+            "--emit-out" => emit_out = path(emit_out),
             other => {
                 eprintln!("unknown argument {other}; {USAGE}");
                 return ExitCode::from(2);
             }
         }
+    }
+    if let Some(lang) = emit {
+        return emit_lang(&lang, &inputs, &emit_out);
     }
     let mut problems = Vec::new();
     if check {
@@ -66,4 +73,31 @@ fn main() -> ExitCode {
         eprintln!("run `cargo run -p aimux-codegen` to regenerate");
     }
     ExitCode::FAILURE
+}
+
+fn emit_lang(lang: &str, inputs: &Inputs, out_root: &std::path::Path) -> ExitCode {
+    let emitter: &dyn aimux_codegen::emit::Emitter = match lang {
+        "go" => &aimux_codegen::emit::go::Go,
+        other => {
+            eprintln!("unknown --emit language {other}; {USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    let model = match aimux_codegen::wire::from_inputs(inputs) {
+        Ok(m) => m,
+        Err(p) => {
+            p.iter().for_each(|e| eprintln!("{e}"));
+            return ExitCode::FAILURE;
+        }
+    };
+    match aimux_codegen::emit::write(emitter, &model, out_root) {
+        Ok(paths) => {
+            paths.iter().for_each(|p| println!("wrote {}", p.display()));
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
+        }
+    }
 }

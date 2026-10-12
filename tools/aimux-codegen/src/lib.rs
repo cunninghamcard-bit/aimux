@@ -11,8 +11,10 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+pub mod emit;
 pub mod extract;
 pub mod manifest;
+pub mod wire;
 
 /// A type spec.
 #[derive(Debug, Deserialize)]
