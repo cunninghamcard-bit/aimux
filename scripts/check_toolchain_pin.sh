@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Assert every dtolnay/rust-toolchain@<v> in .github/workflows/*.yml is a
+# Assert every dtolnay/rust-toolchain reference in .github/workflows/*.yml is a
 # version equal to the channel pinned in rust-toolchain.toml, and that no
 # step overrides it with a `toolchain:` input. Prints file:line per failure.
 set -euo pipefail
@@ -14,15 +14,18 @@ status=0
 found=0
 while IFS=: read -r file line text; do
   found=$((found + 1))
-  ref=$(printf '%s' "$text" | sed -n 's/.*dtolnay\/rust-toolchain@\([^[:space:]#]*\).*/\1/p')
-  if ! [[ "$ref" =~ $version_re ]]; then
+  ref=$(printf '%s' "$text" | sed -n 's/.*dtolnay\/rust-toolchain@\([^[:space:]#"'"'"']*\).*/\1/p')
+  if [ -z "$ref" ]; then
+    echo "$file:$line: dtolnay/rust-toolchain without @$channel" >&2
+    status=1
+  elif ! [[ "$ref" =~ $version_re ]]; then
     echo "$file:$line: dtolnay/rust-toolchain@$ref is not a version (expected @$channel)" >&2
     status=1
   elif [ "$ref" != "$channel" ]; then
     echo "$file:$line: dtolnay/rust-toolchain@$ref does not match rust-toolchain.toml channel $channel" >&2
     status=1
   fi
-done < <(grep -n 'dtolnay/rust-toolchain@' .github/workflows/*.yml || true)
+done < <(grep -n 'dtolnay/rust-toolchain' .github/workflows/*.yml || true)
 if [ "$found" -eq 0 ]; then
   echo "no dtolnay/rust-toolchain@ steps found in .github/workflows/*.yml" >&2
   exit 1
