@@ -255,6 +255,9 @@ async fn aws_polly_signed_headers_are_locked() {
 /// anthropic-aws-provider.ts:235-240, `ANTHROPIC_AWS_WORKSPACE_ID` as the
 /// fallback), so there is no TS SignedHeaders to match. This locks what
 /// aimux, which treats the workspace id as optional, signs today.
+/// This deliberately differs from TS and is pending decision D31 in
+/// DECISIONS.md; if D31 aligns with AI SDK, this test changes to expect a
+/// setting error.
 #[tokio::test]
 async fn anthropic_aws_signed_headers_without_workspace_id() {
     let sent = anthropic_aws_case_with(false, None).await;
