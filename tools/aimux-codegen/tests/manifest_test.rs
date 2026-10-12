@@ -433,3 +433,66 @@ fn closure_dto_list_is_reproducible_from_source() {
         exported_section(&list).contains(&"ToolChoice tool aimux-core/src/tool.rs".to_string())
     );
 }
+
+/// `BooleanCriteria.true/false` (evaluation_model.rs:62-73) keep three wire
+/// states: absent key, explicit null, value. The manifest says so with
+/// `triState` and the `presence` codec instead of `Option<Option<T>>`.
+#[test]
+fn boolean_criteria_manifest_entry_is_tri_state() {
+    let manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root().join("generated/manifest.json")).unwrap(),
+    )
+    .unwrap();
+    let t = manifest["types"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "BooleanCriteria")
+        .unwrap();
+    let fields = t["shape"]["fields"].as_array().unwrap();
+    assert_eq!(fields.len(), 2);
+    for (f, wire) in fields.iter().zip(["true", "false"]) {
+        assert_eq!(f["wire"], wire);
+        assert_eq!(
+            f["type"],
+            serde_json::json!({ "triState": { "ref": { "name": "EvaluationInput", "args": [] } } })
+        );
+        assert!(!f["type"].to_string().contains("\"option\""), "{f}");
+        assert_eq!(f["codec"]["name"], "presence");
+        assert_eq!(f["omitWhenEmpty"], true);
+        assert_eq!(f["default"], true);
+    }
+    let recording = manifest["types"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "Recording")
+        .unwrap();
+    let schema = recording["shape"]["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["wire"] == "schema")
+        .unwrap();
+    assert_eq!(schema["codec"]["name"], "currentRecordingSchema");
+    assert_eq!(schema["type"], serde_json::json!({ "prim": "u32" }));
+}
+
+/// A serde `with`-style field with neither `#[ts(type)]` nor a FIELD_CODECS
+/// registration fails generation at the field's file:line.
+#[test]
+fn unregistered_serde_with_field_fails_generation() {
+    let (dir, i) = scratch_src("serde_with");
+    std::fs::write(
+        i.src_root.join("extra_dto.rs"),
+        "#[derive(Serialize, Deserialize, TS)]\n#[ts(export)]\npub struct ExtraDto {\n    #[serde(deserialize_with = \"custom\")]\n    pub a: u32,\n}\n",
+    )
+    .unwrap();
+    let errs = errors(&i);
+    assert!(
+        errs.iter().any(|e| e
+            == "aimux-core/src/extra_dto.rs:5: ExtraDto.a uses serde `deserialize_with=custom` but has no `#[ts(type)]` and no FIELD_CODECS registration"),
+        "{errs:?}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

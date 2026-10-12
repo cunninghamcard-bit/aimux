@@ -745,35 +745,39 @@
             "wire": "true",
             "rust": "true_",
             "type": {
-              "option": {
-                "option": {
-                  "ref": {
-                    "name": "EvaluationInput",
-                    "args": []
-                  }
+              "triState": {
+                "ref": {
+                  "name": "EvaluationInput",
+                  "args": []
                 }
               }
             },
             "omitWhenEmpty": true,
             "default": true,
-            "serdeWith": "deserialize_with=present"
+            "serdeWith": "deserialize_with=present",
+            "codec": {
+              "name": "presence",
+              "wire": "absent | null | value: an absent key and an explicit null are distinct"
+            }
           },
           {
             "wire": "false",
             "rust": "false_",
             "type": {
-              "option": {
-                "option": {
-                  "ref": {
-                    "name": "EvaluationInput",
-                    "args": []
-                  }
+              "triState": {
+                "ref": {
+                  "name": "EvaluationInput",
+                  "args": []
                 }
               }
             },
             "omitWhenEmpty": true,
             "default": true,
-            "serdeWith": "deserialize_with=present"
+            "serdeWith": "deserialize_with=present",
+            "codec": {
+              "name": "presence",
+              "wire": "absent | null | value: an absent key and an explicit null are distinct"
+            }
           }
         ]
       }
@@ -7663,7 +7667,11 @@
             "type": {
               "prim": "u32"
             },
-            "serdeWith": "deserialize_with=deserialize_current_schema"
+            "serdeWith": "deserialize_with=deserialize_current_schema",
+            "codec": {
+              "name": "currentRecordingSchema",
+              "wire": "u32; decode accepts only RECORDING_SCHEMA and rejects any other value"
+            }
           },
           {
             "wire": "callId",

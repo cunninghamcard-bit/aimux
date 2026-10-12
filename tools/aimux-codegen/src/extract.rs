@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use quote::ToTokens;
 use serde::Serialize;
+use syn::spanned::Spanned;
 use syn::{Attribute, Fields, GenericArgument, Item, PathArguments, Type};
 
 /// Category per source file (planner Q2). Mirrors `CATEGORY_BY_FILE` in
@@ -52,6 +53,57 @@ pub const DEFAULT_CATEGORY: &str = "core";
 /// path segment. Each one names its wire form; adding a type here is the
 /// explicit registration RFC-0042:200 asks for.
 pub const CODECS: &[(&str, &str)] = &[];
+
+/// A registered codec for a field that uses serde `with` /
+/// `deserialize_with` / `serialize_with` without a `#[ts(type)]`. Such a
+/// field is accepted only when `(owner, field, serde)` matches an entry here;
+/// otherwise generation fails with `file:line`.
+#[derive(Debug, Clone, Copy)]
+pub struct FieldCodec {
+    /// Containing type.
+    pub owner: &'static str,
+    /// Rust field name (without `r#`).
+    pub field: &'static str,
+    /// The serde attribute as `<key>=<fn>`.
+    pub serde: &'static str,
+    /// Codec id written into the manifest.
+    pub name: &'static str,
+    /// Wire contract.
+    pub wire: &'static str,
+    /// The field's manifest type becomes [`TypeRef::TriState`]
+    /// (`Option<Option<T>>` → absent | null | T).
+    pub tri_state: bool,
+}
+
+/// Field codec registrations (unit 2.1).
+pub const FIELD_CODECS: &[FieldCodec] = &[
+    // aimux-core/src/recording.rs:73
+    FieldCodec {
+        owner: "Recording",
+        field: "schema",
+        serde: "deserialize_with=deserialize_current_schema",
+        name: "currentRecordingSchema",
+        wire: "u32; decode accepts only RECORDING_SCHEMA and rejects any other value",
+        tri_state: false,
+    },
+    // aimux-core/src/evaluation_model.rs:62-73
+    FieldCodec {
+        owner: "BooleanCriteria",
+        field: "true_",
+        serde: "deserialize_with=present",
+        name: "presence",
+        wire: "absent | null | value: an absent key and an explicit null are distinct",
+        tri_state: true,
+    },
+    FieldCodec {
+        owner: "BooleanCriteria",
+        field: "false_",
+        serde: "deserialize_with=present",
+        name: "presence",
+        wire: "absent | null | value: an absent key and an explicit null are distinct",
+        tri_state: true,
+    },
+];
 
 /// One exported type.
 #[derive(Debug, Clone, Serialize)]
@@ -153,6 +205,16 @@ pub struct FieldDef {
     /// `#[serde(with|deserialize_with|serialize_with = ..)]` custom codec.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub serde_with: Option<String>,
+    /// Registered [`FieldCodec`] for a `serde_with` field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codec: Option<FieldCodecRef>,
+}
+
+/// The registered codec used by a field.
+#[derive(Debug, Clone, Serialize)]
+pub struct FieldCodecRef {
+    pub name: String,
+    pub wire: String,
 }
 
 /// A field type.
@@ -178,6 +240,9 @@ pub enum TypeRef {
         rust: String,
         wire: String,
     },
+    /// Three wire states: key absent, explicit `null`, or a value of the
+    /// inner type (Rust `Option<Option<T>>` with a presence codec).
+    TriState(Box<TypeRef>),
 }
 
 const PRIMS: &[&str] = &[
@@ -349,7 +414,7 @@ fn refs_in_shape(shape: &Shape, out: &mut BTreeSet<String>) {
 
 fn refs_in(t: &TypeRef, out: &mut BTreeSet<String>) {
     match t {
-        TypeRef::Option(i) | TypeRef::Array(i) => refs_in(i, out),
+        TypeRef::Option(i) | TypeRef::Array(i) | TypeRef::TriState(i) => refs_in(i, out),
         TypeRef::Map { key, value } => {
             refs_in(key, out);
             refs_in(value, out);
@@ -414,12 +479,12 @@ fn walk_items(
             }
             Item::Struct(s) => {
                 consider(&s.attrs, &s.ident, &s.generics, rel, found, errors, |c| {
-                    struct_shape(&s.fields, c)
+                    struct_shape(&s.ident.to_string(), &s.fields, c)
                 });
             }
             Item::Enum(e) => {
                 consider(&e.attrs, &e.ident, &e.generics, rel, found, errors, |c| {
-                    enum_shape(e, c)
+                    enum_shape(&e.ident.to_string(), e, c)
                 });
             }
             _ => {}
@@ -474,7 +539,10 @@ fn consider(
     let shape = match shape {
         Ok(s) => s,
         Err(e) => {
-            errors.push(format!("{rel}:{line}: {ident} {e}"));
+            match e.strip_prefix('@').and_then(|r| r.split_once('@')) {
+                Some((l, msg)) => errors.push(format!("{rel}:{l}: {msg}")),
+                None => errors.push(format!("{rel}:{line}: {ident} {e}")),
+            }
             return;
         }
     };
@@ -675,13 +743,45 @@ fn member(attrs: &[Attribute]) -> Result<Member, String> {
     Ok(m)
 }
 
-fn fields_of(fields: &Fields, rename_all: Option<&str>) -> Result<Shape, String> {
+/// Error text carrying the field's own line: `@<line>@<message>`; `consider`
+/// turns it into `file:<line>: ..`.
+fn at_line(line: usize, msg: &str) -> String {
+    format!("@{line}@{msg}")
+}
+
+/// Check a `with`-style field: `#[ts(type)]` or a [`FIELD_CODECS`] entry.
+fn field_codec(
+    owner: &str,
+    field: &str,
+    m: &Member,
+    line: usize,
+) -> Result<Option<&'static FieldCodec>, String> {
+    let Some(with) = &m.with else {
+        return Ok(None);
+    };
+    if m.ts_type.is_some() {
+        return Ok(None);
+    }
+    FIELD_CODECS
+        .iter()
+        .find(|c| c.owner == owner && c.field == field && c.serde == with)
+        .map(Some)
+        .ok_or_else(|| {
+            at_line(
+                line,
+                &format!("{owner}.{field} uses serde `{with}` but has no `#[ts(type)]` and no FIELD_CODECS registration"),
+            )
+        })
+}
+
+fn fields_of(owner: &str, fields: &Fields, rename_all: Option<&str>) -> Result<Shape, String> {
     match fields {
         Fields::Unit => Ok(Shape::Unit),
         Fields::Unnamed(u) => {
             let mut items = Vec::new();
-            for f in &u.unnamed {
+            for (i, f) in u.unnamed.iter().enumerate() {
                 let m = member(&f.attrs)?;
+                field_codec(owner, &i.to_string(), &m, f.ty.span().start().line)?;
                 items.push(type_ref(&f.ty, m.ts_type.as_deref()));
             }
             if items.len() == 1 {
@@ -709,10 +809,32 @@ fn fields_of(fields: &Fields, rename_all: Option<&str>) -> Result<Shape, String>
                     .rename
                     .clone()
                     .unwrap_or_else(|| rename(&rust, rename_all, false));
+                let line = f.ident.as_ref().map_or(0, |i| i.span().start().line);
+                let codec = field_codec(owner, &rust, &m, line)?;
+                let mut ty = type_ref(&f.ty, m.ts_type.as_deref());
+                if codec.is_some_and(|c| c.tri_state) {
+                    let bad = || {
+                        at_line(
+                            line,
+                            &format!("{owner}.{rust}: tri-state codec needs Option<Option<T>>"),
+                        )
+                    };
+                    ty = match ty {
+                        TypeRef::Option(outer) => match *outer {
+                            TypeRef::Option(inner) => TypeRef::TriState(inner),
+                            _ => return Err(bad()),
+                        },
+                        _ => return Err(bad()),
+                    };
+                }
                 out.push(FieldDef {
                     wire,
                     rust,
-                    ty: type_ref(&f.ty, m.ts_type.as_deref()),
+                    ty,
+                    codec: codec.map(|c| FieldCodecRef {
+                        name: c.name.into(),
+                        wire: c.wire.into(),
+                    }),
                     omit_when_empty: m.skip_serializing_if,
                     default: m.default,
                     flatten: m.flatten,
@@ -728,8 +850,8 @@ fn fields_of(fields: &Fields, rename_all: Option<&str>) -> Result<Shape, String>
     }
 }
 
-fn struct_shape(fields: &Fields, c: &Container) -> Result<Shape, String> {
-    let mut shape = fields_of(fields, c.rename_all.as_deref())?;
+fn struct_shape(owner: &str, fields: &Fields, c: &Container) -> Result<Shape, String> {
+    let mut shape = fields_of(owner, fields, c.rename_all.as_deref())?;
     if let Shape::Struct {
         deny_unknown_fields,
         ..
@@ -740,7 +862,7 @@ fn struct_shape(fields: &Fields, c: &Container) -> Result<Shape, String> {
     Ok(shape)
 }
 
-fn enum_shape(e: &syn::ItemEnum, c: &Container) -> Result<Shape, String> {
+fn enum_shape(owner: &str, e: &syn::ItemEnum, c: &Container) -> Result<Shape, String> {
     let representation = match (&c.tag, &c.content, c.untagged) {
         (_, _, true) => Representation::Untagged,
         (Some(tag), Some(content), false) => Representation::Adjacent {
@@ -779,7 +901,7 @@ fn enum_shape(e: &syn::ItemEnum, c: &Container) -> Result<Shape, String> {
             wire,
             aliases: m.aliases,
             other: m.other,
-            shape: fields_of(&v.fields, vc.as_deref())?,
+            shape: fields_of(owner, &v.fields, vc.as_deref())?,
         });
     }
     Ok(Shape::Enum {
@@ -983,7 +1105,7 @@ impl Resolve<'_> {
     fn check(&mut self, t: &TypeRef) {
         match t {
             TypeRef::Prim(_) | TypeRef::Json | TypeRef::Codec { .. } | TypeRef::Generic(_) => {}
-            TypeRef::Option(i) | TypeRef::Array(i) => self.check(i),
+            TypeRef::Option(i) | TypeRef::Array(i) | TypeRef::TriState(i) => self.check(i),
             TypeRef::Map { key, value } => {
                 self.check(key);
                 self.check(value);

@@ -165,10 +165,10 @@ except the file-size table (split scope is D10).
 | aimux-providers/src/huggingface/responses.rs | 1172 | src |
 | aimux-providers/tests/bedrock_convert_test.rs | 1170 | test |
 | aimux-providers/tests/openai_compatible_test.rs | 1152 | test |
+| tools/aimux-codegen/src/extract.rs | 1134 | src |
 | aimux-provider-utils/tests/streaming_tool_call_tracker_test.rs | 1105 | test |
 | aimux-providers/src/vertex/auth.rs | 1090 | src |
 | aimux-core/src/openai_output.rs | 1065 | src |
 | aimux-providers/src/google/model.rs | 1045 | src |
 | bindings/node/src/multimodal.rs | 1017 | src |
 | aimux-providers/src/xai/responses/convert.rs | 1013 | src |
-| tools/aimux-codegen/src/extract.rs | 1012 | src |
