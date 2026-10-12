@@ -18,6 +18,8 @@
 
 #[path = "common/go_fixtures.rs"]
 mod go_fixtures;
+#[path = "common/go_fixtures_empty.rs"]
+mod go_fixtures_empty;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -281,6 +283,7 @@ fn fixtures() -> Vec<Fixture> {
     .chain(
         go_fixtures::coverage_fixtures()
             .into_iter()
+            .chain(go_fixtures_empty::empty_fixtures())
             .map(|(label, ty, json, back)| Fixture {
                 label,
                 ty,
@@ -847,7 +850,7 @@ fn verdict_problems(rows: &[Row], entries: &[Verdict]) -> Vec<String> {
         if e.reason.as_deref().is_none_or(|r| r.trim().is_empty()) {
             problems.push(format!("verdict for {} | {} has no reason", e.ty, e.field));
         }
-        if e.verdict != "generator bug" && e.verdict != "handwritten bug" {
+        if e.verdict != "生成器错" && e.verdict != "手写错" {
             problems.push(format!(
                 "bad verdict `{}` for {} | {}",
                 e.verdict, e.ty, e.field
@@ -864,7 +867,7 @@ fn verdict_problems(rows: &[Row], entries: &[Verdict]) -> Vec<String> {
         match entries.iter().find(|e| e.ty == r.ty && e.field == r.field) {
             None => problems.push(format!("no verdict for {} | {}", r.ty, r.field)),
             Some(e)
-                if (e.verdict == "generator bug" || e.verdict == "handwritten bug")
+                if (e.verdict == "生成器错" || e.verdict == "手写错")
                     && e.verdict != expected_verdict(r) =>
             {
                 problems.push(format!(
@@ -903,9 +906,9 @@ fn doc_problem(committed: Option<&str>, doc: &str) -> Option<String> {
 
 fn expected_verdict(r: &Row) -> &'static str {
     if r.generated == r.truth {
-        "handwritten bug"
+        "手写错"
     } else {
-        "generator bug"
+        "生成器错"
     }
 }
 
@@ -1167,7 +1170,7 @@ fn mutated_wire_name_is_reported_as_exactly_one_row() {
             truth: "\"call_1\"".into(),
         }]
     );
-    assert_eq!(expected_verdict(new[0]), "generator bug");
+    assert_eq!(expected_verdict(new[0]), "生成器错");
     assert_eq!(mutated.gen_extra, vec!["ToolCall.toolCallID".to_string()]);
     // Both directions catch it: Go output != serde output, and serde
     // rejects the Go output (missing `toolCallId`).
@@ -1210,10 +1213,10 @@ fn verdict_and_doc_checks_each_catch_their_mutation() {
     );
     // Contradicting verdict.
     let mut m = entries.clone();
-    m[at].verdict = "generator bug".into();
+    m[at].verdict = "生成器错".into();
     assert_eq!(
         verdict_problems(&c.rows, &m),
-        vec!["verdict `generator bug` for ImageResult | warnings contradicts the Rust output []"]
+        vec!["verdict `生成器错` for ImageResult | warnings contradicts the Rust output []"]
     );
     // Orphan verdict: an entry for a row that does not exist.
     let mut m = entries.clone();
@@ -1245,7 +1248,7 @@ fn verdict_and_doc_checks_each_catch_their_mutation() {
     let doc = render(f, r, &c.rows, &verdict_map(&entries));
     let scratch = doc.clone();
     assert_eq!(doc_problem(Some(&scratch), &doc), None);
-    let stale = scratch.replacen("handwritten bug", "generator bug", 1);
+    let stale = scratch.replacen("手写错", "生成器错", 1);
     assert_ne!(stale, scratch);
     assert!(doc_problem(Some(&stale), &doc).is_some());
     assert!(doc_problem(None, &doc).is_some());
