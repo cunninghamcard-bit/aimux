@@ -1,0 +1,26 @@
+{
+  "_comment": "Machine-readable known differences (verdict 已知差异). Read by wire_diff_<lang>.rs; no Markdown parsing. An entry applies only to a diff row whose fixture label AND leaf JSON path both match a scope item AND whose generated and serde values are both JSON numbers. phasesExcerpt is the authoritative in-repo copy of aimux-plan PHASES.md:307 (provenance only). KD-SWIFT-NUM-1 is planned and unmeasured: it is kept only if the post-install measurement confirms it. The every-ID-referenced check removes it otherwise.",
+  "entries": [
+    {
+      "id": "KD-SWIFT-NUM-1",
+      "language": "swift",
+      "status": "planned-unmeasured",
+      "limitationSource": "swift-corelibs-foundation / Foundation JSONDecoder: the public Decoder API exposes no raw number text, so JSONValue (Bool -> Int64 -> UInt64 -> Double) may decode integral floats (1.0, 1e3, -0.0) through the Int64 branch; serde_json::Value keeps them as f64.",
+      "phasesExcerpt": "- 判定文件新增第三种结论「已知差异」（2026-10-12，RFC 确认）：仅限生成侧受平台限制无法与 serde 对齐的情况；reason 必须写明限制来源并引用 PHASES 本条；每种语言单独登记，不得用来掩盖生成器错。Swift 侧 TextStreamPart 在 2.2 比较（手写 Swift 有该类型）。",
+      "scope": [
+        {
+          "fixture": "json-number-1.0",
+          "path": "raw.n"
+        },
+        {
+          "fixture": "json-number-1e3",
+          "path": "raw.n"
+        },
+        {
+          "fixture": "json-number-neg-zero",
+          "path": "raw.n"
+        }
+      ]
+    }
+  ]
+}
