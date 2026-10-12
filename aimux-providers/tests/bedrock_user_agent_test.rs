@@ -212,10 +212,20 @@ async fn bedrock_mantle_preset_user_agent_matches_the_ai_sdk() {
 }
 
 /// Anthropic-AWS (Claude Platform on AWS, `aws-external-anthropic`) is not
-/// Bedrock: it carries no `ai-sdk-amazon-bedrock` part. These pin what it
-/// sends today; see the PR for the open question of which AI SDK package it
-/// should mirror.
+/// Bedrock. `@ai-sdk/anthropic-aws@2.0.63`, run against a capturing mock
+/// fetch, sends (API key and SigV4 alike)
+/// `ai-sdk-provider-utils/5.0.53 node.js/v20.19.2 ai-sdk-anthropic-aws/2.0.63 node.js/v20.19.2`,
+/// a caller user-agent first; aimux leaves out the runtime fragments.
+const ANTHROPIC_AWS_UA: &str = "ai-sdk-provider-utils/5.0.53 ai-sdk-anthropic-aws/2.0.63";
+
 async fn anthropic_aws_user_agent(auth: AnthropicAwsAuth) -> (String, Option<String>) {
+    anthropic_aws_user_agent_with(auth, None).await
+}
+
+async fn anthropic_aws_user_agent_with(
+    auth: AnthropicAwsAuth,
+    headers: Option<HashMap<String, Option<String>>>,
+) -> (String, Option<String>) {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/messages"))
@@ -231,6 +241,8 @@ async fn anthropic_aws_user_agent(auth: AnthropicAwsAuth) -> (String, Option<Str
         base_url: Some(server.uri()),
         region: Some("us-east-1".to_string()),
         auth: Some(auth),
+        workspace_id: Some("ws".to_string()),
+        headers,
         ..Default::default()
     })
     .unwrap();
@@ -249,7 +261,20 @@ async fn anthropic_aws_user_agent(auth: AnthropicAwsAuth) -> (String, Option<Str
 async fn anthropic_aws_api_key_user_agent() {
     let (ua, _) =
         anthropic_aws_user_agent(AnthropicAwsAuth::ApiKey(Resolvable::Value("k".into()))).await;
-    assert_eq!(ua, "ai-sdk-provider-utils/5.0.53");
+    assert_eq!(ua, ANTHROPIC_AWS_UA);
+}
+
+#[tokio::test]
+async fn anthropic_aws_user_agent_follows_a_caller_user_agent() {
+    let (ua, _) = anthropic_aws_user_agent_with(
+        AnthropicAwsAuth::ApiKey(Resolvable::Value("k".into())),
+        Some(HashMap::from([(
+            "User-Agent".to_string(),
+            Some("app/1".to_string()),
+        )])),
+    )
+    .await;
+    assert_eq!(ua, format!("app/1 {ANTHROPIC_AWS_UA}"));
 }
 
 #[tokio::test]
@@ -262,8 +287,14 @@ async fn anthropic_aws_sigv4_user_agent() {
             region: "us-east-1".into(),
         })))
         .await;
-    assert!(authorization.unwrap().starts_with("AWS4-HMAC-SHA256 "));
-    assert_eq!(ua, "ai-sdk-provider-utils/5.0.53");
+    let authorization = authorization.unwrap();
+    // @ai-sdk/anthropic-aws@2.0.63 (aws4fetch) signs exactly these.
+    assert!(
+        authorization
+            .contains(" SignedHeaders=anthropic-version;anthropic-workspace-id;host;x-amz-date, "),
+        "{authorization}"
+    );
+    assert_eq!(ua, ANTHROPIC_AWS_UA);
 }
 
 fn bedrock_api_key_provider(
