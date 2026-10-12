@@ -154,6 +154,7 @@ except the file-size table (split scope is D10).
 | aimux-core/src/generate.rs | 1490 | src |
 | aimux-providers/src/open_responses.rs | 1424 | src |
 | aimux-providers/tests/conformance_test.rs | 1400 | test |
+| tools/aimux-codegen/src/extract.rs | 1372 | src |
 | bindings/python/src/lib.rs | 1340 | src |
 | aimux-providers/src/xai/responses/mod.rs | 1277 | src |
 | aimux-ffi/tests/exports_smoke_test.rs | 1269 | test |
@@ -165,7 +166,6 @@ except the file-size table (split scope is D10).
 | aimux-providers/src/huggingface/responses.rs | 1172 | src |
 | aimux-providers/tests/bedrock_convert_test.rs | 1170 | test |
 | aimux-providers/tests/openai_compatible_test.rs | 1152 | test |
-| tools/aimux-codegen/src/extract.rs | 1134 | src |
 | aimux-provider-utils/tests/streaming_tool_call_tracker_test.rs | 1105 | test |
 | aimux-providers/src/vertex/auth.rs | 1090 | src |
 | aimux-core/src/openai_output.rs | 1065 | src |
