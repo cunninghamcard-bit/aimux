@@ -416,9 +416,9 @@ pub fn create_amazon_bedrock(
                 async move { auth.credentials().await }
             }),
             SIGV4_SERVICE,
-        )
-        // aws4fetch (amazon-bedrock-sigv4-fetch.ts:75) signs `host;x-amz-date`.
-        .with_signing(SigV4Signing::Aws4Fetch),
+            // aws4fetch (amazon-bedrock-sigv4-fetch.ts:75) signs `host;x-amz-date`.
+            SigV4Signing::Aws4Fetch,
+        ),
         inner,
     });
 

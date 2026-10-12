@@ -67,4 +67,10 @@ W7（crate 拆分）属于阶段 3，不在 1W。W2/W3 只做 OpenAI chat（W.1�
 
 ## 已知偏差：Aws4Fetch 模式下调用方自带的 `x-amz-content-sha256`
 
-`SigV4Signing::Aws4Fetch` 模式下，如果调用方自己带了 `x-amz-content-sha256` 头，aimux 会照原样发出，但不签它（`aimux-provider-utils/src/sigv4_fetch.rs:169` 把它排除在 canonical headers 之外），payload hash 仍用实际 body 算。aws4fetch 1.0.20 的做法不同：这个头会进入 SignedHeaders（`aws4fetch.esm.mjs:109-110` 只排除 `UNSIGNABLE_HEADERS`），并且直接用它的值当 payload hash（`aws4fetch.esm.mjs:208` `hexBodyHash`）。目前没有调用方会传这个头（bedrock、anthropic_aws 都不传），所以先不改；等哪个调用方开始传了，再按 aws4fetch 对齐。
+`SigV4Signing::Aws4Fetch` 模式下，如果调用方自己带了 `x-amz-content-sha256` 头，aimux 会照原样发出，但不签它（`aimux-provider-utils/src/sigv4_fetch.rs:170` 把它排除在 canonical headers 之外），payload hash 仍用实际 body 算。aws4fetch 1.0.20 的做法不同：这个头会进入 SignedHeaders（`aws4fetch.esm.mjs:109-110` 只排除 `UNSIGNABLE_HEADERS`），并且直接用它的值当 payload hash（`aws4fetch.esm.mjs:208` `hexBodyHash`）。目前没有调用方会传这个头（bedrock、anthropic_aws 都不传），所以先不改；等哪个调用方开始传了，再按 aws4fetch 对齐。
+
+调用方自带的 `x-amz-security-token` 也一样：aimux 照发不签（`sigv4_fetch.rs:171`；凭据里有 session token 时才由签名器写入并签名）。aws4fetch 不把它算作 `UNSIGNABLE_HEADERS`，会签进去（凭据带 token 时用凭据的值覆盖，`aws4fetch.esm.mjs:106-108`）。目前同样没有调用方这样传，先不改。
+
+## Polly 的两条锁定测试不能删
+
+`aws_polly_signed_headers_are_locked` 和 `aws_polly_signed_headers_with_session_token_are_locked`（`aimux-providers/tests/sigv4_signed_headers_test.rs`）是 `SigV4Signing::AllHeaders` 规则唯一的守护：botocore 对照测试（`sigv4_fetch.rs` 里的 `signatures_match_botocore` 等）直接调 `sign_request`，绕过了 `SigV4Fetch::fetch` 里按模式过滤请求头的那一步，测不到 AllHeaders 签了哪些头。Polly 是目前唯一用 AllHeaders 的调用方，这两条测试删了，AllHeaders 的头部规则就没有任何测试了。

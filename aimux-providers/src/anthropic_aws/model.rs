@@ -50,10 +50,12 @@ pub(super) fn authenticated(
         Some(AnthropicAwsAuth::SigV4(credentials)) => {
             let inner = fetch.unwrap_or_else(default_fetch);
             // aws4fetch, like anthropic-aws-fetch.ts:73.
-            let signing: FetchFunction = Arc::new(
-                SigV4Fetch::new(inner, credentials, SIGV4_SERVICE)
-                    .with_signing(SigV4Signing::Aws4Fetch),
-            );
+            let signing: FetchFunction = Arc::new(SigV4Fetch::new(
+                inner,
+                credentials,
+                SIGV4_SERVICE,
+                SigV4Signing::Aws4Fetch,
+            ));
             (
                 ProviderHeaders::new(Credential::None, AuthScheme::Bearer, fixed, user_headers),
                 Some(signing),
