@@ -30,7 +30,7 @@ pub fn default_out_root(workspace: &Path) -> PathBuf {
 /// # Errors
 ///
 /// An output path that is absolute, climbs out with `..`, or would land in a
-/// `bindings` directory, and I/O errors.
+/// `bindings` directory (also through a symlink), and I/O errors.
 pub fn write(
     emitter: &dyn Emitter,
     model: &WireModel,
@@ -62,15 +62,42 @@ pub fn write(
     Ok(written)
 }
 
-/// Refuse any path with a `bindings` component.
+/// Canonical form of `path`: its nearest existing ancestor is canonicalized
+/// (resolving symlinks) and the not-yet-existing rest is appended.
+fn resolve(path: &Path) -> PathBuf {
+    let mut base = path;
+    let mut rest = Vec::new();
+    loop {
+        if let Ok(c) = base.canonicalize() {
+            return rest.iter().rev().fold(c, |p, n| p.join(n));
+        }
+        match (base.parent(), base.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                base = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
+/// Refuse any path that is, or resolves (through symlinks) to, a location
+/// with a `bindings` component or inside this workspace's `bindings/`.
 fn guard(path: &Path) -> Result<(), String> {
-    if path
-        .components()
-        .any(|c| matches!(c, Component::Normal(n) if n == "bindings"))
-    {
+    let bindings = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../bindings")
+        .canonicalize()
+        .ok();
+    let real = resolve(path);
+    let named = |p: &Path| {
+        p.components()
+            .any(|c| matches!(c, Component::Normal(n) if n == "bindings"))
+    };
+    if named(path) || named(&real) || bindings.is_some_and(|b| real.starts_with(b)) {
         return Err(format!(
-            "{}: emitters never write under bindings/",
-            path.display()
+            "{}: emitters never write under bindings/ (resolves to {})",
+            path.display(),
+            real.display()
         ));
     }
     Ok(())

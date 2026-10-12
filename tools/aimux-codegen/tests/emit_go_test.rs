@@ -121,6 +121,20 @@ fn write_targets_codegen_out_and_never_bindings() {
     let err = emit::write(&Go, &model(), &dir.join("bindings")).unwrap_err();
     assert!(err.contains("never write under bindings/"), "{err}");
     assert!(!dir.join("bindings").exists());
+    // Mutation (symlink bypass): an innocently named link whose target is a
+    // `bindings` directory. The guard resolves the link and refuses before
+    // anything is written there.
+    let real = dir.join("bindings");
+    std::fs::create_dir_all(&real).unwrap();
+    let link = dir.join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let err = emit::write(&Go, &model(), &link).unwrap_err();
+    assert!(err.contains("never write under bindings/"), "{err}");
+    assert_eq!(std::fs::read_dir(&real).unwrap().count(), 0);
+    // A link one level up, with the rest of the path not yet existing.
+    let err = emit::write(&Go, &model(), &link.join("new/deeper")).unwrap_err();
+    assert!(err.contains("never write under bindings/"), "{err}");
+    assert_eq!(std::fs::read_dir(&real).unwrap().count(), 0);
     assert_eq!(
         emit::default_out_root(&workspace()),
         workspace().join("target/codegen-out")
@@ -179,5 +193,35 @@ fn generated_go_is_gofmt_clean() {
     assert!(text.contains(from), "ToolCall field layout changed");
     std::fs::write(&path, text.replacen(from, "\tToolCallId string", 1)).unwrap();
     assert_eq!(gofmt_dirty(&go), vec!["types.go".to_string()]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// An emitter that returns one fixed output path.
+struct OnePath(&'static str);
+
+impl Emitter for OnePath {
+    fn lang(&self) -> &'static str {
+        "one"
+    }
+    fn emit(&self, _: &WireModel) -> Vec<aimux_codegen::Output> {
+        vec![aimux_codegen::Output {
+            path: PathBuf::from(self.0),
+            content: String::new(),
+        }]
+    }
+}
+
+#[test]
+fn output_paths_with_parent_dir_or_absolute_are_rejected() {
+    let dir = std::env::temp_dir().join(format!("aimux-emit-esc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for p in ["../x.go", "a/../../x.go", "/tmp/x.go"] {
+        let err = emit::write(&OnePath(p), &model(), &dir).unwrap_err();
+        assert!(err.contains("output path escapes"), "{p}: {err}");
+    }
+    assert_eq!(
+        emit::write(&OnePath("ok.go"), &model(), &dir).unwrap(),
+        vec![dir.join("one/ok.go")]
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
