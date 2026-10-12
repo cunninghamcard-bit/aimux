@@ -40,6 +40,10 @@ pub fn write(
     // The root is canonicalized once: symlinks in its own path (/tmp,
     // /workspace, a symlinked checkout) are resolved, not rejected. The
     // bindings checks run on the resolved root.
+    // Literal check first, before anything is resolved: `target/../bindings`
+    // or a `bindings` component that is itself a symlink elsewhere is
+    // refused as written.
+    reject_named(out_root)?;
     let root = resolve(out_root);
     guard(&root)?;
     let lang = Path::new(emitter.lang());
@@ -110,6 +114,22 @@ fn resolve(path: &Path) -> PathBuf {
     }
 }
 
+fn named_bindings(p: &Path) -> bool {
+    p.components()
+        .any(|c| matches!(c, Component::Normal(n) if n == "bindings"))
+}
+
+/// Refuse a path whose literal (unresolved) components include `bindings`.
+fn reject_named(path: &Path) -> Result<(), String> {
+    if named_bindings(path) {
+        return Err(format!(
+            "{}: emitters never write under bindings/ (literal path)",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Refuse any path that is, or resolves to, a location with a `bindings`
 /// component or inside this workspace's `bindings/`.
 fn guard(path: &Path) -> Result<(), String> {
@@ -118,11 +138,10 @@ fn guard(path: &Path) -> Result<(), String> {
         .canonicalize()
         .ok();
     let real = resolve(path);
-    let named = |p: &Path| {
-        p.components()
-            .any(|c| matches!(c, Component::Normal(n) if n == "bindings"))
-    };
-    if named(path) || named(&real) || bindings.is_some_and(|b| real.starts_with(b)) {
+    if named_bindings(path)
+        || named_bindings(&real)
+        || bindings.is_some_and(|b| real.starts_with(b))
+    {
         return Err(format!(
             "{}: emitters never write under bindings/ (resolves to {})",
             path.display(),

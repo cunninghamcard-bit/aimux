@@ -274,3 +274,36 @@ fn output_root_symlinked_into_bindings_is_rejected() {
     assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn literal_parent_dir_into_bindings_is_rejected_before_resolving() {
+    // `target/../bindings/...` is refused on its literal components. Here
+    // <dir>/bindings is a symlink to <dir>/elsewhere, so the resolved path
+    // has no `bindings` component and only the literal check catches it.
+    let dir = std::env::temp_dir().join(format!("aimux-emit-literal-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("target")).unwrap();
+    std::fs::create_dir_all(dir.join("elsewhere")).unwrap();
+    std::os::unix::fs::symlink(dir.join("elsewhere"), dir.join("bindings")).unwrap();
+    for root in [
+        dir.join("target/../bindings"),
+        dir.join("target/../bindings/go"),
+    ] {
+        let err = emit::write(&OnePath("ok.go"), &model(), &root).unwrap_err();
+        assert!(err.contains("never write under bindings/"), "{err}");
+    }
+    assert_eq!(std::fs::read_dir(dir.join("elsewhere")).unwrap().count(), 0);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn default_out_root_under_worktree_target_is_writable() {
+    // The worktree's target/ may be a symlink (mbx: target ->
+    // ~/.cache/mbx/targets/...). It is in the root's own path, so it is
+    // resolved, not refused.
+    let root = emit::default_out_root(&workspace());
+    let paths = emit::write(&OnePath("ok.go"), &model(), &root).unwrap();
+    assert_eq!(paths.len(), 1);
+    assert!(paths[0].is_file());
+    let _ = std::fs::remove_dir_all(paths[0].parent().unwrap());
+}
