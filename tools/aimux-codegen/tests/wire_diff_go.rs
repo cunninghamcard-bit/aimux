@@ -15,6 +15,9 @@
 //!   bug may remain).
 //! - Real `go` is required: if it is missing the test fails.
 
+#[path = "common/go_fixtures.rs"]
+mod go_fixtures;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -42,11 +45,27 @@ fn workspace() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+/// serde decode of a JSON value as the fixture's Rust type, re-serialized:
+/// checks the Go → Rust direction (the generated Go's output is accepted by
+/// serde and means the same value).
+pub type Back = fn(&Value) -> Result<Value, String>;
+
+/// [`Back`] for a `Deserialize` aimux-core type.
+///
+/// # Errors
+///
+/// serde rejects the value.
+pub fn back<T: serde::Serialize + serde::de::DeserializeOwned>(v: &Value) -> Result<Value, String> {
+    let t: T = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+    serde_json::to_value(&t).map_err(|e| e.to_string())
+}
+
 /// One fixture: label, Go type name (same in both packages), serde output.
 struct Fixture {
     label: &'static str,
     ty: &'static str,
     json: Value,
+    back: Option<Back>,
 }
 
 fn fx<T: serde::Serialize>(label: &'static str, ty: &'static str, v: &T) -> Fixture {
@@ -54,6 +73,19 @@ fn fx<T: serde::Serialize>(label: &'static str, ty: &'static str, v: &T) -> Fixt
         label,
         ty,
         json: serde_json::to_value(v).expect("serde serializes the aimux-core value"),
+        back: None,
+    }
+}
+
+/// [`fx`] for a type that also implements `Deserialize`.
+fn fxd<T: serde::Serialize + serde::de::DeserializeOwned>(
+    label: &'static str,
+    ty: &'static str,
+    v: &T,
+) -> Fixture {
+    Fixture {
+        back: Some(back::<T>),
+        ..fx(label, ty, v)
     }
 }
 
@@ -214,9 +246,9 @@ fn fixtures() -> Vec<Fixture> {
     answered.choices[0].finish_reason = Some("stop".into());
     answered.system_fingerprint = Some("fp_1".into());
     vec![
-        fx("usage-full", "Usage", &usage),
-        fx("usage-default", "Usage", &Usage::default()),
-        fx(
+        fxd("usage-full", "Usage", &usage),
+        fxd("usage-default", "Usage", &Usage::default()),
+        fxd(
             "finish-reason",
             "FinishReason",
             &FinishReason {
@@ -224,26 +256,132 @@ fn fixtures() -> Vec<Fixture> {
                 raw: Some("tool_use".into()),
             },
         ),
-        fx("tool-call", "ToolCall", &tool_call),
-        fx(
+        fxd("tool-call", "ToolCall", &tool_call),
+        fxd(
             "response-metadata-empty",
             "ResponseMetadata",
             &ResponseMetadata::default(),
         ),
         fx("chat-completion", "ChatCompletion", &completion),
         fx("chat-completion-chunk", "ChatCompletionChunk", &chunk),
-        fx("trace-record", "TraceRecord", &trace),
-        fx("trace-record-streamed", "TraceRecord", &trace_streamed),
-        fx("timeout-configuration", "TimeoutConfiguration", &timeout),
+        fxd("trace-record", "TraceRecord", &trace),
+        fxd("trace-record-streamed", "TraceRecord", &trace_streamed),
+        fxd("timeout-configuration", "TimeoutConfiguration", &timeout),
         fx("chat-completion-answer", "ChatCompletion", &answered),
-        fx("image-result-overlap", "ImageResult", &image),
-        fx("image-result-binary", "ImageResult", &image_bytes),
-        fx(
+        fxd("image-result-overlap", "ImageResult", &image),
+        fxd("image-result-binary", "ImageResult", &image_bytes),
+        fxd(
             "model-message-text",
             "ModelMessage",
             &ModelMessage::text(Role::User, "hi"),
         ),
     ]
+    .into_iter()
+    .chain(
+        go_fixtures::coverage_fixtures()
+            .into_iter()
+            .map(|(label, ty, json, back)| Fixture {
+                label,
+                ty,
+                json,
+                back,
+            }),
+    )
+    .chain(gen_only_fixtures())
+    .collect()
+}
+
+/// Fixtures for generated types with no hand-written counterpart, run
+/// through the generated Go only: a tri-state field (absent / null /
+/// present), and two proxied types (`from`/`into` = `AiMuxErrorWire`,
+/// `into`/`try_from` = `String`).
+fn gen_only_fixtures() -> Vec<Fixture> {
+    use aimux_core::error::AiMuxError;
+    use aimux_core::evaluation_model::{BooleanCriteria, EvaluationInput};
+    use aimux_core::shared::Size;
+    vec![
+        fxd(
+            "tri-state-absent",
+            "BooleanCriteria",
+            &BooleanCriteria {
+                true_: None,
+                false_: None,
+            },
+        ),
+        fxd(
+            "tri-state-null",
+            "BooleanCriteria",
+            &BooleanCriteria {
+                true_: Some(None),
+                false_: None,
+            },
+        ),
+        fxd(
+            "tri-state-present",
+            "BooleanCriteria",
+            &BooleanCriteria {
+                true_: Some(Some(EvaluationInput::Text("yes".into()))),
+                false_: Some(None),
+            },
+        ),
+        fxd(
+            "proxy-aimux-error",
+            "AiMuxError",
+            &AiMuxError::NoSuchTool {
+                tool_name: "search".into(),
+                available_tools: Some(vec!["get_weather".into()]),
+                tool_input: None,
+            },
+        ),
+        fxd(
+            "proxy-size",
+            "Size",
+            &Size::try_from("1024x768".to_string()).unwrap(),
+        ),
+    ]
+}
+
+/// Type names declared at the top level of a Go file (`type X ...`).
+fn go_type_names(src: &str) -> BTreeSet<String> {
+    src.lines()
+        .filter_map(|l| l.strip_prefix("type "))
+        .filter_map(|l| l.split([' ', '[']).next())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Types declared by the hand-written Go (`types.go` + `multimodal_types.go`).
+fn hand_types() -> BTreeSet<String> {
+    let dir = workspace().join("bindings/go");
+    let mut out = BTreeSet::new();
+    for f in ["types.go", "multimodal_types.go"] {
+        out.extend(go_type_names(
+            &std::fs::read_to_string(dir.join(f)).unwrap(),
+        ));
+    }
+    out
+}
+
+/// IR type names (the generated Go's top-level types, excluding variant
+/// payload structs).
+fn generated_types() -> BTreeSet<String> {
+    wire::from_inputs(&Inputs::from_workspace(&workspace()))
+        .unwrap()
+        .types
+        .into_iter()
+        .map(|t| t.name)
+        .collect()
+}
+
+/// Hand-written types with a generated counterpart that no fixture has as
+/// its root type.
+fn uncovered(fixtures: &[Fixture]) -> Vec<String> {
+    let gen_t = generated_types();
+    hand_types()
+        .into_iter()
+        .filter(|t| gen_t.contains(t))
+        .filter(|t| !fixtures.iter().any(|f| f.ty == t))
+        .collect()
 }
 
 /// Output of one fixture through both Go type sets.
@@ -313,11 +451,18 @@ fn run_go(label: &str, fixtures: &[Fixture], mutate: impl Fn(String) -> String) 
         "package hand\n\n// RepairToolCallFunc stands in for bindings/go/repair.go (cgo).\ntype RepairToolCallFunc func()\n",
     )
     .unwrap();
+    let hand = hand_types();
     let mut cases = String::new();
     for t in fixtures.iter().map(|f| f.ty).collect::<BTreeSet<_>>() {
-        cases.push_str(&format!(
-            "\t\tcase {t:?}:\n\t\t\tr = run[gen.{t}, hand.{t}](f.Label, f.JSON)\n"
-        ));
+        if hand.contains(t) {
+            cases.push_str(&format!(
+                "\t\tcase {t:?}:\n\t\t\tr = run[gen.{t}, hand.{t}](f.Label, f.JSON)\n"
+            ));
+        } else {
+            cases.push_str(&format!(
+                "\t\tcase {t:?}:\n\t\t\tr = result{{Label: f.Label}}\n\t\t\tr.GenOut, r.GenErr = through[gen.{t}](f.JSON)\n"
+            ));
+        }
     }
     let main = format!(
         r#"package main
@@ -554,11 +699,38 @@ fn compare(fixtures: &[Fixture], run: &GoRun) -> Compared {
         gen_mismatch: Vec::new(),
         errors: Vec::new(),
     };
+    let hand = hand_types();
     for f in fixtures {
         let r = run.results.iter().find(|r| r.label == f.label).unwrap();
         if !r.gen_err.is_empty() {
             c.errors
                 .push(format!("{} (generated): {}", f.label, r.gen_err));
+        }
+        // Go → Rust: serde must decode the generated Go's output back to
+        // the same value.
+        if let (Some(back), Some(out)) = (f.back, r.gen_out.as_ref()) {
+            match back(out) {
+                Ok(v) if v == f.json => {}
+                Ok(v) => c.gen_mismatch.push(format!(
+                    "{}: serde decode of the generated Go output gives {v}, not {}",
+                    f.label, f.json
+                )),
+                Err(e) => c.gen_mismatch.push(format!(
+                    "{}: serde rejects the generated Go output {out}: {e}",
+                    f.label
+                )),
+            }
+        }
+        if !hand.contains(f.ty) {
+            if r.gen_out.as_ref() != Some(&f.json) {
+                c.gen_mismatch.push(format!(
+                    "{}: rust {} != generated {}",
+                    f.label,
+                    f.json,
+                    show(r.gen_out.as_ref())
+                ));
+            }
+            continue;
         }
         if !r.hand_err.is_empty() {
             c.rows.push(Row {
@@ -568,6 +740,16 @@ fn compare(fixtures: &[Fixture], run: &GoRun) -> Compared {
                 handwritten: r.hand_err.clone(),
                 truth: "ok".into(),
             });
+            // The hand-written side has no output to compare field by field.
+            if r.gen_out.as_ref() != Some(&f.json) {
+                c.gen_mismatch.push(format!(
+                    "{}: rust {} != generated {}",
+                    f.label,
+                    f.json,
+                    show(r.gen_out.as_ref())
+                ));
+            }
+            continue;
         }
         if r.gen_out.as_ref() != Some(&f.json) {
             c.gen_mismatch.push(format!(
@@ -576,6 +758,23 @@ fn compare(fixtures: &[Fixture], run: &GoRun) -> Compared {
                 f.json,
                 show(r.gen_out.as_ref())
             ));
+        }
+        // A hand-written type that marshals to `{}` (e.g. StreamPart, whose
+        // fields are all `json:"-"`) drops the whole value: one row.
+        let empty = r.hand_out.as_ref().is_some_and(|h| h == &json!({}));
+        if empty && f.json.as_object().is_some_and(|o| !o.is_empty()) {
+            if r.gen_out.as_ref() != Some(&f.json) {
+                c.gen_mismatch
+                    .push(format!("{}: rust {} != generated", f.label, f.json));
+            }
+            c.rows.push(Row {
+                ty: f.ty.into(),
+                field: "(all fields)".into(),
+                generated: show(r.gen_out.as_ref()),
+                handwritten: "{}".into(),
+                truth: f.json.to_string(),
+            });
+            continue;
         }
         diff(
             f.ty,
@@ -673,7 +872,127 @@ fn render(
         s.push_str(&format!("; {k}: {n}"));
     }
     s.push_str(".\n");
+    let hand = hand_types();
+    let gen_t = generated_types();
+    let covered = hand.iter().filter(|t| gen_t.contains(*t)).count();
+    s.push_str(&format!(
+        "\n## Coverage\n\nHand-written types with a generated counterpart: {covered}, each with at least one fixture (test `every_hand_written_type_with_a_generated_counterpart_has_a_fixture`). Hand-written types with no generated counterpart: {}.\n",
+        hand.iter()
+            .filter(|t| !gen_t.contains(*t))
+            .map(|t| format!("`{t}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    let only: Vec<&String> = gen_t.iter().filter(|t| !hand.contains(*t)).collect();
+    s.push_str(&format!(
+        "\n## Generated types with no hand-written counterpart ({})\n\n",
+        only.len()
+    ));
+    for t in only {
+        s.push_str(&format!("- `{t}`\n"));
+    }
     s
+}
+
+/// One Go run over all fixtures, shared by the tests below.
+fn shared() -> &'static (Vec<Fixture>, GoRun) {
+    static RUN: std::sync::OnceLock<(Vec<Fixture>, GoRun)> = std::sync::OnceLock::new();
+    RUN.get_or_init(|| {
+        let f = fixtures();
+        let r = run_go("shared", &f, |s| s);
+        (f, r)
+    })
+}
+
+fn gen_out(label: &str) -> (&'static Value, Value) {
+    let (f, r) = shared();
+    let fx = f.iter().find(|x| x.label == label).unwrap();
+    let out = r
+        .results
+        .iter()
+        .find(|x| x.label == label)
+        .and_then(|x| x.gen_out.clone())
+        .unwrap_or(Value::Null);
+    (&fx.json, out)
+}
+
+#[test]
+fn every_hand_written_type_with_a_generated_counterpart_has_a_fixture() {
+    let f = fixtures();
+    assert_eq!(uncovered(&f), Vec::<String>::new());
+    // Mutation: dropping every fixture of one type is reported, by name.
+    let without: Vec<Fixture> = f
+        .into_iter()
+        .filter(|x| x.ty != "VideoPollOptions")
+        .collect();
+    assert_eq!(uncovered(&without), vec!["VideoPollOptions".to_string()]);
+}
+
+/// (a) Both directions: serde JSON → Go decode → Go encode equals the serde
+/// output, and serde decodes the Go output back to the same value.
+#[test]
+fn decode_and_encode_directions_match_serde() {
+    let (f, r) = shared();
+    let c = compare(f, r);
+    assert!(c.errors.is_empty(), "{:#?}", c.errors);
+    assert!(c.gen_mismatch.is_empty(), "{:#?}", c.gen_mismatch);
+    let with_back = f.iter().filter(|x| x.back.is_some()).count();
+    assert!(
+        with_back > 100,
+        "only {with_back} fixtures checked Go → serde"
+    );
+}
+
+/// (b) A field Rust writes as `null` stays `null` in the generated Go.
+#[test]
+fn null_fields_stay_null() {
+    let (truth, out) = gen_out("chat-completion-chunk");
+    assert_eq!(truth["choices"][0]["finish_reason"], Value::Null);
+    assert!(
+        out["choices"][0]
+            .as_object()
+            .unwrap()
+            .contains_key("finish_reason")
+    );
+    assert_eq!(out["choices"][0]["finish_reason"], Value::Null);
+    let (truth, out) = gen_out("chat-completion");
+    assert_eq!(truth["choices"][0]["message"]["content"], Value::Null);
+    assert_eq!(out, *truth);
+}
+
+/// (c) Tri-state (`BooleanCriteria.true`): absent, `null`, and a value
+/// round-trip distinctly; Nullable (`ChatCompletionMessage.content`): null
+/// and present.
+#[test]
+fn tri_state_and_nullable_round_trip() {
+    for (label, expected) in [
+        ("tri-state-absent", json!({})),
+        ("tri-state-null", json!({"true": null})),
+        ("tri-state-present", json!({"true": "yes", "false": null})),
+    ] {
+        let (truth, out) = gen_out(label);
+        assert_eq!(truth, &expected, "{label}: serde");
+        assert_eq!(out, expected, "{label}: generated Go");
+    }
+    let (_, out) = gen_out("chat-completion-answer");
+    assert_eq!(out["choices"][0]["message"]["content"], "It is sunny.");
+}
+
+/// (d) A proxied type and a generic instantiation against serde output.
+#[test]
+fn proxied_and_generic_types_match_serde() {
+    for label in [
+        "proxy-aimux-error",
+        "proxy-size",
+        "cov-StreamPart-ToolCall",
+        "cov-StreamPart-ToolApprovalRequest",
+        "cov-StreamPart-ReasoningFile",
+    ] {
+        let (truth, out) = gen_out(label);
+        assert_eq!(&out, truth, "{label}");
+    }
+    assert_eq!(gen_out("proxy-size").0, &json!("1024x768"));
+    assert_eq!(gen_out("proxy-aimux-error").0["name"], "AI_NoSuchToolError");
 }
 
 #[test]
@@ -743,7 +1062,10 @@ fn generated_go_matches_rust_and_diff_doc_is_current() {
 /// generator check flags it.
 #[test]
 fn mutated_wire_name_is_reported_as_exactly_one_row() {
-    let fixtures = fixtures();
+    let fixtures: Vec<Fixture> = fixtures()
+        .into_iter()
+        .filter(|f| f.label == "tool-call")
+        .collect();
     let base = compare(&fixtures, &run_go("base", &fixtures, |s| s));
     let mutated_run = run_go("mutated", &fixtures, |s| {
         let start = s.find("\ntype ToolCall struct {").expect("ToolCall struct");
@@ -776,6 +1098,14 @@ fn mutated_wire_name_is_reported_as_exactly_one_row() {
     );
     assert_eq!(expected_verdict(new[0]), "generator bug");
     assert_eq!(mutated.gen_extra, vec!["ToolCall.toolCallID".to_string()]);
-    assert_eq!(mutated.gen_mismatch.len(), 1, "{:?}", mutated.gen_mismatch);
-    assert!(mutated.gen_mismatch[0].starts_with("tool-call:"));
+    // Both directions catch it: Go output != serde output, and serde
+    // rejects the Go output (missing `toolCallId`).
+    assert_eq!(mutated.gen_mismatch.len(), 2, "{:?}", mutated.gen_mismatch);
+    assert!(
+        mutated
+            .gen_mismatch
+            .iter()
+            .all(|m| m.starts_with("tool-call:"))
+    );
+    assert!(mutated.gen_mismatch[0].contains("missing field `toolCallId`"));
 }

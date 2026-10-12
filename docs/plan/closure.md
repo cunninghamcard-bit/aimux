@@ -10,7 +10,7 @@ except the file-size table (split scope is D10).
 |---|---|
 | FFI `aimux_*_new` (name ends in `_new`) | 29 |
 | FFI `aimux_*_new*` (incl. `_new_with_base` etc.) | 51 |
-| .rs files > 1000 lines (all tracked) | 36 |
+| .rs files > 1000 lines (all tracked) | 37 |
 | .rs files > 1000 lines (excluding `*/tests/*`) | 24 |
 | ts-rs `#[derive(TS)]` sites | 201 |
 | `from_resolved` occurrences | 0 |
@@ -166,6 +166,7 @@ except the file-size table (split scope is D10).
 | aimux-providers/src/huggingface/responses.rs | 1172 | src |
 | aimux-providers/tests/bedrock_convert_test.rs | 1170 | test |
 | aimux-providers/tests/openai_compatible_test.rs | 1152 | test |
+| tools/aimux-codegen/tests/wire_diff_go.rs | 1111 | test |
 | aimux-provider-utils/tests/streaming_tool_call_tracker_test.rs | 1105 | test |
 | aimux-providers/src/vertex/auth.rs | 1090 | src |
 | aimux-core/src/openai_output.rs | 1065 | src |
