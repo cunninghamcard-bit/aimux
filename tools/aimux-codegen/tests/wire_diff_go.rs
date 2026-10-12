@@ -345,38 +345,104 @@ fn gen_only_fixtures() -> Vec<Fixture> {
     ]
 }
 
-/// Type names declared at the top level of a Go file: single `type X ...`
-/// lines and the specs of grouped `type ( ... )` declarations.
-fn go_type_names(src: &str) -> BTreeSet<String> {
-    let first = |l: &str| l.split([' ', '\t', '[']).next().map(str::to_string);
-    let mut names = BTreeSet::new();
-    let mut grouped = false;
-    for l in src.lines() {
-        if grouped {
-            if l.starts_with(')') {
-                grouped = false;
-            } else if let Some(spec) = l.strip_prefix('\t') {
-                // Only a spec at the group's own indent, not a nested field.
-                if !spec.starts_with(['\t', ' ', '/', '}']) && !spec.is_empty() {
-                    names.extend(first(spec));
-                }
-            }
-        } else if l.trim_end() == "type (" {
-            grouped = true;
-        } else if let Some(spec) = l.strip_prefix("type ") {
-            names.extend(first(spec));
-        }
-    }
-    names
+/// go/parser program: reads one Go file on stdin and prints the name of
+/// every top-level `TypeSpec`, one per line.
+const TYPE_NAMES_GO: &str = r#"package main
+
+import (
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io"
+	"os"
+)
+
+func main() {
+	src, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		panic(err)
+	}
+	f, err := parser.ParseFile(token.NewFileSet(), "in.go", src, parser.SkipObjectResolution)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	for _, d := range f.Decls {
+		gd, ok := d.(*ast.GenDecl)
+		if !ok || gd.Tok != token.TYPE {
+			continue
+		}
+		for _, s := range gd.Specs {
+			fmt.Println(s.(*ast.TypeSpec).Name.Name)
+		}
+	}
 }
+"#;
+
+/// Type names declared at the top level of a Go file, from go/parser
+/// (single, grouped, single-line grouped, generic and alias declarations).
+fn go_type_names(src: &str) -> BTreeSet<String> {
+    go_type_names_with(TYPE_NAMES_GO, src)
+}
+
+fn go_type_names_with(program: &str, src: &str) -> BTreeSet<String> {
+    use std::io::Write as _;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "aimux-go-type-names-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("go.mod"), "module typenames\n\ngo 1.24\n").unwrap();
+    std::fs::write(dir.join("main.go"), program).unwrap();
+    let mut child = Command::new("go")
+        .args(["run", "."])
+        .current_dir(&dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("`go` is required for the Go diff test");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(src.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        out.status.success(),
+        "go/parser failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+const TYPE_NAMES_SRC: &str = "package x\n\ntype A struct {\n\tF int\n}\n\ntype (\n\t// B doc.\n\tB string\n\tC[T any] struct {\n\t\tV T\n\t}\n\tD = A\n)\n\ntype E[T any] []T\n\ntype ( // comment\n\tF int\n)\n\ntype (G int; H string)\n\nfunc f() {\n\ttype Local int\n}\n";
 
 #[test]
 fn go_type_names_counts_single_and_grouped_declarations() {
-    let src = "package x\n\ntype A struct {\n\tF int\n}\n\ntype (\n\t// B doc.\n\tB string\n\tC[T any] struct {\n\t\tV T\n\t}\n\tD = A\n)\n\ntype E[T any] []T\n";
-    assert_eq!(
-        go_type_names(src),
-        ["A", "B", "C", "D", "E"].map(String::from).into()
-    );
+    let all = ["A", "B", "C", "D", "E", "F", "G", "H"]
+        .map(String::from)
+        .into();
+    assert_eq!(go_type_names(TYPE_NAMES_SRC), all);
+    // Mutation: count only the first spec of each declaration (what a
+    // line-prefix scan of `type X` effectively did for groups). The grouped,
+    // commented and single-line groups lose names, so the check goes red.
+    let first_only = TYPE_NAMES_GO.replace("range gd.Specs {", "range gd.Specs[:1] {");
+    assert_ne!(first_only, TYPE_NAMES_GO);
+    let got = go_type_names_with(&first_only, TYPE_NAMES_SRC);
+    assert_ne!(got, all);
+    assert_eq!(got, ["A", "B", "E", "F", "G"].map(String::from).into());
 }
 
 /// Types declared by the hand-written Go (`types.go` + `multimodal_types.go`).
