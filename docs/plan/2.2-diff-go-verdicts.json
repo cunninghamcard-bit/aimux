@@ -3,7 +3,7 @@
     "type": "AudioData",
     "field": "(value)",
     "verdict": "手写错",
-    "reason": "Reviewer A's evidence: Rust writes Vec<u8> as a JSON array of numbers (AudioData::Binary, speech_model.rs:19-25; VideoData::Binary { data: Vec<u8> }, video_model.rs:101). The hand-written `type Bytes []byte` (multimodal_types.go:15), used e.g. by VideoData.Data (multimodal_types.go:255), always encodes as a base64 string. The generated Go uses []U8, whose MarshalJSON writes numbers. 见 D33"
+    "reason": "Reviewer A's evidence: Rust writes Vec<u8> as a JSON array of numbers (AudioData::Binary, speech_model.rs:19-25; VideoData::Binary { data: Vec<u8> }, video_model.rs:101). The hand-written `type Bytes []byte` (multimodal_types.go:17), used e.g. by VideoData.Data (multimodal_types.go:255), always encodes as a base64 string. The generated Go uses []U8, whose MarshalJSON writes numbers. 见 aimux 计划 DECISIONS D33（待 Trey）"
   },
   {
     "type": "EmbeddingResult",
@@ -141,13 +141,13 @@
     "type": "ImageOutputs",
     "field": "[0]",
     "verdict": "手写错",
-    "reason": "Reviewer A's evidence: Rust writes Vec<u8> as a JSON array of numbers (AudioData::Binary, speech_model.rs:19-25; VideoData::Binary { data: Vec<u8> }, video_model.rs:101). The hand-written `type Bytes []byte` (multimodal_types.go:15), used e.g. by VideoData.Data (multimodal_types.go:255), always encodes as a base64 string. The generated Go uses []U8, whose MarshalJSON writes numbers. 见 D33"
+    "reason": "Reviewer A's evidence: Rust writes Vec<u8> as a JSON array of numbers (AudioData::Binary, speech_model.rs:19-25; VideoData::Binary { data: Vec<u8> }, video_model.rs:101). The hand-written `type Bytes []byte` (multimodal_types.go:17), used e.g. by VideoData.Data (multimodal_types.go:255), always encodes as a base64 string. The generated Go uses []U8, whose MarshalJSON writes numbers. 见 aimux 计划 DECISIONS D33（待 Trey）"
   },
   {
     "type": "ImageResult",
     "field": "images[0]",
     "verdict": "手写错",
-    "reason": "Reviewer A's evidence: Rust writes Vec<u8> as a JSON array of numbers (AudioData::Binary, speech_model.rs:19-25; VideoData::Binary { data: Vec<u8> }, video_model.rs:101). The hand-written `type Bytes []byte` (multimodal_types.go:15), used e.g. by VideoData.Data (multimodal_types.go:255), always encodes as a base64 string. The generated Go uses []U8, whose MarshalJSON writes numbers. 见 D33"
+    "reason": "Reviewer A's evidence: Rust writes Vec<u8> as a JSON array of numbers (AudioData::Binary, speech_model.rs:19-25; VideoData::Binary { data: Vec<u8> }, video_model.rs:101). The hand-written `type Bytes []byte` (multimodal_types.go:17), used e.g. by VideoData.Data (multimodal_types.go:255), always encodes as a base64 string. The generated Go uses []U8, whose MarshalJSON writes numbers. 见 aimux 计划 DECISIONS D33（待 Trey）"
   },
   {
     "type": "ImageResult",
@@ -231,7 +231,7 @@
     "type": "TranscriptionCallOptions",
     "field": "audio",
     "verdict": "手写错",
-    "reason": "Reviewer A's evidence: Rust writes Vec<u8> as a JSON array of numbers (AudioData::Binary, speech_model.rs:19-25; VideoData::Binary { data: Vec<u8> }, video_model.rs:101). The hand-written `type Bytes []byte` (multimodal_types.go:15), used e.g. by VideoData.Data (multimodal_types.go:255), always encodes as a base64 string. The generated Go uses []U8, whose MarshalJSON writes numbers. 见 D33"
+    "reason": "Reviewer A's evidence: Rust writes Vec<u8> as a JSON array of numbers (AudioData::Binary, speech_model.rs:19-25; VideoData::Binary { data: Vec<u8> }, video_model.rs:101). The hand-written `type Bytes []byte` (multimodal_types.go:17), used e.g. by VideoData.Data (multimodal_types.go:255), always encodes as a base64 string. The generated Go uses []U8, whose MarshalJSON writes numbers. 见 aimux 计划 DECISIONS D33（待 Trey）"
   },
   {
     "type": "TranscriptionResult",
@@ -255,7 +255,7 @@
     "type": "VideoData",
     "field": "data",
     "verdict": "手写错",
-    "reason": "Reviewer A's evidence: Rust writes Vec<u8> as a JSON array of numbers (AudioData::Binary, speech_model.rs:19-25; VideoData::Binary { data: Vec<u8> }, video_model.rs:101). The hand-written `type Bytes []byte` (multimodal_types.go:15), used e.g. by VideoData.Data (multimodal_types.go:255), always encodes as a base64 string. The generated Go uses []U8, whose MarshalJSON writes numbers. 见 D33"
+    "reason": "Reviewer A's evidence: Rust writes Vec<u8> as a JSON array of numbers (AudioData::Binary, speech_model.rs:19-25; VideoData::Binary { data: Vec<u8> }, video_model.rs:101). The hand-written `type Bytes []byte` (multimodal_types.go:17), used e.g. by VideoData.Data (multimodal_types.go:255), always encodes as a base64 string. The generated Go uses []U8, whose MarshalJSON writes numbers. 见 aimux 计划 DECISIONS D33（待 Trey）"
   },
   {
     "type": "VideoData",
