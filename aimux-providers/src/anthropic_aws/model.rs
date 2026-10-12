@@ -10,7 +10,9 @@
 use std::sync::Arc;
 
 use crate::shared::ProviderHeaders;
-use aimux_provider_utils::{FetchFunction, HeaderMapOpt, Resolvable, SigV4Fetch, default_fetch};
+use aimux_provider_utils::{
+    FetchFunction, HeaderMapOpt, Resolvable, SigV4Fetch, SigV4Signing, default_fetch,
+};
 
 use crate::anthropic::AnthropicMessagesModel;
 use crate::shared::{AuthScheme, Credential, UserAgentFetch};
@@ -62,10 +64,10 @@ pub(super) fn authenticated(
     match auth {
         Some(AnthropicAwsAuth::SigV4(credentials)) => {
             let inner = fetch.unwrap_or_else(default_fetch);
-            // aws4fetch (anthropic-aws-fetch.ts:73) sends and signs no
-            // x-amz-content-sha256.
+            // aws4fetch, like anthropic-aws-fetch.ts:73.
             let signing: FetchFunction = Arc::new(
-                SigV4Fetch::new(inner, credentials, SIGV4_SERVICE).without_content_sha256(),
+                SigV4Fetch::new(inner, credentials, SIGV4_SERVICE)
+                    .with_signing(SigV4Signing::Aws4Fetch),
             );
             (
                 ProviderHeaders::new(Credential::None, AuthScheme::Bearer, fixed, user_headers),

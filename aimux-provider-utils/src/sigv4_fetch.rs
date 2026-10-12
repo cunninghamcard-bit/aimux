@@ -42,7 +42,9 @@ struct SignedRequest {
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Headers aws4fetch never signs (lowercase names).
+/// The one list of headers that are sent but never signed under
+/// [`SigV4Signing::Aws4Fetch`]: aws4fetch 1.0.20's `UNSIGNABLE_HEADERS`
+/// (lowercase names). `authorization` is never signed under either rule.
 const UNSIGNABLE_HEADERS: &[&str] = &[
     "authorization",
     "content-type",
@@ -335,7 +337,24 @@ pub struct SigV4Fetch {
     credentials: Resolvable<AwsCredentials>,
     service: String,
     clock: Clock,
-    content_sha256: bool,
+    signing: SigV4Signing,
+}
+
+/// Which headers a [`SigV4Fetch`] signs: the one per-caller choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SigV4Signing {
+    /// Every request header except `authorization`, plus a sent and signed
+    /// `x-amz-content-sha256` (botocore's `SigV4Auth`). The default, for
+    /// callers with no AI SDK counterpart.
+    #[default]
+    AllHeaders,
+    /// aws4fetch 1.0.20, the signer of the AI SDK's AWS providers: the
+    /// headers in `UNSIGNABLE_HEADERS` (user-agent, content-type, …) are
+    /// sent but not signed, and `x-amz-content-sha256` is neither sent nor
+    /// signed. (aws4fetch adds it only for service `s3`, as
+    /// `UNSIGNED-PAYLOAD`; no aimux caller signs for s3, and this rule does
+    /// not implement that case.)
+    Aws4Fetch,
 }
 
 impl SigV4Fetch {
@@ -352,16 +371,14 @@ impl SigV4Fetch {
             credentials,
             service: service.into(),
             clock: Utc::now,
-            content_sha256: true,
+            signing: SigV4Signing::AllHeaders,
         }
     }
 
-    /// Sign like aws4fetch (the AI SDK's signer) for a non-s3 service: no
-    /// `x-amz-content-sha256` header is sent or signed, so a request without
-    /// a session token signs exactly `host;x-amz-date`.
+    /// Choose which headers are signed (default [`SigV4Signing::AllHeaders`]).
     #[must_use]
-    pub fn without_content_sha256(mut self) -> Self {
-        self.content_sha256 = false;
+    pub fn with_signing(mut self, signing: SigV4Signing) -> Self {
+        self.signing = signing;
         self
     }
 
@@ -389,10 +406,11 @@ impl Fetch for SigV4Fetch {
         })?;
         let mut extra_headers = Vec::with_capacity(request.headers.len());
         for (name, value) in &request.headers {
-            // aws4fetch's UNSIGNABLE_HEADERS (aws4fetch 1.0.20, used by
-            // amazon-bedrock-sigv4-fetch.ts and anthropic-aws-fetch.ts):
-            // these are sent but not signed; `user-agent` among them.
-            if UNSIGNABLE_HEADERS.contains(&name.as_str()) {
+            let unsigned = match self.signing {
+                SigV4Signing::AllHeaders => name == http::header::AUTHORIZATION,
+                SigV4Signing::Aws4Fetch => UNSIGNABLE_HEADERS.contains(&name.as_str()),
+            };
+            if unsigned {
                 continue;
             }
             let value = value.to_str().map_err(|_| {
@@ -408,7 +426,7 @@ impl Fetch for SigV4Fetch {
             &request.body,
             &extra_headers,
             (self.clock)(),
-            self.content_sha256,
+            self.signing == SigV4Signing::AllHeaders,
         );
         for (name, value) in signed.headers {
             let name = http::HeaderName::try_from(name.as_str()).map_err(|error| {

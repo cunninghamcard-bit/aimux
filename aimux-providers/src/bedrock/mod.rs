@@ -52,8 +52,8 @@ use aimux_core::provider::{Provider, ProviderDiscovery};
 use aimux_core::reranking_model::RerankingModel;
 use aimux_provider_utils::{
     AwsCredentials, Fetch, FetchError, FetchFunction, FetchRequest, FetchResponse, HeaderMapOpt,
-    Resolvable, SigV4Fetch, combine_headers, default_fetch, load_optional_setting, load_setting,
-    normalize_headers, validate_base_url, without_trailing_slash,
+    Resolvable, SigV4Fetch, SigV4Signing, combine_headers, default_fetch, load_optional_setting,
+    load_setting, normalize_headers, validate_base_url, without_trailing_slash,
 };
 
 use crate::shared::{Endpoint, EndpointConfig, EndpointSource, is_valid_hostname_part};
@@ -418,7 +418,7 @@ pub fn create_amazon_bedrock(
             SIGV4_SERVICE,
         )
         // aws4fetch (amazon-bedrock-sigv4-fetch.ts:75) signs `host;x-amz-date`.
-        .without_content_sha256(),
+        .with_signing(SigV4Signing::Aws4Fetch),
         inner,
     });
 
