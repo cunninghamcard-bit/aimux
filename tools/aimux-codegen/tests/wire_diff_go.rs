@@ -860,6 +860,15 @@ fn verdict_map(entries: &[Verdict]) -> BTreeMap<(String, String), String> {
         .collect()
 }
 
+/// Replace `path` with `text` via a temp file in the same directory and a
+/// rename, so no reader (another test, another `cargo test`) ever sees a
+/// truncated or half-written file.
+fn write_atomic(path: &Path, text: &str) {
+    let tmp = path.with_extension(format!("md.tmp-{}", std::process::id()));
+    std::fs::write(&tmp, text).unwrap();
+    std::fs::rename(&tmp, path).unwrap();
+}
+
 /// Problem when the committed doc differs from `doc`.
 fn doc_problem(committed: Option<&str>, doc: &str) -> Option<String> {
     (committed != Some(doc)).then(|| {
@@ -1084,7 +1093,7 @@ fn generated_go_matches_rust_and_diff_doc_is_current() {
     let doc = render(&fixtures, &run, &c.rows, &verdict_map(&entries));
     let dpath = workspace().join("docs/plan/2.2-diff-go.md");
     if std::env::var_os("AIMUX_BLESS_DIFF").is_some() {
-        std::fs::write(&dpath, &doc).unwrap();
+        write_atomic(&dpath, &doc);
     } else {
         problems.extend(doc_problem(
             std::fs::read_to_string(&dpath).ok().as_deref(),
@@ -1204,11 +1213,15 @@ fn verdict_and_doc_checks_each_catch_their_mutation() {
         verdict_problems(&c.rows, &m),
         vec!["verdict for ImageResult | warnings has no reason"]
     );
-    // Stale doc: the committed doc with one byte changed.
+    // Stale doc. This test never reads docs/plan/2.2-diff-go.md: that file
+    // is owned by generated_go_matches_rust_and_diff_doc_is_current, which
+    // may rewrite it (AIMUX_BLESS_DIFF=1) while this test runs in parallel.
+    // The mutation works on an in-memory scratch copy of the rendered doc.
     let doc = render(f, r, &c.rows, &verdict_map(&entries));
-    let committed = std::fs::read_to_string(workspace().join("docs/plan/2.2-diff-go.md")).unwrap();
-    assert_eq!(doc_problem(Some(&committed), &doc), None);
-    let stale = committed.replacen("handwritten bug", "generator bug", 1);
+    let scratch = doc.clone();
+    assert_eq!(doc_problem(Some(&scratch), &doc), None);
+    let stale = scratch.replacen("handwritten bug", "generator bug", 1);
+    assert_ne!(stale, scratch);
     assert!(doc_problem(Some(&stale), &doc).is_some());
     assert!(doc_problem(None, &doc).is_some());
 }
