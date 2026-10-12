@@ -320,3 +320,20 @@ fn flatten_of_a_struct_is_accepted() {
 fn no_committed_type_uses_flatten() {
     assert!(!committed().to_string().contains("\"flatten\":true"));
 }
+
+/// Mutation for extract.rs's `ts(concrete)` resolve-failure error: a
+/// concrete value that does not parse as a Rust type.
+#[test]
+fn mutation_unparseable_concrete_type_fails() {
+    let s = scratch("generic_unparseable_value");
+    s.write(
+        "extra_dto.rs",
+        "#[derive(Serialize, Deserialize, TS)]\n#[ts(export, concrete(T = 1))]\npub struct ExtraDto<T> {\n    pub a: T,\n}\n",
+    );
+    assert_eq!(
+        s.errors(),
+        vec![
+            "aimux-core/src/extra_dto.rs:3: unresolved generic parameter `T`: cannot parse `ts(concrete)` type `1`"
+        ]
+    );
+}
