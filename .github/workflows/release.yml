@@ -42,15 +42,28 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Gate: every other job needs this one (directly or via needs), so a
+  # workflow toolchain ref that drifts from rust-toolchain.toml stops the release.
+  check-toolchain:
+    name: Workflow toolchain refs match rust-toolchain.toml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          bash scripts/check_toolchain_pin.sh
+          python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update -q && sudo apt-get install -yq python3-yaml; }
+          python3 scripts/check_release_gate.py
+
   # ── Rust core → crates.io (dependency order) ─────────────────────────────
   rust-publish:
+    needs: check-toolchain
     name: Publish crates to crates.io
     runs-on: ubuntu-latest
     environment: release
     if: github.event_name == 'push' || github.event.inputs.rust == 'true'
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
       # Idempotent publish: skips a crate whose version already exists on
       # crates.io, so re-running the workflow after a partial failure is safe.
       # The version is read from the workspace Cargo.toml so this never goes
@@ -112,6 +125,7 @@ jobs:
 
   # ── Node binding: build per-platform .node, then publish to npm ──────────
   node-build:
+    needs: check-toolchain
     name: Node build (${{ matrix.settings.target }})
     runs-on: ${{ matrix.settings.host }}
     env:
@@ -141,7 +155,7 @@ jobs:
             binary: aimux.linux-arm64-gnu.node
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: ${{ matrix.settings.target }}
       - uses: Swatinem/rust-cache@v2
@@ -182,7 +196,7 @@ jobs:
     if: github.event_name == 'push' || github.event.inputs.node == 'true'
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -232,6 +246,7 @@ jobs:
 
   # ── Python binding: build + publish platform wheels (OIDC trusted) ───────
   python-release:
+    needs: check-toolchain
     name: Publish Python (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     if: github.event_name == 'push' || github.event.inputs.python == 'true'
@@ -241,7 +256,7 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-python@v5
         with:
@@ -258,6 +273,7 @@ jobs:
   #    NOTE: Windows uses the gnu target — Go's cgo links with mingw gcc,
   #    which cannot consume MSVC-format .a archives. ─────────────────────────
   go-build:
+    needs: check-toolchain
     name: Go binding (${{ matrix.settings.target }})
     runs-on: ${{ matrix.settings.host }}
     if: github.event_name == 'push' || github.event.inputs.artifacts == 'true'
@@ -275,7 +291,7 @@ jobs:
             target: x86_64-pc-windows-gnu
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: ${{ matrix.settings.target }}
       - uses: Swatinem/rust-cache@v2
@@ -306,6 +322,7 @@ jobs:
 
   # ── C ABI shared libraries (C/C++ + reference for other bindings) ────────
   ffi-build:
+    needs: check-toolchain
     name: aimux-ffi (${{ matrix.target }})
     runs-on: ${{ matrix.host }}
     if: github.event_name == 'push' || github.event.inputs.artifacts == 'true'
@@ -324,7 +341,7 @@ jobs:
             artifact: aimux_ffi-windows-x64.dll
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
@@ -350,6 +367,7 @@ jobs:
   #    run it (no cargo / npm step). The CLI tools ride along on the same
   #    matrix — they share the heavy provider dependency tree. ───────────────
   console-build:
+    needs: check-toolchain
     name: aimux-web (${{ matrix.settings.target }})
     runs-on: ${{ matrix.settings.host }}
     if: github.event_name == 'push' || github.event.inputs.artifacts == 'true'
@@ -374,7 +392,7 @@ jobs:
             suffix: -windows-x64.exe
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: ${{ matrix.settings.target }}
       - uses: Swatinem/rust-cache@v2
@@ -417,6 +435,7 @@ jobs:
   # Built at release time and embedded into the Flutter plugin package by the
   # flutter-publish job, so the pub.dev artifact ships with its native core.
   flutter-ffi-mobile:
+    needs: check-toolchain
     name: Flutter mobile FFI (${{ matrix.platform }})
     runs-on: ${{ matrix.host }}
     # Built for both the GitHub Release (manual integration) and the
@@ -434,7 +453,7 @@ jobs:
             targets: aarch64-apple-ios aarch64-apple-ios-sim
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: ${{ matrix.targets }}
       - uses: Swatinem/rust-cache@v2
@@ -461,6 +480,7 @@ jobs:
 
   # ── JVM bindings: publish aimux-java + aimux-kotlin to Maven Central ──────
   jvm-publish:
+    needs: check-toolchain
     name: Publish Java+Kotlin to Maven Central
     runs-on: ubuntu-latest
     environment: release
@@ -514,7 +534,7 @@ jobs:
     if: github.event_name == 'push' || github.event.inputs.flutter == 'true'
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
       - uses: Swatinem/rust-cache@v2
       - uses: subosito/flutter-action@v2
         with:
