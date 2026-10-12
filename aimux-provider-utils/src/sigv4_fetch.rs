@@ -108,12 +108,13 @@ fn sign_request_at(
         body,
         extra_headers,
         now,
-        true,
+        SigV4Signing::AllHeaders,
     )
 }
 
-/// [`sign_request_at`], optionally without `x-amz-content-sha256` (neither
-/// sent nor signed), which is what aws4fetch does for every service but s3.
+/// [`sign_request_at`] under `signing`: [`SigV4Signing::Aws4Fetch`] neither
+/// sends nor signs `x-amz-content-sha256`, as aws4fetch does for every
+/// service but s3.
 #[allow(clippy::too_many_arguments)]
 fn sign_request_with(
     credentials: &AwsCredentials,
@@ -123,7 +124,7 @@ fn sign_request_with(
     body: &[u8],
     extra_headers: &[(String, String)],
     now: DateTime<Utc>,
-    content_sha256: bool,
+    signing: SigV4Signing,
 ) -> SignedRequest {
     let parsed =
         url::Url::parse(url).unwrap_or_else(|_| url::Url::parse("http://localhost").unwrap());
@@ -153,7 +154,7 @@ fn sign_request_with(
         ("host".to_string(), host.to_string()),
         ("x-amz-date".to_string(), amz_date.clone()),
     ];
-    if content_sha256 {
+    if signing == SigV4Signing::AllHeaders {
         canonical_headers.push(("x-amz-content-sha256".to_string(), body_hash.clone()));
     }
 
@@ -341,12 +342,12 @@ pub struct SigV4Fetch {
 }
 
 /// Which headers a [`SigV4Fetch`] signs: the one per-caller choice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// There is no default: every caller names its rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SigV4Signing {
     /// Every request header except `authorization`, plus a sent and signed
-    /// `x-amz-content-sha256` (botocore's `SigV4Auth`). The default, for
-    /// callers with no AI SDK counterpart.
-    #[default]
+    /// `x-amz-content-sha256` (botocore's `SigV4Auth`). For callers with no
+    /// AI SDK counterpart (Amazon Polly).
     AllHeaders,
     /// aws4fetch 1.0.20, the signer of the AI SDK's AWS providers: the
     /// headers in `UNSIGNABLE_HEADERS` (user-agent, content-type, …) are
@@ -359,27 +360,22 @@ pub enum SigV4Signing {
 
 impl SigV4Fetch {
     /// Sign requests for `service` (e.g. `"bedrock"`) with `credentials`
-    /// (whose `region` scopes the signature) and forward them to `inner`.
+    /// (whose `region` scopes the signature) under `signing`, and forward
+    /// them to `inner`.
     #[must_use]
     pub fn new(
         inner: FetchFunction,
         credentials: Resolvable<AwsCredentials>,
         service: impl Into<String>,
+        signing: SigV4Signing,
     ) -> Self {
         Self {
             inner,
             credentials,
             service: service.into(),
             clock: Utc::now,
-            signing: SigV4Signing::AllHeaders,
+            signing,
         }
-    }
-
-    /// Choose which headers are signed (default [`SigV4Signing::AllHeaders`]).
-    #[must_use]
-    pub fn with_signing(mut self, signing: SigV4Signing) -> Self {
-        self.signing = signing;
-        self
     }
 
     /// Replace the signing clock (deterministic signatures in tests).
@@ -426,7 +422,7 @@ impl Fetch for SigV4Fetch {
             &request.body,
             &extra_headers,
             (self.clock)(),
-            self.signing == SigV4Signing::AllHeaders,
+            self.signing,
         );
         for (name, value) in signed.headers {
             let name = http::HeaderName::try_from(name.as_str()).map_err(|error| {
@@ -493,8 +489,13 @@ mod tests {
 
     fn decorated(credentials: AwsCredentials) -> (SigV4Fetch, Arc<Capture>) {
         let capture = Arc::new(Capture::default());
-        let fetch = SigV4Fetch::new(capture.clone(), Resolvable::from(credentials), "bedrock")
-            .with_clock(fixed_time);
+        let fetch = SigV4Fetch::new(
+            capture.clone(),
+            Resolvable::from(credentials),
+            "bedrock",
+            SigV4Signing::AllHeaders,
+        )
+        .with_clock(fixed_time);
         (fetch, capture)
     }
 
@@ -721,7 +722,7 @@ mod tests {
             }
         });
         let capture = Arc::new(Capture::default());
-        let fetch = SigV4Fetch::new(capture, credentials, "bedrock");
+        let fetch = SigV4Fetch::new(capture, credentials, "bedrock", SigV4Signing::AllHeaders);
         for _ in 0..2 {
             fetch
                 .fetch(FetchRequest::new(Method::GET, URL.parse().unwrap()))
@@ -743,6 +744,7 @@ mod tests {
                 })
             }),
             "bedrock",
+            SigV4Signing::AllHeaders,
         );
         let error = fetch
             .fetch(FetchRequest::new(Method::GET, URL.parse().unwrap()))
