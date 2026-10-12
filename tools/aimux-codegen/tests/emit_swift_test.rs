@@ -1,0 +1,579 @@
+//! Unit 2.2 (Swift): the Swift emitter's mapping rows, its refusals, and
+//! IR facts the Swift mapping relies on. Everything here is Rust-side: the
+//! emitted text is asserted, not compiled (that is `wire_diff_swift.rs`,
+//! which needs a real `swift`).
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use aimux_codegen::emit::{self, Emitter, swift::Swift};
+use aimux_codegen::manifest::Inputs;
+use aimux_codegen::wire::{
+    self, Presence, UnionRepr, VariantBody, WireBody, WireField, WireModel, WireTy, WireType,
+    WireVariant,
+};
+
+fn workspace() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn model() -> WireModel {
+    wire::from_inputs(&Inputs::from_workspace(&workspace())).unwrap()
+}
+
+fn file(m: &WireModel, name: &str) -> String {
+    Swift
+        .emit(m)
+        .into_iter()
+        .find(|o| o.path.ends_with(name))
+        .unwrap_or_else(|| panic!("{name} not emitted"))
+        .content
+}
+
+/// The declaration block `public <kind> <name>...` up to its closing `}`.
+fn block(src: &str, name: &str) -> String {
+    let start = [
+        format!("\npublic struct {name}:"),
+        format!("\npublic enum {name}:"),
+        format!("\npublic indirect enum {name}:"),
+        format!("\npublic typealias {name} ="),
+    ]
+    .iter()
+    .find_map(|p| src.find(p.as_str()))
+    .unwrap_or_else(|| panic!("{name} not emitted"));
+    let rest = &src[start + 1..];
+    let end = if rest.starts_with("public typealias") {
+        rest.find('\n').unwrap() + 1
+    } else {
+        rest.find("\n}\n").map_or(rest.len(), |e| e + 3)
+    };
+    rest[..end].to_string()
+}
+
+fn ty(name: &str, body: WireBody) -> WireType {
+    WireType {
+        name: name.into(),
+        doc_source: "synthetic.rs".into(),
+        body,
+    }
+}
+
+fn field(wire: &str, t: WireTy, presence: Presence) -> WireField {
+    WireField {
+        wire: wire.into(),
+        rust: wire.into(),
+        ty: t,
+        presence,
+        aliases: vec![],
+    }
+}
+
+fn variant(rust: &str, wire: Option<&str>, body: VariantBody) -> WireVariant {
+    WireVariant {
+        rust: rust.into(),
+        wire: wire.map(Into::into),
+        aliases: vec![],
+        other: false,
+        body,
+    }
+}
+
+fn prim(p: &str) -> WireTy {
+    WireTy::Prim(p.into())
+}
+
+// ---- IR facts -------------------------------------------------------------
+
+/// String enums counted from the IR directly (replaces the python
+/// one-liner over the manifest in the mapping doc).
+fn string_enums(m: &WireModel) -> Vec<String> {
+    m.types
+        .iter()
+        .filter(|t| matches!(t.body, WireBody::StringEnum { .. }))
+        .map(|t| t.name.clone())
+        .collect()
+}
+
+#[test]
+fn ir_has_19_string_enums() {
+    let names = string_enums(&model());
+    assert_eq!(names.len(), 19, "{names:?}");
+    // The Go output's two extra `type X string` are aliases, not enums.
+    let m = model();
+    for a in ["Size", "AspectRatio"] {
+        let t = m.types.iter().find(|t| t.name == a).unwrap();
+        assert_eq!(t.body, WireBody::Alias(prim("String")), "{a}");
+    }
+}
+
+/// Untagged variants that would accept `null`, after alias expansion.
+fn null_accepting(m: &WireModel) -> Vec<String> {
+    let bodies: BTreeMap<&str, &WireBody> =
+        m.types.iter().map(|t| (t.name.as_str(), &t.body)).collect();
+    let expand = |t: &WireTy| -> WireTy {
+        let mut t = t.clone();
+        for _ in 0..32 {
+            match &t {
+                WireTy::Named(n) => match bodies.get(n.as_str()) {
+                    Some(WireBody::Alias(a)) => t = a.clone(),
+                    _ => break,
+                },
+                _ => break,
+            }
+        }
+        t
+    };
+    let mut out = Vec::new();
+    for t in &m.types {
+        let WireBody::Union {
+            repr: UnionRepr::Untagged,
+            variants,
+        } = &t.body
+        else {
+            continue;
+        };
+        for v in variants {
+            let why = match &v.body {
+                VariantBody::Unit => Some("Unit"),
+                VariantBody::Value(x) => match (x, expand(x)) {
+                    (WireTy::Json, _) => Some("Json"),
+                    (_, WireTy::Json) => Some("Json after alias expansion"),
+                    (_, WireTy::Nullable(_)) => Some("Nullable"),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(why) = why {
+                out.push(format!(
+                    "untagged {}::{} accepts null ({why})",
+                    t.name, v.rust
+                ));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn untagged_variants_reject_null_premise() {
+    let m = model();
+    // The aliases the scan expands are really `Alias(Json)` in the IR:
+    // DecisionState is `serde_json::Value` (decision_model.rs:15);
+    // ToolChoice and TextContentBinding are hand-written in the manifest,
+    // lowered to Json by wire.rs:290-292.
+    for a in ["DecisionState", "ToolChoice", "TextContentBinding"] {
+        let t = m
+            .types
+            .iter()
+            .find(|t| t.name == a)
+            .unwrap_or_else(|| panic!("{a}"));
+        assert_eq!(t.body, WireBody::Alias(WireTy::Json), "{a}");
+    }
+    let untagged = m
+        .types
+        .iter()
+        .filter(|t| {
+            matches!(
+                &t.body,
+                WireBody::Union {
+                    repr: UnionRepr::Untagged,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(untagged, 12);
+    assert_eq!(null_accepting(&m), Vec::<String>::new());
+}
+
+#[test]
+fn untagged_premise_catches_synthetic_null_accepting_variants() {
+    let mut m = model();
+    m.types.push(ty(
+        "SyntheticUntagged",
+        WireBody::Union {
+            repr: UnionRepr::Untagged,
+            variants: vec![
+                variant(
+                    "State",
+                    None,
+                    VariantBody::Value(WireTy::Named("DecisionState".into())),
+                ),
+                variant(
+                    "Maybe",
+                    None,
+                    VariantBody::Value(WireTy::Nullable(Box::new(prim("String")))),
+                ),
+                variant(
+                    "ToolChoice",
+                    None,
+                    VariantBody::Value(WireTy::Named("ToolChoice".into())),
+                ),
+                variant(
+                    "Binding",
+                    None,
+                    VariantBody::Value(WireTy::Named("TextContentBinding".into())),
+                ),
+            ],
+        },
+    ));
+    assert_eq!(
+        null_accepting(&m),
+        vec![
+            "untagged SyntheticUntagged::State accepts null (Json after alias expansion)",
+            "untagged SyntheticUntagged::Maybe accepts null (Nullable)",
+            "untagged SyntheticUntagged::ToolChoice accepts null (Json after alias expansion)",
+            "untagged SyntheticUntagged::Binding accepts null (Json after alias expansion)",
+        ]
+    );
+}
+
+// ---- refusals -------------------------------------------------------------
+
+fn u128_model() -> WireModel {
+    WireModel {
+        types: vec![ty(
+            "Big",
+            WireBody::Record {
+                fields: vec![field("n", prim("u128"), Presence::default())],
+            },
+        )],
+    }
+}
+
+#[test]
+fn u128_is_an_emitter_error() {
+    let m = u128_model();
+    match Swift::check(&m) {
+        Ok(()) => panic!("expected an emitter error for u128, got Ok"),
+        Err(e) => assert_eq!(
+            e,
+            vec!["Big.n: u128/i128 has no lossless Swift type; the Swift emitter refuses it"]
+        ),
+    }
+    // emit::write refuses before writing anything.
+    let dir = std::env::temp_dir().join(format!("aimux-swift-u128-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let err = emit::write(&Swift, &m, &dir).unwrap_err();
+    assert!(err.contains("swift emitter: Big.n: u128/i128"), "{err}");
+    assert!(!dir.join("swift").exists(), "files were written");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn real_model_passes_the_swift_checks() {
+    assert_eq!(Swift::check(&model()), Ok(()));
+}
+
+#[test]
+fn variant_level_untagged_in_a_tagged_union_is_an_error() {
+    let m = WireModel {
+        types: vec![ty(
+            "Mixed",
+            WireBody::Union {
+                repr: UnionRepr::Internal { tag: "type".into() },
+                variants: vec![variant("Loose", None, VariantBody::Value(prim("String")))],
+            },
+        )],
+    };
+    let e = Swift::check(&m).unwrap_err();
+    assert!(
+        e[0].starts_with("Mixed::Loose: variant-level untagged"),
+        "{e:?}"
+    );
+}
+
+#[test]
+fn record_cycle_by_value_is_an_error() {
+    let opt = Presence {
+        omittable: true,
+        nullable: true,
+        ..Presence::default()
+    };
+    let m = WireModel {
+        types: vec![
+            ty(
+                "A",
+                WireBody::Record {
+                    fields: vec![field("b", WireTy::Named("B".into()), opt)],
+                },
+            ),
+            ty(
+                "B",
+                WireBody::Record {
+                    fields: vec![field("a", WireTy::Named("A".into()), Presence::default())],
+                },
+            ),
+        ],
+    };
+    let e = Swift::check(&m).unwrap_err();
+    assert!(
+        e.iter()
+            .any(|x| x.starts_with("record cycle by value: A -> B")),
+        "{e:?}"
+    );
+}
+
+// ---- mapping rows on the real model ----------------------------------------
+
+#[test]
+fn output_files_and_location() {
+    let paths: Vec<String> = Swift
+        .emit(&model())
+        .iter()
+        .map(|o| o.path.display().to_string())
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            "Package.swift",
+            "Sources/AimuxWire/Runtime.swift",
+            "Sources/AimuxWire/Types.swift"
+        ]
+    );
+    let dir = std::env::temp_dir().join(format!("aimux-swift-out-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let wrote = emit::write(&Swift, &model(), &dir).unwrap();
+    assert_eq!(wrote.len(), 3);
+    assert!(wrote.iter().all(|p| p.starts_with(dir.join("swift"))));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn records_follow_the_presence_matrix() {
+    let src = file(&model(), "Types.swift");
+    let ir = block(&src, "ImageResult");
+    // required Vec: decode / encode (serde writes []).
+    assert!(
+        ir.contains("warnings = try c.decode([Warning].self, forKey: .warnings)"),
+        "{ir}"
+    );
+    assert!(
+        ir.contains("try c.encode(warnings, forKey: .warnings)"),
+        "{ir}"
+    );
+    // Option with skip: decodeIfPresent / encodeIfPresent.
+    assert!(
+        ir.contains("usage = try c.decodeIfPresent(ImageUsage.self, forKey: .usage)"),
+        "{ir}"
+    );
+    assert!(
+        ir.contains("try c.encodeIfPresent(usage, forKey: .usage)"),
+        "{ir}"
+    );
+    // Option without skip: serde writes null → encodeNullable (encodeNil).
+    let ch = block(&src, "ChatCompletionChunkChoice");
+    assert!(
+        ch.contains("try c.encodeNullable(finishReason, forKey: .finishReason)"),
+        "{ch}"
+    );
+    // #[serde(default)] non-Option: contains ? decode : default.
+    let dc = block(&src, "DecisionCapabilities");
+    assert!(
+        dc.contains(
+            "supportsImages = try c.decodeDefault(Bool.self, forKey: .supportsImages, false)"
+        ),
+        "{dc}"
+    );
+    assert!(
+        dc.contains("case supportsImages = \"supports_images\""),
+        "{dc}"
+    );
+    // Tri-state only with a codec.
+    let bc = block(&src, "BooleanCriteria");
+    assert!(
+        bc.contains("public var `true`: TriState<EvaluationInput>"),
+        "{bc}"
+    );
+    assert!(
+        bc.contains("try c.encodeTriState(`true`, forKey: .`true`)"),
+        "{bc}"
+    );
+    assert_eq!(
+        src.matches("TriState<").count(),
+        4,
+        "TriState used outside codec fields"
+    );
+    // Runtime: default rejects a present null (no decodeIfPresent).
+    let rt = file(&model(), "Runtime.swift");
+    assert!(
+        rt.contains("contains(k) ? try decode(t, forKey: k) : def()"),
+        "{rt}"
+    );
+    assert!(rt.contains("if let v { try encode(v, forKey: k) } else { try encodeNil(forKey: k) }"));
+}
+
+#[test]
+fn string_enums_open_and_closed() {
+    let src = file(&model(), "Types.swift");
+    // Open (#[serde(other)]): keeps the received string.
+    for open in [
+        "Modality",
+        "ModelType",
+        "ReasoningMode",
+        "ReasoningVisibility",
+    ] {
+        let b = block(&src, open);
+        assert!(
+            b.starts_with(&format!("public struct {open}: RawRepresentable")),
+            "{b}"
+        );
+        assert!(
+            b.contains("let s = try d.singleValueContainer().decode(String.self)"),
+            "{b}"
+        );
+    }
+    // Variant aliases (ModelType, model_catalogue.rs:68-69) map to the main value.
+    let mt = block(&src, "ModelType");
+    assert!(
+        mt.contains("\"image-generation\": \"ImageGen\", \"imageGeneration\": \"ImageGen\""),
+        "{mt}"
+    );
+    assert!(mt.contains("rawValue = Self.aliases[s] ?? s"), "{mt}");
+    // Closed: a String raw enum (synthesized decode rejects unknown values).
+    let closed = src
+        .matches(": String, Codable, Equatable, Sendable, CaseIterable {")
+        .count();
+    assert_eq!(closed, 15, "19 string enums - 4 open");
+}
+
+#[test]
+fn unions_by_representation() {
+    let src = file(&model(), "Types.swift");
+    let fb = block(&src, "FileBytes");
+    let bin = fb.find("c.decode(WireBytes.self)").unwrap();
+    let b64 = fb.find("c.decode(String.self)").unwrap();
+    assert!(bin < b64, "untagged tries out of declaration order:\n{fb}");
+    assert!(!fb.contains("decodeNil"), "{fb}");
+    let internal = src
+        .matches("let tag = try c.decode(String.self, forKey: AnyCodingKey(")
+        .count();
+    assert_eq!(internal, 30, "internal (30) + adjacent (0) unions");
+    assert_eq!(
+        src.matches(": no variant matches\")").count(),
+        12,
+        "untagged unions"
+    );
+    // Proxies by wire shape.
+    assert!(src.contains("\npublic typealias Size = String\n"));
+    assert!(src.contains("\npublic typealias AspectRatio = String\n"));
+    assert!(
+        block(&src, "AiMuxError")
+            .contains("let tag = try c.decode(String.self, forKey: AnyCodingKey(\"name\"))")
+    );
+    // Bytes: WireBytes, never Data.
+    assert!(file(&model(), "Runtime.swift").contains("public typealias WireBytes = [UInt8]"));
+    for bad in ["(Data.self", ": Data\n", ": Data?\n", "[Data]", "<Data>"] {
+        assert!(!src.contains(bad), "Foundation Data used: {bad}");
+    }
+}
+
+#[test]
+fn json_value_tries_bool_int64_uint64_double() {
+    let rt = file(&model(), "Runtime.swift");
+    let at = |s: &str| rt.find(s).unwrap_or_else(|| panic!("{s}"));
+    let order = [
+        at("c.decodeNil()"),
+        at("decode(String.self) { self = .string"),
+        at("decode([JSONValue].self)"),
+        at("decode([String: JSONValue].self)"),
+        at("decode(Bool.self)"),
+        at("decode(Int64.self)"),
+        at("decode(UInt64.self)"),
+        at("decode(Double.self)"),
+    ];
+    assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?}");
+}
+
+// ---- synthetic unions (no aimux-core type uses them) ------------------------
+
+fn payload_union(repr: UnionRepr) -> WireModel {
+    WireModel {
+        types: vec![ty(
+            "Shape",
+            WireBody::Union {
+                repr,
+                variants: vec![
+                    variant("Empty", Some("empty"), VariantBody::Unit),
+                    variant("Circle", Some("circle"), VariantBody::Value(prim("f64"))),
+                    variant(
+                        "Rect",
+                        Some("rect"),
+                        VariantBody::Fields(vec![field("w", prim("u32"), Presence::default())]),
+                    ),
+                ],
+            },
+        )],
+    }
+}
+
+#[test]
+fn external_payload_union_synthetic() {
+    let src = file(&payload_union(UnionRepr::External), "Types.swift");
+    let b = block(&src, "Shape");
+    // unit ↔ "empty"; payload ↔ {"circle": 1.5}; struct ↔ {"rect": {...}}.
+    assert!(b.contains("case \"empty\": self = .empty; return"), "{b}");
+    assert!(
+        b.contains("guard c.allKeys.count == 1, let k = c.allKeys.first"),
+        "{b}"
+    );
+    assert!(
+        b.contains("case \"circle\": self = .circle(try c.decode(Double.self, forKey: k))"),
+        "{b}"
+    );
+    assert!(
+        b.contains("case \"rect\": self = .rect(try c.decode(ShapeRect.self, forKey: k))"),
+        "{b}"
+    );
+    assert!(
+        b.contains("case .empty: var s = e.singleValueContainer(); try s.encode(\"empty\")"),
+        "{b}"
+    );
+    assert!(b.contains("case .circle(let v): var o = e.container(keyedBy: AnyCodingKey.self); try o.encode(v, forKey: AnyCodingKey(\"circle\"))"), "{b}");
+    assert!(src.contains("public struct ShapeRect:"), "payload struct");
+}
+
+#[test]
+fn adjacent_union_synthetic() {
+    let src = file(
+        &payload_union(UnionRepr::Adjacent {
+            tag: "t".into(),
+            content: "c".into(),
+        }),
+        "Types.swift",
+    );
+    let b = block(&src, "Shape");
+    assert!(
+        b.contains("let tag = try c.decode(String.self, forKey: AnyCodingKey(\"t\"))"),
+        "{b}"
+    );
+    assert!(b.contains("case \"empty\": self = .empty\n"), "{b}");
+    assert!(b.contains("case \"circle\": self = .circle(try c.decode(Double.self, forKey: AnyCodingKey(\"c\")))"), "{b}");
+    assert!(
+        b.contains("case .empty: try c.encode(\"empty\", forKey: tk)"),
+        "{b}"
+    );
+    assert!(
+        b.contains(
+            "case .rect(let v): try c.encode(\"rect\", forKey: tk); try c.encode(v, forKey: ck)"
+        ),
+        "{b}"
+    );
+    assert!(
+        b.contains("default: throw DecodingError"),
+        "unknown tag must error: {b}"
+    );
+}
+
+#[test]
+fn other_variant_catches_unknown_tags() {
+    let mut m = payload_union(UnionRepr::Internal { tag: "type".into() });
+    if let WireBody::Union { variants, .. } = &mut m.types[0].body {
+        variants.push(WireVariant {
+            other: true,
+            ..variant("Unknown", Some("unknown"), VariantBody::Unit)
+        });
+    }
+    let b = block(&file(&m, "Types.swift"), "Shape");
+    assert!(b.contains("default: self = .unknown"), "{b}");
+}

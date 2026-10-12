@@ -44,7 +44,12 @@ pub enum WireBody {
     Alias(WireTy),
     /// Externally tagged enum whose variants are all unit: a JSON string.
     /// `open`: a `#[serde(other)]` variant accepts unknown values.
-    StringEnum { values: Vec<String>, open: bool },
+    /// `aliases`: `(alias, main value)` from variant `#[serde(alias)]`.
+    StringEnum {
+        values: Vec<String>,
+        open: bool,
+        aliases: Vec<(String, String)>,
+    },
     /// Any other enum. Variants in declaration order.
     Union {
         repr: UnionRepr,
@@ -248,6 +253,13 @@ impl Ctx<'_> {
                     return WireBody::StringEnum {
                         values: variants.iter().filter_map(|v| v.wire.clone()).collect(),
                         open: variants.iter().any(|v| v.other),
+                        aliases: variants
+                            .iter()
+                            .filter_map(|v| v.wire.as_ref().map(|w| (v, w)))
+                            .flat_map(|(v, w)| {
+                                v.aliases.iter().map(move |a| (a.clone(), w.clone()))
+                            })
+                            .collect(),
                     };
                 }
                 let variants = variants

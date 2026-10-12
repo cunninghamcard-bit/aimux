@@ -1,5 +1,5 @@
 {
-  "_comment": "Machine-readable known differences (verdict 已知差异). Read by wire_diff_<lang>.rs; no Markdown parsing. An entry applies only to a diff row whose fixture label AND leaf JSON path both match a scope item AND whose generated and serde values are both JSON numbers. phasesExcerpt is the authoritative in-repo copy of aimux-plan PHASES.md:307 (provenance only). KD-SWIFT-NUM-1 is planned and unmeasured: it is kept only if the post-install measurement confirms it. The every-ID-referenced check removes it otherwise.",
+  "_comment": "Machine-readable known differences (verdict 已知差异). Read by wire_diff_<lang>.rs; no Markdown parsing. An entry applies only to a diff row whose fixture label AND leaf JSON path both match a scope item AND whose generated and serde values are both JSON numbers AND equal when compared as f64 (final conditions). phasesExcerpt is the authoritative in-repo copy of aimux-plan PHASES.md:307 (provenance only). KD-SWIFT-NUM-1 is planned and unmeasured: it is kept only if the post-install measurement confirms it. The every-ID-referenced check removes it otherwise.",
   "entries": [
     {
       "id": "KD-SWIFT-NUM-1",

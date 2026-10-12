@@ -371,7 +371,7 @@ impl Gen {
                     if eq { "= " } else { "" }
                 );
             }
-            WireBody::StringEnum { values, open } => self.string_enum(&t.name, values, *open),
+            WireBody::StringEnum { values, open, .. } => self.string_enum(&t.name, values, *open),
             WireBody::Union { repr, variants } => self.union(&t.name, repr, variants),
         }
     }

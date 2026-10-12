@@ -152,7 +152,6 @@ except the file-size table (split scope is D10).
 | aimux-providers/src/bedrock/convert.rs | 1699 | src |
 | bindings/node/src/lib.rs | 1694 | src |
 | aimux-providers/tests/data_loss_regression_test.rs | 1631 | test |
-| tools/aimux-codegen/tests/wire_diff_go.rs | 1559 | test |
 | tools/aimux-codegen/tests/common/go_fixtures_empty.rs | 1536 | test |
 | aimux-core/src/generate.rs | 1490 | src |
 | aimux-providers/src/open_responses.rs | 1424 | src |
@@ -162,6 +161,7 @@ except the file-size table (split scope is D10).
 | aimux-providers/src/xai/responses/mod.rs | 1277 | src |
 | aimux-ffi/tests/exports_smoke_test.rs | 1269 | test |
 | aimux-providers/src/openai/convert.rs | 1262 | src |
+| tools/aimux-codegen/tests/wire_diff_go.rs | 1249 | test |
 | aimux-providers/src/vertex/model.rs | 1227 | src |
 | aimux-providers/tests/bedrock_remaining_test.rs | 1215 | test |
 | aimux-providers/tests/e2e_test.rs | 1185 | test |
