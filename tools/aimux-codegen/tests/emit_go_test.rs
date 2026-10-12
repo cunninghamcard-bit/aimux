@@ -257,3 +257,20 @@ fn output_root_reached_through_a_symlinked_parent_still_works() {
     assert!(dir.join("real/out/one/ok.go").is_file());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn output_root_symlinked_into_bindings_is_rejected() {
+    // A symlinked root is allowed, but its resolved target is still checked:
+    // a root that resolves to a directory under bindings/ is refused.
+    let dir = std::env::temp_dir().join(format!("aimux-emit-rootlink-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let target = dir.join("bindings/go");
+    std::fs::create_dir_all(&target).unwrap();
+    std::os::unix::fs::symlink(&target, dir.join("emit-out")).unwrap();
+    for root in [dir.join("emit-out"), dir.join("emit-out/sub")] {
+        let err = emit::write(&OnePath("ok.go"), &model(), &root).unwrap_err();
+        assert!(err.contains("never write under bindings/"), "{err}");
+    }
+    assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
+    let _ = std::fs::remove_dir_all(dir);
+}
