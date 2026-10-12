@@ -210,6 +210,31 @@ pub fn pascal(s: &str) -> String {
     out
 }
 
+/// Tab-indented lines with columns padded the way gofmt aligns
+/// consecutive struct fields and const specs (cell width + one space; the
+/// last column is not padded).
+fn align(rows: &[Vec<String>]) -> String {
+    let cols = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let mut width = vec![0; cols];
+    for r in rows {
+        for (i, c) in r.iter().enumerate() {
+            width[i] = width[i].max(c.chars().count());
+        }
+    }
+    let mut out = String::new();
+    for r in rows {
+        out.push('\t');
+        for (i, c) in r.iter().enumerate() {
+            out.push_str(c);
+            if i + 1 < r.len() {
+                out.push_str(&" ".repeat(width[i] - c.chars().count() + 1));
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
 fn go_str(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_default()
 }
@@ -282,6 +307,7 @@ impl Gen {
     fn record(&mut self, name: &str, fields: &[WireField]) {
         let _ = writeln!(self.out, "type {name} struct {{");
         let mut used = BTreeSet::new();
+        let mut rows = Vec::new();
         for f in fields {
             let ident = uniq(&mut used, pascal(&f.rust));
             let inner = self.go_ty(&f.ty);
@@ -306,8 +332,9 @@ impl Gen {
                     },
                 )
             };
-            let _ = writeln!(self.out, "\t{ident} {ty} `json:\"{}{opt}\"`", f.wire);
+            rows.push(vec![ident, ty, format!("`json:\"{}{opt}\"`", f.wire)]);
         }
+        self.w(&align(&rows));
         self.w("}\n");
         let required: Vec<String> = fields
             .iter()
@@ -316,7 +343,7 @@ impl Gen {
             .collect();
         let _ = writeln!(
             self.out,
-            "\nfunc ({name}) wireRequired() []string {{ return []string{{{}}} }}",
+            "\nfunc ({name}) wireRequired() []string {{\n\treturn []string{{{}}}\n}}",
             required.join(", ")
         );
     }
@@ -324,10 +351,12 @@ impl Gen {
     fn string_enum(&mut self, name: &str, values: &[String], open: bool) {
         let _ = writeln!(self.out, "type {name} string\n\nconst (");
         let mut used = BTreeSet::new();
+        let mut rows = Vec::new();
         for v in values {
             let c = uniq(&mut used, format!("{name}{}", pascal(v)));
-            let _ = writeln!(self.out, "\t{c} {name} = {}", go_str(v));
+            rows.push(vec![c, name.to_string(), format!("= {}", go_str(v))]);
         }
+        self.w(&align(&rows));
         self.w(")\n");
         if open {
             return;

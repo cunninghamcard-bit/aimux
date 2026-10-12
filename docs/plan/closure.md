@@ -10,7 +10,7 @@ except the file-size table (split scope is D10).
 |---|---|
 | FFI `aimux_*_new` (name ends in `_new`) | 29 |
 | FFI `aimux_*_new*` (incl. `_new_with_base` etc.) | 51 |
-| .rs files > 1000 lines (all tracked) | 37 |
+| .rs files > 1000 lines (all tracked) | 38 |
 | .rs files > 1000 lines (excluding `*/tests/*`) | 24 |
 | ts-rs `#[derive(TS)]` sites | 201 |
 | `from_resolved` occurrences | 0 |
@@ -138,6 +138,7 @@ except the file-size table (split scope is D10).
 |---|---|---|
 | aimux-ffi/src/lib.rs | 4729 | src |
 | aimux-providers/src/anthropic/convert.rs | 3207 | src |
+| tools/aimux-codegen/tests/common/go_fixtures.rs | 3149 | test |
 | aimux-core/src/recording.rs | 3067 | src |
 | aimux-providers/tests/deepseek_chat_test.rs | 2562 | test |
 | aimux-providers/tests/groq_test.rs | 2342 | test |

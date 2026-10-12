@@ -22,6 +22,10 @@ fn types_go() -> String {
         .find(|o| o.path.as_os_str() == "types.go")
         .unwrap()
         .content
+        .split(' ')
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The block of `type <name> struct { .. }`.
@@ -94,7 +98,7 @@ fn unions_get_wrappers() {
     let src = types_go();
     let sp = block(&src, "StreamPart");
     assert!(
-        sp.contains("Tag   string") && sp.contains("Raw   json.RawMessage"),
+        sp.contains("Tag string") && sp.contains("Raw json.RawMessage"),
         "{sp}"
     );
     assert!(src.contains("func (x *StreamPart) UnmarshalJSON(b []byte) error {\n\tx.Raw = clone(b)\n\ttag, ok := tagOf(b, \"type\")"));
@@ -139,5 +143,41 @@ fn generated_go_builds_with_real_go() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Files `gofmt -l` reports in `dir` (real gofmt; missing gofmt = fail).
+fn gofmt_dirty(dir: &std::path::Path) -> Vec<String> {
+    let out = Command::new("gofmt")
+        .arg("-l")
+        .arg(".")
+        .current_dir(dir)
+        .output()
+        .expect("`gofmt` is required: the Go emitter output must be gofmt-clean");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn generated_go_is_gofmt_clean() {
+    let dir = std::env::temp_dir().join(format!("aimux-emit-gofmt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    emit::write(&Go, &model(), &dir).unwrap();
+    let go = dir.join("go");
+    assert_eq!(gofmt_dirty(&go), Vec::<String>::new());
+    // Mutation: misalign one struct field; the check must report types.go.
+    let path = go.join("types.go");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let from = "\tToolCallId       string";
+    assert!(text.contains(from), "ToolCall field layout changed");
+    std::fs::write(&path, text.replacen(from, "\tToolCallId string", 1)).unwrap();
+    assert_eq!(gofmt_dirty(&go), vec!["types.go".to_string()]);
     let _ = std::fs::remove_dir_all(dir);
 }
