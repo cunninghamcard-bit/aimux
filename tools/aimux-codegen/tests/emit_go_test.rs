@@ -225,3 +225,35 @@ fn output_paths_with_parent_dir_or_absolute_are_rejected() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn dangling_symlink_output_file_is_rejected() {
+    // out/one/ok.go -> <dir>/bindings/go/new.go, which does not exist yet:
+    // canonicalize fails on a dangling link, so only a symlink_metadata walk
+    // catches it.
+    let dir = std::env::temp_dir().join(format!("aimux-emit-dangle-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let target = dir.join("bindings/go/new.go");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    let out = dir.join("out");
+    std::fs::create_dir_all(out.join("one")).unwrap();
+    std::os::unix::fs::symlink(&target, out.join("one/ok.go")).unwrap();
+    let err = emit::write(&OnePath("ok.go"), &model(), &out).unwrap_err();
+    assert!(err.contains("is a symlink"), "{err}");
+    assert!(!target.exists(), "the write went through the dangling link");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn output_root_reached_through_a_symlinked_parent_still_works() {
+    // Reviewer A: /tmp or /workspace may themselves be symlinks; only links
+    // below the output root are refused.
+    let dir = std::env::temp_dir().join(format!("aimux-emit-parent-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("real")).unwrap();
+    std::os::unix::fs::symlink(dir.join("real"), dir.join("alias")).unwrap();
+    let paths = emit::write(&OnePath("ok.go"), &model(), &dir.join("alias/out")).unwrap();
+    assert_eq!(paths.len(), 1);
+    assert!(dir.join("real/out/one/ok.go").is_file());
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -30,14 +30,20 @@ pub fn default_out_root(workspace: &Path) -> PathBuf {
 /// # Errors
 ///
 /// An output path that is absolute, climbs out with `..`, or would land in a
-/// `bindings` directory (also through a symlink), and I/O errors.
+/// `bindings` directory (the root is resolved first), a symlink anywhere
+/// below the output root, and I/O errors.
 pub fn write(
     emitter: &dyn Emitter,
     model: &WireModel,
     out_root: &Path,
 ) -> Result<Vec<PathBuf>, String> {
-    let dir = out_root.join(emitter.lang());
-    guard(&dir)?;
+    // The root is canonicalized once: symlinks in its own path (/tmp,
+    // /workspace, a symlinked checkout) are resolved, not rejected. The
+    // bindings checks run on the resolved root.
+    let root = resolve(out_root);
+    guard(&root)?;
+    let lang = Path::new(emitter.lang());
+    guard_below(&root, lang)?;
     let mut written = Vec::new();
     for o in emitter.emit(model) {
         if o.path.is_absolute()
@@ -48,10 +54,12 @@ pub fn write(
             return Err(format!(
                 "{}: output path escapes {}",
                 o.path.display(),
-                dir.display()
+                root.join(lang).display()
             ));
         }
-        let path = dir.join(&o.path);
+        let rel = lang.join(&o.path);
+        guard_below(&root, &rel)?;
+        let path = root.join(&rel);
         guard(&path)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
@@ -60,6 +68,27 @@ pub fn write(
         written.push(path);
     }
     Ok(written)
+}
+
+/// Refuse a symlink (dangling or not) at any component of `rel` below the
+/// canonical `root`, checked with `symlink_metadata` (never followed). A
+/// component that does not exist ends the walk: nothing below it exists.
+fn guard_below(root: &Path, rel: &Path) -> Result<(), String> {
+    let mut cur = root.to_path_buf();
+    for c in rel.components() {
+        cur.push(c);
+        match std::fs::symlink_metadata(&cur) {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err(format!(
+                    "{}: is a symlink below the output root; emitters never write through symlinks (bindings/ guard)",
+                    cur.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(_) => return Ok(()),
+        }
+    }
+    Ok(())
 }
 
 /// Canonical form of `path`: its nearest existing ancestor is canonicalized
@@ -81,8 +110,8 @@ fn resolve(path: &Path) -> PathBuf {
     }
 }
 
-/// Refuse any path that is, or resolves (through symlinks) to, a location
-/// with a `bindings` component or inside this workspace's `bindings/`.
+/// Refuse any path that is, or resolves to, a location with a `bindings`
+/// component or inside this workspace's `bindings/`.
 fn guard(path: &Path) -> Result<(), String> {
     let bindings = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../bindings")
