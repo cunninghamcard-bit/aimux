@@ -307,3 +307,43 @@ fn default_out_root_under_worktree_target_is_writable() {
     assert!(paths[0].is_file());
     let _ = std::fs::remove_dir_all(paths[0].parent().unwrap());
 }
+
+#[test]
+fn dangling_symlink_output_root_is_rejected() {
+    // The output root itself is a dangling link: to a missing path, and to a
+    // missing path under an existing bindings/go.
+    let dir = std::env::temp_dir().join(format!("aimux-emit-rootdangle-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("bindings/go")).unwrap();
+    std::os::unix::fs::symlink(dir.join("missing"), dir.join("emit-out")).unwrap();
+    std::os::unix::fs::symlink(dir.join("bindings/go/x"), dir.join("emit-out2")).unwrap();
+    for root in [
+        dir.join("emit-out"),
+        dir.join("emit-out2"),
+        dir.join("emit-out2/sub"),
+    ] {
+        let err = emit::write(&OnePath("ok.go"), &model(), &root).unwrap_err();
+        assert!(err.contains("dangling symlink"), "{err}");
+    }
+    assert!(!dir.join("missing").exists());
+    assert_eq!(
+        std::fs::read_dir(dir.join("bindings/go")).unwrap().count(),
+        0
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn symlinked_intermediate_dir_below_root_is_rejected() {
+    // out/one/a is a pre-made symlink; the output file is a/b/c.go, so
+    // create_dir_all would create b inside the link's target.
+    let dir = std::env::temp_dir().join(format!("aimux-emit-mid-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("out/one")).unwrap();
+    std::fs::create_dir_all(dir.join("elsewhere")).unwrap();
+    std::os::unix::fs::symlink(dir.join("elsewhere"), dir.join("out/one/a")).unwrap();
+    let err = emit::write(&OnePath("a/b/c.go"), &model(), &dir.join("out")).unwrap_err();
+    assert!(err.contains("is a symlink below the output root"), "{err}");
+    assert_eq!(std::fs::read_dir(dir.join("elsewhere")).unwrap().count(), 0);
+    let _ = std::fs::remove_dir_all(dir);
+}

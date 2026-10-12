@@ -37,14 +37,15 @@ pub fn write(
     model: &WireModel,
     out_root: &Path,
 ) -> Result<Vec<PathBuf>, String> {
-    // The root is canonicalized once: symlinks in its own path (/tmp,
-    // /workspace, a symlinked checkout) are resolved, not rejected. The
-    // bindings checks run on the resolved root.
     // Literal check first, before anything is resolved: `target/../bindings`
     // or a `bindings` component that is itself a symlink elsewhere is
     // refused as written.
     reject_named(out_root)?;
-    let root = resolve(out_root);
+    // The root is canonicalized once: symlinks in its own path (/tmp,
+    // /workspace, a symlinked checkout) are resolved, not rejected. A
+    // dangling link in it is refused. The bindings checks run on the
+    // resolved root.
+    let root = resolve(out_root)?;
     guard(&root)?;
     let lang = Path::new(emitter.lang());
     guard_below(&root, lang)?;
@@ -68,6 +69,9 @@ pub fn write(
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
+        // Again on the full final path, after create_dir_all and right
+        // before the write.
+        guard_below(&root, &rel)?;
         std::fs::write(&path, o.content).map_err(|e| format!("{}: {e}", path.display()))?;
         written.push(path);
     }
@@ -97,19 +101,31 @@ fn guard_below(root: &Path, rel: &Path) -> Result<(), String> {
 
 /// Canonical form of `path`: its nearest existing ancestor is canonicalized
 /// (resolving symlinks) and the not-yet-existing rest is appended.
-fn resolve(path: &Path) -> PathBuf {
+///
+/// # Errors
+///
+/// A component that exists (per `symlink_metadata`) but cannot be
+/// canonicalized: a dangling symlink, whose target is unknown.
+fn resolve(path: &Path) -> Result<PathBuf, String> {
     let mut base = path;
     let mut rest = Vec::new();
     loop {
         if let Ok(c) = base.canonicalize() {
-            return rest.iter().rev().fold(c, |p, n| p.join(n));
+            return Ok(rest.iter().rev().fold(c, |p, n| p.join(n)));
+        }
+        if std::fs::symlink_metadata(base).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(format!(
+                "{}: dangling symlink in the output path ({} does not resolve)",
+                path.display(),
+                base.display()
+            ));
         }
         match (base.parent(), base.file_name()) {
             (Some(parent), Some(name)) => {
                 rest.push(name.to_os_string());
                 base = parent;
             }
-            _ => return path.to_path_buf(),
+            _ => return Ok(path.to_path_buf()),
         }
     }
 }
@@ -137,7 +153,7 @@ fn guard(path: &Path) -> Result<(), String> {
         .join("../../bindings")
         .canonicalize()
         .ok();
-    let real = resolve(path);
+    let real = resolve(path)?;
     if named_bindings(path)
         || named_bindings(&real)
         || bindings.is_some_and(|b| real.starts_with(b))
