@@ -421,6 +421,9 @@ struct GoResult {
     hand_out: Option<Value>,
     gen_err: String,
     hand_err: String,
+    /// The generated Go's output bytes, verbatim.
+    #[serde(default)]
+    gen_raw: String,
 }
 
 #[derive(serde::Deserialize, Debug)]
@@ -443,8 +446,8 @@ fn copy_go(from: &Path, to: &Path, package_from: &str, package_to: &str) {
     .unwrap();
 }
 
-/// Build the harness module and run it with real `go`. `mutate` edits the
-/// generated types.go before the run.
+/// Build the harness module and run it with real `go`. `mutate` edits each
+/// generated Go file before the run.
 fn run_go(label: &str, fixtures: &[Fixture], mutate: impl Fn(String) -> String) -> GoRun {
     let dir = std::env::temp_dir().join(format!("aimux-wire-diff-{label}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -457,11 +460,7 @@ fn run_go(label: &str, fixtures: &[Fixture], mutate: impl Fn(String) -> String) 
         if o.path.as_os_str() == "go.mod" {
             continue;
         }
-        let content = if o.path.as_os_str() == "types.go" {
-            mutate(o.content)
-        } else {
-            o.content
-        };
+        let content = mutate(o.content);
         std::fs::write(dir.join("gen").join(&o.path), content).unwrap();
     }
     let bindings = workspace().join("bindings/go");
@@ -515,6 +514,7 @@ type result struct {{
 	GenOut  json.RawMessage `json:"gen_out"`
 	HandOut json.RawMessage `json:"hand_out"`
 	GenErr  string          `json:"gen_err"`
+	GenRaw  string          `json:"gen_raw"`
 	HandErr string          `json:"hand_err"`
 }}
 
@@ -556,7 +556,14 @@ func main() {{
 {cases}		default:
 			panic("no Go type for " + f.Type)
 		}}
+		r.GenRaw = string(r.GenOut)
 		out.Results = append(out.Results, r)
+		if f.Type == "AudioData" {{
+			var g gen.AudioData
+			if json.Unmarshal(f.JSON, &g) == nil {{
+				out.Variants[f.Label] = g.Variant
+			}}
+		}}
 		if f.Type == "ImageResult" {{
 			var g gen.ImageResult
 			if json.Unmarshal(f.JSON, &g) == nil {{
@@ -1142,7 +1149,10 @@ fn mutated_wire_name_is_reported_as_exactly_one_row() {
         .collect();
     let base = compare(&fixtures, &run_go("base", &fixtures, |s| s));
     let mutated_run = run_go("mutated", &fixtures, |s| {
-        let start = s.find("\ntype ToolCall struct {").expect("ToolCall struct");
+        // Only types.go declares ToolCall; other files pass through.
+        let Some(start) = s.find("\ntype ToolCall struct {") else {
+            return s;
+        };
         let end = start + s[start..].find("\n}\n").unwrap();
         let block = &s[start..end];
         let from = "`json:\"toolCallId\"`";
@@ -1326,4 +1336,73 @@ fn untagged_decode_rejects_null_exactly_like_serde() {
     assert!(diverge.is_empty(), "serde vs generated Go: {diverge:#?}");
     // Both outcomes occur, so parity is not vacuous.
     assert!(got.iter().any(|(_, s, _)| *s) && got.iter().any(|(_, s, _)| !*s));
+}
+
+/// Binary payloads (`Vec<u8>`): the generated Go must write exactly the bytes
+/// serde writes (a number array, never base64), and AudioData must decode as
+/// `Binary`. Returns one message per failure.
+fn binary_failures(mutate: impl Fn(String) -> String) -> Vec<String> {
+    use aimux_core::speech_model::AudioData;
+    use aimux_core::video_model::VideoData;
+    let audio = AudioData::Binary(vec![0, 1, 127, 255]);
+    let video = VideoData::Binary {
+        data: vec![0, 1, 255],
+        media_type: "video/mp4".into(),
+    };
+    let cases = [
+        (
+            "bin-AudioData",
+            "AudioData",
+            serde_json::to_string(&audio).unwrap(),
+        ),
+        (
+            "bin-VideoData",
+            "VideoData",
+            serde_json::to_string(&video).unwrap(),
+        ),
+    ];
+    let fixtures: Vec<Fixture> = cases
+        .iter()
+        .map(|(label, ty, raw)| Fixture {
+            label,
+            ty,
+            json: serde_json::from_str(raw).unwrap(),
+            back: None,
+        })
+        .collect();
+    let run = run_go("binary", &fixtures, mutate);
+    let mut out = Vec::new();
+    for ((label, _, raw), r) in cases.iter().zip(&run.results) {
+        if r.gen_raw != *raw {
+            out.push(format!(
+                "{label}: generated Go wrote {} (err {:?}), serde wrote {raw}",
+                r.gen_raw, r.gen_err
+            ));
+        }
+    }
+    if run.variants.get("bin-AudioData").map(String::as_str) != Some("Binary") {
+        out.push(format!(
+            "bin-AudioData decoded as {:?}, not Binary",
+            run.variants.get("bin-AudioData")
+        ));
+    }
+    out
+}
+
+#[test]
+fn binary_audio_and_video_are_byte_identical_to_serde() {
+    assert_eq!(binary_failures(|s| s), Vec::<String>::new());
+    // Mutation (a): map Vec<u8> to Go's []byte. encoding/json writes base64.
+    let a = binary_failures(|s| s.replace("[]U8", "[]byte"));
+    assert!(a.iter().any(|m| m.starts_with("bin-AudioData:")), "{a:#?}");
+    assert!(a.iter().any(|m| m.starts_with("bin-VideoData:")), "{a:#?}");
+    // Mutation (b): drop U8's MarshalJSON. A slice of a named uint8 type is
+    // also written as base64.
+    let marshal = "func (u U8) MarshalJSON() ([]byte, error) { return json.Marshal(uint8(u)) }";
+    let b = binary_failures(|s| {
+        assert!(!s.contains("type U8 uint8") || s.contains(marshal));
+        s.replace(marshal, "")
+    });
+    assert!(b.iter().any(|m| m.starts_with("bin-AudioData:")), "{b:#?}");
+    assert!(b.iter().any(|m| m.starts_with("bin-VideoData:")), "{b:#?}");
 }

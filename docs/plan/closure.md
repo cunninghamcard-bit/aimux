@@ -155,10 +155,10 @@ except the file-size table (split scope is D10).
 | tools/aimux-codegen/tests/common/go_fixtures_empty.rs | 1536 | test |
 | aimux-core/src/generate.rs | 1490 | src |
 | aimux-providers/src/open_responses.rs | 1424 | src |
+| tools/aimux-codegen/tests/wire_diff_go.rs | 1408 | test |
 | aimux-providers/tests/conformance_test.rs | 1400 | test |
 | tools/aimux-codegen/src/extract.rs | 1381 | src |
 | bindings/python/src/lib.rs | 1340 | src |
-| tools/aimux-codegen/tests/wire_diff_go.rs | 1329 | test |
 | aimux-providers/src/xai/responses/mod.rs | 1277 | src |
 | aimux-ffi/tests/exports_smoke_test.rs | 1269 | test |
 | aimux-providers/src/openai/convert.rs | 1262 | src |
