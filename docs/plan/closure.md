@@ -154,7 +154,7 @@ except the file-size table (split scope is D10).
 | aimux-core/src/generate.rs | 1490 | src |
 | aimux-providers/src/open_responses.rs | 1424 | src |
 | aimux-providers/tests/conformance_test.rs | 1400 | test |
-| tools/aimux-codegen/src/extract.rs | 1372 | src |
+| tools/aimux-codegen/src/extract.rs | 1381 | src |
 | bindings/python/src/lib.rs | 1340 | src |
 | aimux-providers/src/xai/responses/mod.rs | 1277 | src |
 | aimux-ffi/tests/exports_smoke_test.rs | 1269 | test |

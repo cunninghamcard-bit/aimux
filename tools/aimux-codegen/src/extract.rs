@@ -1238,6 +1238,15 @@ fn args(seg: &syn::PathSegment) -> Vec<&Type> {
     }
 }
 
+/// [`TypeRef`] of a Rust type written as text (e.g. a `ts(concrete)` value or
+/// the Rust side of a codec), or `None` when it does not parse.
+#[must_use]
+pub fn parse_type_ref(text: &str) -> Option<TypeRef> {
+    syn::parse_str::<Type>(text)
+        .ok()
+        .map(|t| type_ref(&t, None))
+}
+
 fn type_ref(ty: &Type, ts_override: Option<&str>) -> TypeRef {
     let text = ty.to_token_stream().to_string().replace(' ', "");
     if let Some(wire) = ts_override {

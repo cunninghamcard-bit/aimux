@@ -13,6 +13,7 @@ use serde::Deserialize;
 
 pub mod extract;
 pub mod manifest;
+pub mod wire;
 
 /// A type spec.
 #[derive(Debug, Deserialize)]
