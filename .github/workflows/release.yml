@@ -50,6 +50,8 @@ jobs:
     if: github.event_name == 'push' || github.event.inputs.rust == 'true'
     steps:
       - uses: actions/checkout@v4
+      - name: Workflow toolchain refs match rust-toolchain.toml
+        run: bash scripts/check_toolchain_pin.sh
       - uses: dtolnay/rust-toolchain@1.99.0
       # Idempotent publish: skips a crate whose version already exists on
       # crates.io, so re-running the workflow after a partial failure is safe.
