@@ -11,6 +11,9 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+pub mod extract;
+pub mod manifest;
+
 /// A type spec.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

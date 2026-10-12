@@ -1,0 +1,313 @@
+//! Phase 2 unit 2.1 acceptance: the manifest covers every `#[ts(export)]`
+//! type, its coverage report equals the 1.5 closure DTO list
+//! (`docs/plan/closure-dtos.txt`), and each mutation below turns red.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use aimux_codegen::manifest::{self, Inputs, exported_section};
+
+fn root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn workspace() -> PathBuf {
+    root().join("../..")
+}
+
+fn inputs() -> Inputs {
+    Inputs::from_workspace(&workspace())
+}
+
+fn tmp(label: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "aimux-manifest-{label}-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+/// Inputs whose `aimux-core/src` is a scratch copy.
+fn scratch_src(label: &str) -> (PathBuf, Inputs) {
+    let dir = tmp(label);
+    let src = dir.join("src");
+    copy_tree(&inputs().src_root, &src);
+    let mut i = inputs();
+    i.src_root = src;
+    (dir, i)
+}
+
+fn errors(i: &Inputs) -> Vec<String> {
+    manifest::generate(i).expect_err("generation should fail")
+}
+
+#[test]
+fn committed_manifest_is_up_to_date() {
+    manifest::check(&inputs(), &root().join("generated")).unwrap();
+}
+
+#[test]
+fn coverage_report_equals_the_closure_dto_list() {
+    let list = std::fs::read_to_string(&inputs().list).unwrap();
+    let expected = exported_section(&list);
+    let header = list.lines().find(|l| l.starts_with("[exported]")).unwrap();
+    assert_eq!(header, format!("[exported] {}", expected.len()));
+    let report = std::fs::read_to_string(root().join("generated/coverage.txt")).unwrap();
+    let got: Vec<String> = report
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(got, expected);
+    for category in [
+        "user",
+        "provider",
+        "core",
+        "error",
+        "recording",
+        "multimodal",
+        "tool",
+    ] {
+        assert!(
+            got.iter().any(|l| l.split(' ').nth(1) == Some(category)),
+            "no {category} type in the manifest"
+        );
+    }
+}
+
+#[test]
+fn manifest_records_versions_json_verbatim() {
+    let manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root().join("generated/manifest.json")).unwrap(),
+    )
+    .unwrap();
+    let versions: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&inputs().versions).unwrap()).unwrap();
+    assert_eq!(manifest["sdk"], versions);
+    assert_eq!(versions.as_object().unwrap().len(), 7);
+    assert_eq!(manifest["generator"]["name"], "aimux-codegen");
+    assert!(
+        manifest["inputHash"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+}
+
+/// Mutation 1: a type loses `#[ts(export)]` (it leaves the manifest) →
+/// red, naming exactly that list line.
+#[test]
+fn removed_type_is_named() {
+    let (dir, i) = scratch_src("removed");
+    let file = i.src_root.join("recording.rs");
+    let text = std::fs::read_to_string(&file).unwrap();
+    let item = text
+        .find("pub struct HttpExchange")
+        .expect("HttpExchange in recording.rs");
+    let attr = text[..item].rfind("#[ts(export)]").unwrap();
+    let mutated = format!("{}{}", &text[..attr], &text[attr + "#[ts(export)]".len()..]);
+    std::fs::write(&file, mutated).unwrap();
+    let errs = errors(&i);
+    assert_eq!(
+        errs,
+        vec!["coverage: missing from manifest: HttpExchange recording aimux-core/src/recording.rs"]
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Mutation 2: a fake line in the list → red, naming it.
+#[test]
+fn fake_list_line_is_named() {
+    let dir = tmp("fake");
+    let list = std::fs::read_to_string(&inputs().list).unwrap();
+    let mutated = list.replacen(
+        "\n[exported] ",
+        "\n[exported] \nFakeDto core aimux-core/src/fake.rs\n# count: ",
+        1,
+    );
+    let mut i = inputs();
+    i.list = dir.join("closure-dtos.txt");
+    std::fs::write(&i.list, mutated).unwrap();
+    assert_eq!(
+        errors(&i),
+        vec!["coverage: missing from manifest: FakeDto core aimux-core/src/fake.rs"]
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Mutation 3: an extra exported type not in the list → red, naming it.
+#[test]
+fn extra_manifest_type_is_named() {
+    let (dir, i) = scratch_src("extra");
+    std::fs::write(
+        i.src_root.join("extra_dto.rs"),
+        "#[derive(Serialize, Deserialize, TS)]\n#[ts(export)]\npub struct ExtraDto {\n    pub a: String,\n}\n",
+    )
+    .unwrap();
+    assert_eq!(
+        errors(&i),
+        vec!["coverage: not in closure-dtos.txt: ExtraDto core aimux-core/src/extra_dto.rs"]
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Mutation 4: VERSIONS.json changes → committed manifest is stale (lib and
+/// CLI), and the new version lands in a regenerated manifest.
+#[test]
+fn versions_change_makes_manifest_stale() {
+    let dir = tmp("versions");
+    let text = std::fs::read_to_string(&inputs().versions).unwrap();
+    assert!(text.contains("\"ai\": \"7.0.127\""));
+    let versions = dir.join("VERSIONS.json");
+    std::fs::write(
+        &versions,
+        text.replace("\"ai\": \"7.0.127\"", "\"ai\": \"7.0.999\""),
+    )
+    .unwrap();
+    let mut i = inputs();
+    i.versions = versions.clone();
+    let problems = manifest::check(&i, &root().join("generated")).unwrap_err();
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0].ends_with("manifest.json is out of date"),
+        "{problems:?}"
+    );
+    let fresh = manifest::generate(&i).unwrap();
+    assert!(fresh[0].content.contains("\"ai\": \"7.0.999\""));
+
+    let out = Command::new(env!("CARGO_BIN_EXE_aimux-codegen"))
+        .args(["--check", "--versions"])
+        .arg(&versions)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("manifest.json is out of date"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Mutation 5: an exported type with a field type that is neither a DTO,
+/// alias, primitive/container nor registered codec → generation error with
+/// file:line; nothing is written.
+#[test]
+fn unregistered_field_type_fails_generation() {
+    let (dir, i) = scratch_src("unregistered");
+    std::fs::write(
+        i.src_root.join("extra_dto.rs"),
+        "#[derive(Serialize, Deserialize, TS)]\n#[ts(export)]\npub struct ExtraDto {\n    pub at: std::time::Instant,\n}\n",
+    )
+    .unwrap();
+    let errs = errors(&i);
+    assert!(
+        errs.iter().any(|e| e
+            == "aimux-core/src/extra_dto.rs:3: unregistered type `Instant` (is not an exported type and has no registered codec)"),
+        "{errs:?}"
+    );
+
+    let out_dir = dir.join("out");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_aimux-codegen"))
+        .args(["--src"])
+        .arg(&i.src_root)
+        .arg("--out")
+        .arg(&out_dir)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unregistered type `Instant`"));
+    assert_eq!(
+        std::fs::read_dir(&out_dir).unwrap().count(),
+        0,
+        "failed generation wrote files"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Hand-written serde without a declared codec is rejected too.
+#[test]
+fn hand_written_serde_without_codec_fails() {
+    let (dir, i) = scratch_src("handwritten");
+    std::fs::write(
+        i.src_root.join("extra_dto.rs"),
+        "#[derive(TS)]\n#[ts(export)]\npub enum ExtraDto { A }\n",
+    )
+    .unwrap();
+    let errs = errors(&i);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("extra_dto.rs:3: ExtraDto has hand-written serde")),
+        "{errs:?}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Every struct field wire name and every tagged variant value in the
+/// manifest appears in the current ts-rs export for that type, so the
+/// extracted serde rules (rename / rename_all / tag) match what serde emits.
+#[test]
+fn wire_names_match_the_current_ts_exports() {
+    let manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root().join("generated/manifest.json")).unwrap(),
+    )
+    .unwrap();
+    let mut checked = 0;
+    let mut problems = Vec::new();
+    for t in manifest["types"].as_array().unwrap() {
+        if t.get("tsOverride").is_some() {
+            continue;
+        }
+        let name = t.get("tsName").unwrap_or(&t["name"]).as_str().unwrap();
+        let path = workspace().join(format!("bindings/node/src/types/{name}.ts"));
+        let ts = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let shape = &t["shape"];
+        let mut names = Vec::new();
+        match shape["kind"].as_str().unwrap() {
+            "struct" => {
+                for f in shape["fields"].as_array().unwrap() {
+                    if f.get("flatten").is_none() {
+                        names.push(f["wire"].as_str().unwrap().to_string());
+                    }
+                }
+            }
+            "enum" => {
+                for v in shape["variants"].as_array().unwrap() {
+                    if let Some(w) = v.get("wire") {
+                        names.push(format!("\"{}\"", w.as_str().unwrap()));
+                    }
+                }
+            }
+            _ => {}
+        }
+        for n in names {
+            checked += 1;
+            let found = if n.starts_with('"') {
+                ts.contains(&n)
+            } else {
+                ts.contains(&format!("{n}:"))
+                    || ts.contains(&format!("{n}?:"))
+                    || ts.contains(&format!("\"{n}\":"))
+                    || ts.contains(&format!("\"{n}\"?:"))
+            };
+            if !found {
+                problems.push(format!("{name}: {n}"));
+            }
+        }
+    }
+    assert!(checked > 800, "only {checked} names checked");
+    assert!(problems.is_empty(), "{problems:?}");
+}
