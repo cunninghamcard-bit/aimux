@@ -161,11 +161,11 @@ except the file-size table (split scope is D10).
 | aimux-providers/src/xai/responses/mod.rs | 1277 | src |
 | aimux-ffi/tests/exports_smoke_test.rs | 1269 | test |
 | aimux-providers/src/openai/convert.rs | 1262 | src |
-| tools/aimux-codegen/tests/wire_diff_go.rs | 1249 | test |
 | aimux-providers/src/vertex/model.rs | 1227 | src |
 | aimux-providers/tests/bedrock_remaining_test.rs | 1215 | test |
 | aimux-providers/tests/e2e_test.rs | 1185 | test |
 | aimux-providers/src/elevenlabs.rs | 1184 | src |
+| tools/aimux-codegen/tests/wire_diff_go.rs | 1180 | test |
 | aimux-providers/src/huggingface/responses.rs | 1172 | src |
 | aimux-providers/tests/bedrock_convert_test.rs | 1170 | test |
 | aimux-providers/tests/openai_compatible_test.rs | 1152 | test |

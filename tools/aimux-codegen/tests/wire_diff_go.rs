@@ -19,8 +19,7 @@
 #[path = "common/fixtures.rs"]
 mod fixtures;
 
-use aimux_core::image_model::ImageOutputs;
-use fixtures::{Back, Fixture, back, fixtures};
+use fixtures::{Fixture, fixtures, null_parity_cases};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -1051,74 +1050,6 @@ fn verdict_and_doc_checks_each_catch_their_mutation() {
 /// Untagged decode error parity (reviewer A): for null-bearing inputs the
 /// generated Go must accept exactly when real serde deserialization accepts.
 /// encoding/json alone accepts `null` and `[null]` as zero values.
-fn null_parity_cases() -> Vec<Fixture> {
-    use aimux_core::decision_model::{DecisionDescription, DecisionValue};
-    use aimux_core::evaluation_model::EvaluationInput;
-    use aimux_core::shared::FileBytes;
-    let fb: Back = back::<FileBytes>;
-    let io: Back = back::<ImageOutputs>;
-    let ei: Back = back::<EvaluationInput>;
-    let dv: Back = back::<DecisionValue>;
-    let dd: Back = back::<DecisionDescription>;
-    [
-        ("null-FileBytes", "FileBytes", json!(null), fb),
-        ("null-FileBytes-elem", "FileBytes", json!([null]), fb),
-        ("null-FileBytes-ok", "FileBytes", json!([1, 2]), fb),
-        ("null-ImageOutputs", "ImageOutputs", json!(null), io),
-        ("null-ImageOutputs-elem", "ImageOutputs", json!([null]), io),
-        (
-            "null-ImageOutputs-inner",
-            "ImageOutputs",
-            json!([[null]]),
-            io,
-        ),
-        ("null-ImageOutputs-ok", "ImageOutputs", json!([[1]]), io),
-        ("null-EvaluationInput", "EvaluationInput", json!(null), ei),
-        (
-            "null-EvaluationInput-array",
-            "EvaluationInput",
-            json!([null]),
-            ei,
-        ),
-        (
-            "null-EvaluationInput-object",
-            "EvaluationInput",
-            json!({"a": null}),
-            ei,
-        ),
-        ("null-DecisionValue", "DecisionValue", json!(null), dv),
-        ("null-DecisionValue-ok", "DecisionValue", json!(true), dv),
-        // Audit: the only untagged variants that hold JSON values (where
-        // serde does accept a null inside) are Vec<Value> / Map payloads.
-        (
-            "null-DecisionDescription",
-            "DecisionDescription",
-            json!(null),
-            dd,
-        ),
-        (
-            "null-DecisionDescription-array",
-            "DecisionDescription",
-            json!([null]),
-            dd,
-        ),
-        (
-            "null-DecisionDescription-object",
-            "DecisionDescription",
-            json!({"a": null}),
-            dd,
-        ),
-    ]
-    .into_iter()
-    .map(|(label, ty, json, b)| Fixture {
-        label,
-        ty,
-        json,
-        back: Some(b),
-    })
-    .collect()
-}
-
 /// `(label, serde accepts, generated Go accepts)` per null-parity case.
 fn null_parity(mutate: impl Fn(String) -> String) -> Vec<(String, bool, bool)> {
     let cases = null_parity_cases();
