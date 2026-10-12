@@ -37,9 +37,31 @@ fn relative_nonexistent_root_inside_bindings_is_rejected() {
         std::path::Path::new("newout"),
     );
     std::env::set_current_dir(before).unwrap();
-    let wrote = go.join("newout").exists();
+    let written = files_under(&dir.join("bindings"));
     let _ = std::fs::remove_dir_all(&dir);
+    // Nothing at all may land anywhere under bindings/, checked first.
+    assert!(
+        written.is_empty(),
+        "files were written under bindings/: {written:#?}"
+    );
     let err = res.expect_err("relative root under bindings/ must be refused");
     assert!(err.contains("never write under bindings/"), "{err}");
-    assert!(!wrote, "files were written into bindings/go/newout");
+}
+
+/// Every file (not directory) under `dir`, recursively.
+fn files_under(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if std::fs::symlink_metadata(&p).unwrap().is_dir() {
+                stack.push(p);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    out.sort();
+    out
 }
