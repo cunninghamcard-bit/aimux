@@ -49,7 +49,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: bash scripts/check_toolchain_pin.sh
+      - run: |
+          bash scripts/check_toolchain_pin.sh
+          python3 scripts/check_release_gate.py
 
   # ── Rust core → crates.io (dependency order) ─────────────────────────────
   rust-publish:
