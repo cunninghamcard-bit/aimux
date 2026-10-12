@@ -64,3 +64,13 @@ open PR：只有 #24–#27（E.0/E.1/E.2/E.3a），对本文引用的行只改 `
 W.1 的鉴权位置（签名以 #39 `exp/w1-openai-chat-encode@c4e80246` 为准）：纯函数 `encode_chat(url, headers, model_id, &CallOptions, stream, parse_chat_options) -> Result<EncodedChatRequest, AiMuxError>`（`aimux-providers/src/openai/model.rs:202-209`）不碰鉴权：它收到的 `headers` 已经解析好，自己不读凭据、不加 `authorization`。`authorization` 只在 `encode_request`（`model.rs:160`）里加：它调 `OpenAIModelConfig::request_headers`（`aimux-providers/src/openai/config.rs:139`）解析凭据。原生 OpenAI 的 `Bearer <key>` 来自 provider headers：`create_openai` 用 `ProviderHeaders::bearer(...)` 构造（`openai/mod.rs:249`），请求时由 `self.headers.resolve()`（`config.rs:143`）解析出来；`:153-162` 只是 `token_provider` 分支，只有合并后的 headers 里没有 `authorization` 时才补 `Bearer <token>`。然后把结果交给 `encode_chat`（`model.rs:169`）。
 
 W7（crate 拆分）属于阶段 3，不在 1W。W2/W3 只做 OpenAI chat（W.1、W.2），其他协议族列为待查。
+
+## 已知偏差：Aws4Fetch 模式下调用方自带的 `x-amz-content-sha256`
+
+`SigV4Signing::Aws4Fetch` 模式下，如果调用方自己带了 `x-amz-content-sha256` 头，aimux 会照原样发出，但不签它（`aimux-provider-utils/src/sigv4_fetch.rs:170` 把它排除在 canonical headers 之外），payload hash 仍用实际 body 算。aws4fetch 1.0.20 的做法不同：这个头会进入 SignedHeaders（`aws4fetch.esm.mjs:109-110` 只排除 `UNSIGNABLE_HEADERS`），并且直接用它的值当 payload hash（`aws4fetch.esm.mjs:208` `hexBodyHash`）。目前没有调用方会传这个头（bedrock、anthropic_aws 都不传），所以先不改；等哪个调用方开始传了，再按 aws4fetch 对齐。
+
+调用方自带的 `x-amz-security-token` 也一样：aimux 照发不签（`sigv4_fetch.rs:171`；凭据里有 session token 时才由签名器写入并签名）。aws4fetch 不把它算作 `UNSIGNABLE_HEADERS`，会签进去（凭据带 token 时用凭据的值覆盖，`aws4fetch.esm.mjs:106-108`）。目前同样没有调用方这样传，先不改。
+
+## Polly 的两条锁定测试不能删
+
+`aws_polly_signed_headers_are_locked` 和 `aws_polly_signed_headers_with_session_token_are_locked`（`aimux-providers/tests/sigv4_signed_headers_test.rs`）是 `SigV4Signing::AllHeaders` 规则唯一的守护：botocore 对照测试（`sigv4_fetch.rs` 里的 `signatures_match_botocore` 等）直接调 `sign_request`，绕过了 `SigV4Fetch::fetch` 里按模式过滤请求头的那一步，测不到 AllHeaders 签了哪些头。Polly 是目前唯一用 AllHeaders 的调用方，这两条测试删了，AllHeaders 的头部规则就没有任何测试了。

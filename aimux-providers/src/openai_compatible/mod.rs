@@ -129,6 +129,10 @@ pub fn create_openai_compatible(
         });
     let defaults = ChatSettings::default();
     OpenAICompatibleProvider::assemble(Assembly {
+        user_agent: (
+            "openai-compatible",
+            crate::shared::aisdk_pins::OPENAI_COMPATIBLE,
+        ),
         name: settings.name,
         base_url: BaseUrl::Fixed(base_url),
         credential,
@@ -158,6 +162,8 @@ pub(crate) struct Assembly {
     pub query_params: Option<HashMap<String, String>>,
     pub fetch: Option<FetchFunction>,
     pub chat: ChatSettings,
+    /// `(package, version)` of the provider headers' user-agent suffix.
+    pub user_agent: (&'static str, &'static str),
 }
 
 /// An OpenAI-compatible provider (the AI SDK's `OpenAICompatibleProvider`).
@@ -187,10 +193,7 @@ impl OpenAICompatibleProvider {
                 scheme: AuthScheme::Bearer,
                 fixed: assembly.fixed_headers,
                 user: assembly.headers,
-                user_agent: Some((
-                    "openai-compatible",
-                    crate::shared::aisdk_pins::OPENAI_COMPATIBLE,
-                )),
+                user_agent: Some(assembly.user_agent),
             },
             fetch: assembly.fetch,
             chat: assembly.chat,

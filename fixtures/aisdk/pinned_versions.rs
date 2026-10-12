@@ -41,3 +41,20 @@ pub fn pinned(package: &str) -> String {
         .unwrap_or_else(|| panic!("{package} is not pinned in VERSIONS.json"))
         .1
 }
+
+/// The exact version `package` depends on for `dependency`, from the
+/// optional `dependencies` object of its VERSIONS.json entry (copied from the
+/// published package.json `dependencies`).
+#[allow(dead_code)] // not every crate that includes this file reads it
+pub fn pinned_dependency(package: &str, dependency: &str) -> String {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../fixtures/aisdk/VERSIONS.json"
+    );
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    let doc: serde_json::Value = serde_json::from_str(&text).expect("VERSIONS.json is JSON");
+    doc[package]["dependencies"][dependency]
+        .as_str()
+        .unwrap_or_else(|| panic!("{package}: no pinned dependency {dependency}"))
+        .to_string()
+}
