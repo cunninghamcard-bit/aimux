@@ -10,8 +10,8 @@ except the file-size table (split scope is D10).
 |---|---|
 | FFI `aimux_*_new` (name ends in `_new`) | 29 |
 | FFI `aimux_*_new*` (incl. `_new_with_base` etc.) | 51 |
-| .rs files > 1000 lines (all tracked) | 35 |
-| .rs files > 1000 lines (excluding `*/tests/*`) | 23 |
+| .rs files > 1000 lines (all tracked) | 36 |
+| .rs files > 1000 lines (excluding `*/tests/*`) | 24 |
 | ts-rs `#[derive(TS)]` sites | 201 |
 | `from_resolved` occurrences | 0 |
 | closure-typed `Box/Arc<dyn Fn*>` (non-test) | 3 |
@@ -171,3 +171,4 @@ except the file-size table (split scope is D10).
 | aimux-providers/src/google/model.rs | 1045 | src |
 | bindings/node/src/multimodal.rs | 1017 | src |
 | aimux-providers/src/xai/responses/convert.rs | 1013 | src |
+| tools/aimux-codegen/src/extract.rs | 1012 | src |

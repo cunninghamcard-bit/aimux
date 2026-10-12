@@ -350,3 +350,86 @@ fn crlf_checkout_gives_identical_manifest() {
     manifest::check(&i, &root().join("generated")).unwrap();
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Each serde rule the extractor models changes the manifest: one mutation
+/// per attribute in a scratch copy makes the committed manifest stale.
+#[test]
+fn serde_attribute_mutations_make_manifest_stale() {
+    let cases: &[(&str, &str, &str, &str)] = &[
+        (
+            "skip_serializing_if",
+            "tool.rs",
+            "#[serde(default, skip_serializing_if = \"Option::is_none\")]",
+            "#[serde(default)]",
+        ),
+        (
+            "flatten",
+            "tool.rs",
+            "#[serde(default, skip_serializing_if = \"Option::is_none\")]",
+            "#[serde(flatten, default, skip_serializing_if = \"Option::is_none\")]",
+        ),
+        (
+            "untagged",
+            "transcription_model.rs",
+            "#[serde(untagged)]",
+            "",
+        ),
+        (
+            "rename_all",
+            "tool.rs",
+            "#[serde(rename_all = \"camelCase\")]",
+            "#[serde(rename_all = \"snake_case\")]",
+        ),
+        (
+            "field rename",
+            "decision_model.rs",
+            "#[serde(rename = \"true\",",
+            "#[serde(rename = \"yes\",",
+        ),
+    ];
+    for (label, file, from, to) in cases {
+        let (dir, i) = scratch_src(&label.replace(' ', "_"));
+        let path = i.src_root.join(file);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(from), "{label}: `{from}` not in {file}");
+        std::fs::write(&path, text.replacen(from, to, 1)).unwrap();
+        let problems = manifest::check(&i, &root().join("generated"))
+            .expect_err(&format!("{label}: mutation not detected"));
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.ends_with("manifest.json is out of date")),
+            "{label}: {problems:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// The acceptance list is computed from source by the script (not edited by
+/// hand): regenerating it reproduces the committed file, including the
+/// 193rd type `ToolChoice`, whose `#[ts(\n export, ..)]` spans lines
+/// (aimux-core/src/tool.rs:210-213).
+#[test]
+fn closure_dto_list_is_reproducible_from_source() {
+    let out = Command::new("python3")
+        .arg(workspace().join("scripts/gen_closure_inventory.py"))
+        .arg("--check")
+        .output()
+        .expect("python3 is required to verify docs/plan/closure-dtos.txt");
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let list = std::fs::read_to_string(&inputs().list).unwrap();
+    assert!(list.contains("\n[exported] 193\n"));
+    let tool = std::fs::read_to_string(workspace().join("aimux-core/src/tool.rs")).unwrap();
+    assert!(
+        tool.contains("#[ts(\n    export,"),
+        "multi-line export fixture moved"
+    );
+    assert!(
+        exported_section(&list).contains(&"ToolChoice tool aimux-core/src/tool.rs".to_string())
+    );
+}

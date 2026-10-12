@@ -29,6 +29,9 @@ DTO_OUT = ROOT / "docs/plan/closure-dtos.txt"
 # tools/aimux-codegen/src/extract.rs and the two are compared by the
 # coverage report, so a disagreement turns red.
 DTO_EXCLUDED = ["tools/aimux-web/src/wire.rs"]
+# The generator itself quotes `#[derive(.., TS)]` / `#[ts(export)]` in docs
+# and test fixtures; those are text, not types.
+TS_SCAN_EXCLUDED_PREFIX = "tools/aimux-codegen/"
 CATEGORY_BY_FILE = {
     "aimux-core/src/error.rs": "error",
     "aimux-core/src/recording.rs": "recording",
@@ -105,7 +108,7 @@ def render() -> str:
     ffi_text = "\n".join(read(p) for p in ffi_src)
     exact = sorted(set(FFI_NEW_EXACT.findall(ffi_text)))
     prefixed = sorted(set(FFI_NEW_PREFIX.findall(ffi_text)))
-    ts = per_file(rs, TS_DERIVE)
+    ts = per_file([p for p in rs if not p.startswith(TS_SCAN_EXCLUDED_PREFIX)], TS_DERIVE)
     resolved = per_file(rs, FROM_RESOLVED)
     closures = per_file([p for p in rs if "/tests/" not in p], CLOSURE_FIELD)
     lengths = {p: read(p).count("\n") for p in rs}
@@ -193,7 +196,7 @@ def ts_items(path: str) -> list[tuple[str, bool]]:
 def render_dtos() -> str:
     exported, unexported, excluded = [], [], []
     for path in tracked("*.rs"):
-        if "/tests/" in path or not TS_DERIVE.search(read(path)):
+        if "/tests/" in path or path.startswith(TS_SCAN_EXCLUDED_PREFIX) or not TS_DERIVE.search(read(path)):
             continue
         for name, exp in ts_items(path):
             if path in DTO_EXCLUDED:
