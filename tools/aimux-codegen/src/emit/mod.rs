@@ -37,6 +37,17 @@ pub fn write(
     model: &WireModel,
     out_root: &Path,
 ) -> Result<Vec<PathBuf>, String> {
+    // Relative roots are made absolute against the current directory first,
+    // so every check below sees where the files would really go.
+    let abs;
+    let out_root = if out_root.is_absolute() {
+        out_root
+    } else {
+        abs = std::env::current_dir()
+            .map_err(|e| format!("current directory: {e}"))?
+            .join(out_root);
+        abs.as_path()
+    };
     // Literal check first, before anything is resolved: `target/../bindings`
     // or a `bindings` component that is itself a symlink elsewhere is
     // refused as written.
@@ -69,9 +80,6 @@ pub fn write(
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
-        // Again on the full final path, after create_dir_all and right
-        // before the write.
-        guard_below(&root, &rel)?;
         std::fs::write(&path, o.content).map_err(|e| format!("{}: {e}", path.display()))?;
         written.push(path);
     }
