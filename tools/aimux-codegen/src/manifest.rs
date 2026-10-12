@@ -183,13 +183,32 @@ fn input_hash(inputs: &Inputs, versions_text: &str) -> Result<String, Vec<String
             .unwrap_or(&f)
             .to_string_lossy()
             .replace('\\', "/");
-        let bytes = std::fs::read(&f).map_err(|e| vec![format!("{}: {e}", f.display())])?;
+        let bytes = lf(&std::fs::read(&f).map_err(|e| vec![format!("{}: {e}", f.display())])?);
         h.update(format!("{SRC_PREFIX}/{rel}\0{}\0", bytes.len()));
         h.update(bytes);
     }
     h.update("fixtures/aisdk/VERSIONS.json\0");
-    h.update(versions_text);
+    h.update(lf(versions_text.as_bytes()));
     Ok(format!("sha256:{:x}", h.finalize()))
+}
+
+/// CRLF → LF, so the hash (and the manifest) is the same whatever line
+/// endings the checkout produced (e.g. `core.autocrlf=true` on Windows).
+/// Done here rather than via `.gitattributes`, which only applies to
+/// checkouts that honour it.
+#[must_use]
+pub fn lf(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\r' && bytes.get(i + 1) == Some(&b'\n') {
+            i += 1;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
 }
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {

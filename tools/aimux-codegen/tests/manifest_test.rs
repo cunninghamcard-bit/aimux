@@ -311,3 +311,42 @@ fn wire_names_match_the_current_ts_exports() {
     assert!(checked > 800, "only {checked} names checked");
     assert!(problems.is_empty(), "{problems:?}");
 }
+
+/// A CRLF checkout (Windows `core.autocrlf=true`) of the same sources and
+/// VERSIONS.json gives the same input hash and a byte-identical manifest.
+#[test]
+fn crlf_checkout_gives_identical_manifest() {
+    fn to_crlf(dir: &Path) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let p = entry.unwrap().path();
+            if p.is_dir() {
+                to_crlf(&p);
+            } else {
+                let text = std::fs::read_to_string(&p).unwrap();
+                std::fs::write(&p, text.replace("\r\n", "\n").replace('\n', "\r\n")).unwrap();
+            }
+        }
+    }
+    let (dir, mut i) = scratch_src("crlf");
+    to_crlf(&i.src_root);
+    let versions = dir.join("VERSIONS.json");
+    let text = std::fs::read_to_string(&inputs().versions).unwrap();
+    std::fs::write(&versions, text.replace('\n', "\r\n")).unwrap();
+    i.versions = versions;
+    assert!(
+        std::fs::read_to_string(i.src_root.join("lib.rs"))
+            .unwrap()
+            .contains("\r\n")
+    );
+
+    let lf_out = manifest::generate(&inputs()).unwrap();
+    let crlf_out = manifest::generate(&i).unwrap();
+    let hash = |o: &[aimux_codegen::Output]| {
+        let v: serde_json::Value = serde_json::from_str(&o[0].content).unwrap();
+        v["inputHash"].as_str().unwrap().to_string()
+    };
+    assert_eq!(hash(&crlf_out), hash(&lf_out));
+    assert_eq!(crlf_out, lf_out);
+    manifest::check(&i, &root().join("generated")).unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+}
