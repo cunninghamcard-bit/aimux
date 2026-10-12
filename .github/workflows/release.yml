@@ -50,7 +50,7 @@ jobs:
     if: github.event_name == 'push' || github.event.inputs.rust == 'true'
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
       # Idempotent publish: skips a crate whose version already exists on
       # crates.io, so re-running the workflow after a partial failure is safe.
       # The version is read from the workspace Cargo.toml so this never goes
@@ -141,7 +141,7 @@ jobs:
             binary: aimux.linux-arm64-gnu.node
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: ${{ matrix.settings.target }}
       - uses: Swatinem/rust-cache@v2
@@ -182,7 +182,7 @@ jobs:
     if: github.event_name == 'push' || github.event.inputs.node == 'true'
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -241,7 +241,7 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-python@v5
         with:
@@ -275,7 +275,7 @@ jobs:
             target: x86_64-pc-windows-gnu
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: ${{ matrix.settings.target }}
       - uses: Swatinem/rust-cache@v2
@@ -324,7 +324,7 @@ jobs:
             artifact: aimux_ffi-windows-x64.dll
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
@@ -374,7 +374,7 @@ jobs:
             suffix: -windows-x64.exe
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: ${{ matrix.settings.target }}
       - uses: Swatinem/rust-cache@v2
@@ -434,7 +434,7 @@ jobs:
             targets: aarch64-apple-ios aarch64-apple-ios-sim
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: ${{ matrix.targets }}
       - uses: Swatinem/rust-cache@v2
@@ -514,7 +514,7 @@ jobs:
     if: github.event_name == 'push' || github.event.inputs.flutter == 'true'
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
       - uses: Swatinem/rust-cache@v2
       - uses: subosito/flutter-action@v2
         with:
