@@ -152,10 +152,10 @@ except the file-size table (split scope is D10).
 | aimux-providers/src/bedrock/convert.rs | 1699 | src |
 | bindings/node/src/lib.rs | 1694 | src |
 | aimux-providers/tests/data_loss_regression_test.rs | 1631 | test |
+| tools/aimux-codegen/tests/wire_diff_go.rs | 1559 | test |
 | tools/aimux-codegen/tests/common/go_fixtures_empty.rs | 1536 | test |
 | aimux-core/src/generate.rs | 1490 | src |
 | aimux-providers/src/open_responses.rs | 1424 | src |
-| tools/aimux-codegen/tests/wire_diff_go.rs | 1408 | test |
 | aimux-providers/tests/conformance_test.rs | 1400 | test |
 | tools/aimux-codegen/src/extract.rs | 1381 | src |
 | bindings/python/src/lib.rs | 1340 | src |
