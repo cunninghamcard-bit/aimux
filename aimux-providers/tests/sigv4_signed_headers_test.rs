@@ -206,22 +206,39 @@ async fn anthropic_aws_signed_headers() {
     assert!(!sent.content_sha256);
 }
 
-/// No AI SDK counterpart: locks aimux's current signing.
-#[tokio::test]
-async fn aws_polly_signed_headers_are_locked() {
+async fn aws_polly_case(token: bool) -> Sent {
     let server = server().await;
     let provider = create_aws_polly(AwsPollyProviderSettings {
         base_url: Some(server.uri()),
         region: Some("us-east-1".into()),
         access_key_id: Some("AKIDEXAMPLE".into()),
         secret_access_key: Some("secret".into()),
+        session_token: token.then(|| "TOKEN".into()),
         ..Default::default()
     })
     .unwrap();
     let mut options = SpeechCallOptions::new("hi".to_string());
     options.max_retries = Some(0);
     let _ = provider.speech("standard").do_generate(&options).await;
-    let sent = sent(&server).await;
+    sent(&server).await
+}
+
+/// No AI SDK counterpart, session token: the `AllHeaders` set plus
+/// `x-amz-security-token`.
+#[tokio::test]
+async fn aws_polly_signed_headers_with_session_token_are_locked() {
+    let sent = aws_polly_case(true).await;
+    assert_eq!(
+        sent.signed_headers,
+        "content-type;host;user-agent;x-amz-content-sha256;x-amz-date;x-amz-security-token"
+    );
+    assert!(sent.content_sha256);
+}
+
+/// No AI SDK counterpart: locks aimux's current signing.
+#[tokio::test]
+async fn aws_polly_signed_headers_are_locked() {
+    let sent = aws_polly_case(false).await;
     assert_eq!(
         sent.signed_headers,
         "content-type;host;user-agent;x-amz-content-sha256;x-amz-date"

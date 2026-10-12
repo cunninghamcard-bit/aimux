@@ -64,3 +64,7 @@ open PR：只有 #24–#27（E.0/E.1/E.2/E.3a），对本文引用的行只改 `
 W.1 的鉴权位置（签名以 #39 `exp/w1-openai-chat-encode@c4e80246` 为准）：纯函数 `encode_chat(url, headers, model_id, &CallOptions, stream, parse_chat_options) -> Result<EncodedChatRequest, AiMuxError>`（`aimux-providers/src/openai/model.rs:202-209`）不碰鉴权：它收到的 `headers` 已经解析好，自己不读凭据、不加 `authorization`。`authorization` 只在 `encode_request`（`model.rs:160`）里加：它调 `OpenAIModelConfig::request_headers`（`aimux-providers/src/openai/config.rs:139`）解析凭据。原生 OpenAI 的 `Bearer <key>` 来自 provider headers：`create_openai` 用 `ProviderHeaders::bearer(...)` 构造（`openai/mod.rs:249`），请求时由 `self.headers.resolve()`（`config.rs:143`）解析出来；`:153-162` 只是 `token_provider` 分支，只有合并后的 headers 里没有 `authorization` 时才补 `Bearer <token>`。然后把结果交给 `encode_chat`（`model.rs:169`）。
 
 W7（crate 拆分）属于阶段 3，不在 1W。W2/W3 只做 OpenAI chat（W.1、W.2），其他协议族列为待查。
+
+## 已知偏差：Aws4Fetch 模式下调用方自带的 `x-amz-content-sha256`
+
+`SigV4Signing::Aws4Fetch` 模式下，如果调用方自己带了 `x-amz-content-sha256` 头，aimux 会照原样发出，但不签它（`aimux-provider-utils/src/sigv4_fetch.rs:169` 把它排除在 canonical headers 之外），payload hash 仍用实际 body 算。aws4fetch 1.0.20 的做法不同：这个头会进入 SignedHeaders（`aws4fetch.esm.mjs:109-110` 只排除 `UNSIGNABLE_HEADERS`），并且直接用它的值当 payload hash（`aws4fetch.esm.mjs:208` `hexBodyHash`）。目前没有调用方会传这个头（bedrock、anthropic_aws 都不传），所以先不改；等哪个调用方开始传了，再按 aws4fetch 对齐。
