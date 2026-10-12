@@ -1,0 +1,14 @@
+# Verdicts for docs/plan/2.2-diff-go.md (human-filled; read by
+# tools/aimux-codegen/tests/wire_diff_go.rs). One `[Type]` section per type,
+# `"field" = "generator bug" | "handwritten bug"`. A diff row without an
+# entry, an entry without a row, or a verdict that contradicts the Rust serde
+# output fails the test.
+
+[ImageResult]
+# Rust Vec<Vec<u8>> (ImageOutputs::Binary, image_model.rs) serializes as an
+# array of numbers; hand-written `Bytes` (multimodal_types.go) always
+# re-encodes as a base64 string.
+"images[0]" = "handwritten bug"
+# ImageResult.warnings has no skip_serializing_if: serde writes `[]`; the
+# hand-written field is `omitempty` and drops it.
+"warnings" = "handwritten bug"
