@@ -162,12 +162,12 @@ except the file-size table (split scope is D10).
 | aimux-providers/src/openai/convert.rs | 1262 | src |
 | aimux-providers/src/vertex/model.rs | 1227 | src |
 | aimux-providers/tests/bedrock_remaining_test.rs | 1215 | test |
+| tools/aimux-codegen/tests/wire_diff_go.rs | 1214 | test |
 | aimux-providers/tests/e2e_test.rs | 1185 | test |
 | aimux-providers/src/elevenlabs.rs | 1184 | src |
 | aimux-providers/src/huggingface/responses.rs | 1172 | src |
 | aimux-providers/tests/bedrock_convert_test.rs | 1170 | test |
 | aimux-providers/tests/openai_compatible_test.rs | 1152 | test |
-| tools/aimux-codegen/tests/wire_diff_go.rs | 1111 | test |
 | aimux-provider-utils/tests/streaming_tool_call_tracker_test.rs | 1105 | test |
 | aimux-providers/src/vertex/auth.rs | 1090 | src |
 | aimux-core/src/openai_output.rs | 1065 | src |

@@ -1,0 +1,56 @@
+[
+  {
+    "type": "ImageResult",
+    "field": "images[0]",
+    "verdict": "handwritten bug",
+    "reason": "Rust Vec<Vec<u8>> (ImageOutputs::Binary, image_model.rs) serializes as an array of numbers; hand-written `Bytes` (multimodal_types.go) always re-encodes as a base64 string."
+  },
+  {
+    "type": "ImageResult",
+    "field": "warnings",
+    "verdict": "handwritten bug",
+    "reason": "ImageResult.warnings has no skip_serializing_if: serde writes `[]`; the hand-written field is `omitempty` and drops it."
+  },
+  {
+    "type": "AudioData",
+    "field": "(value)",
+    "verdict": "handwritten bug",
+    "reason": "AudioData::Binary(Vec<u8>) (speech_model.rs) serializes as a number array; hand-written `AudioData = Bytes` re-encodes it as base64."
+  },
+  {
+    "type": "ImageOutputs",
+    "field": "[0]",
+    "verdict": "handwritten bug",
+    "reason": "ImageOutputs::Binary(Vec<Vec<u8>>): number arrays in Rust, base64 strings from the hand-written `[]Bytes`."
+  },
+  {
+    "type": "SearchResult",
+    "field": "results[0].providerMetadata.x.x.k",
+    "verdict": "handwritten bug",
+    "reason": "SearchResultItem.providerMetadata exists in Rust (search_model.rs); the hand-written SearchResultItem has no such field and drops it."
+  },
+  {
+    "type": "SearchResultItem",
+    "field": "providerMetadata.x.x.k",
+    "verdict": "handwritten bug",
+    "reason": "Same missing providerMetadata field as above."
+  },
+  {
+    "type": "StreamPart",
+    "field": "(all fields)",
+    "verdict": "handwritten bug",
+    "reason": "The hand-written StreamPart is {Type, Raw} with `json:\"-\"` on both, so json.Marshal writes `{}` for every part."
+  },
+  {
+    "type": "TranscriptionCallOptions",
+    "field": "audio",
+    "verdict": "handwritten bug",
+    "reason": "audio: AudioInput::Binary(Vec<u8>) is a number array in Rust; the hand-written `Bytes` re-encodes it as base64."
+  },
+  {
+    "type": "VideoData",
+    "field": "data",
+    "verdict": "handwritten bug",
+    "reason": "VideoData::Binary { data: Vec<u8> } is a number array in Rust; the hand-written `Bytes` re-encodes it as base64."
+  }
+]
