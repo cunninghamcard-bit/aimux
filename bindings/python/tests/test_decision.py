@@ -62,7 +62,7 @@ def test_decision_uses_unified_runtime_recording(server, tmp_path):
     assert record['complete'] is True
     assert record['input']['operation'] == 'decision'
     assert record['input']['options']['questions'] == QUESTIONS
-    assert record['outcome']['decision_result']['answers'] == result['answers']
+    assert record['outcome']['decisionResult']['answers'] == result['answers']
     assert record['exchanges'][0]['attempt'] == 1
     assert 'test-key' not in json.dumps(record)
 
