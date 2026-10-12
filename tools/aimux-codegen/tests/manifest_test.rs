@@ -351,48 +351,106 @@ fn crlf_checkout_gives_identical_manifest() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// Each serde rule the extractor models changes the manifest: one mutation
-/// per attribute in a scratch copy makes the committed manifest stale.
+/// Manifest of `i` as JSON, without `inputHash` (which changes on any edit).
+fn manifest_json(i: &Inputs) -> serde_json::Value {
+    let out = manifest::generate(i).unwrap();
+    let mut v: serde_json::Value = serde_json::from_str(&out[0].content).unwrap();
+    v.as_object_mut().unwrap().remove("inputHash");
+    v
+}
+
+fn find_type<'a>(m: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    m["types"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == name)
+        .unwrap()
+}
+
+fn find_field<'a>(t: &'a serde_json::Value, rust: &str) -> &'a serde_json::Value {
+    t["shape"]["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["rust"] == rust)
+        .unwrap()
+}
+
+/// Each serde rule the extractor models changes the specific manifest field
+/// it drives (manifests compared without `inputHash`), and the committed
+/// manifest goes stale.
 #[test]
-fn serde_attribute_mutations_make_manifest_stale() {
-    let cases: &[(&str, &str, &str, &str)] = &[
+fn serde_attribute_mutations_change_the_modelled_field() {
+    type Probe = fn(&serde_json::Value) -> serde_json::Value;
+    let cases: &[(
+        &str,
+        &str,
+        &str,
+        &str,
+        Probe,
+        serde_json::Value,
+        serde_json::Value,
+    )] = &[
         (
             "skip_serializing_if",
             "tool.rs",
             "#[serde(default, skip_serializing_if = \"Option::is_none\")]",
             "#[serde(default)]",
+            |m| find_field(find_type(m, "FunctionTool"), "description")["omitWhenEmpty"].clone(),
+            serde_json::json!(true),
+            serde_json::Value::Null,
         ),
         (
             "flatten",
             "tool.rs",
             "#[serde(default, skip_serializing_if = \"Option::is_none\")]",
             "#[serde(flatten, default, skip_serializing_if = \"Option::is_none\")]",
+            |m| find_field(find_type(m, "FunctionTool"), "description")["flatten"].clone(),
+            serde_json::Value::Null,
+            serde_json::json!(true),
         ),
         (
             "untagged",
             "transcription_model.rs",
             "#[serde(untagged)]",
             "",
+            |m| find_type(m, "AudioInput")["shape"]["representation"]["style"].clone(),
+            serde_json::json!("untagged"),
+            serde_json::json!("external"),
         ),
         (
             "rename_all",
             "tool.rs",
             "#[serde(rename_all = \"camelCase\")]",
             "#[serde(rename_all = \"snake_case\")]",
+            |m| find_field(find_type(m, "FunctionTool"), "input_schema")["wire"].clone(),
+            serde_json::json!("inputSchema"),
+            serde_json::json!("input_schema"),
         ),
         (
             "field rename",
             "decision_model.rs",
             "#[serde(rename = \"true\",",
             "#[serde(rename = \"yes\",",
+            |m| {
+                find_field(find_type(m, "DecisionBooleanCriteria"), "true_description")["wire"]
+                    .clone()
+            },
+            serde_json::json!("true"),
+            serde_json::json!("yes"),
         ),
     ];
-    for (label, file, from, to) in cases {
+    let base = manifest_json(&inputs());
+    for (label, file, from, to, probe, before, after) in cases {
         let (dir, i) = scratch_src(&label.replace(' ', "_"));
         let path = i.src_root.join(file);
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains(from), "{label}: `{from}` not in {file}");
         std::fs::write(&path, text.replacen(from, to, 1)).unwrap();
+        let mutated = manifest_json(&i);
+        assert_eq!(&probe(&base), before, "{label}: baseline");
+        assert_eq!(&probe(&mutated), after, "{label}: mutated");
         let problems = manifest::check(&i, &root().join("generated"))
             .expect_err(&format!("{label}: mutation not detected"));
         assert!(
@@ -403,6 +461,26 @@ fn serde_attribute_mutations_make_manifest_stale() {
         );
         let _ = std::fs::remove_dir_all(dir);
     }
+}
+
+/// Control: a comment-only edit changes `inputHash` but nothing else.
+#[test]
+fn comment_only_edit_leaves_manifest_identical_except_input_hash() {
+    let (dir, i) = scratch_src("comment");
+    let path = i.src_root.join("tool.rs");
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, format!("// control comment\n{text}")).unwrap();
+    let hash = |i: &Inputs| {
+        let v: serde_json::Value =
+            serde_json::from_str(&manifest::generate(i).unwrap()[0].content).unwrap();
+        v["inputHash"].clone()
+    };
+    assert_ne!(hash(&i), hash(&inputs()));
+    assert_eq!(
+        serde_json::to_string_pretty(&manifest_json(&i)).unwrap(),
+        serde_json::to_string_pretty(&manifest_json(&inputs())).unwrap()
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// The acceptance list is computed from source by the script (not edited by
