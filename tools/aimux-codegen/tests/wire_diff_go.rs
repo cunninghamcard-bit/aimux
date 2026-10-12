@@ -342,13 +342,38 @@ fn gen_only_fixtures() -> Vec<Fixture> {
     ]
 }
 
-/// Type names declared at the top level of a Go file (`type X ...`).
+/// Type names declared at the top level of a Go file: single `type X ...`
+/// lines and the specs of grouped `type ( ... )` declarations.
 fn go_type_names(src: &str) -> BTreeSet<String> {
-    src.lines()
-        .filter_map(|l| l.strip_prefix("type "))
-        .filter_map(|l| l.split([' ', '[']).next())
-        .map(str::to_string)
-        .collect()
+    let first = |l: &str| l.split([' ', '\t', '[']).next().map(str::to_string);
+    let mut names = BTreeSet::new();
+    let mut grouped = false;
+    for l in src.lines() {
+        if grouped {
+            if l.starts_with(')') {
+                grouped = false;
+            } else if let Some(spec) = l.strip_prefix('\t') {
+                // Only a spec at the group's own indent, not a nested field.
+                if !spec.starts_with(['\t', ' ', '/', '}']) && !spec.is_empty() {
+                    names.extend(first(spec));
+                }
+            }
+        } else if l.trim_end() == "type (" {
+            grouped = true;
+        } else if let Some(spec) = l.strip_prefix("type ") {
+            names.extend(first(spec));
+        }
+    }
+    names
+}
+
+#[test]
+fn go_type_names_counts_single_and_grouped_declarations() {
+    let src = "package x\n\ntype A struct {\n\tF int\n}\n\ntype (\n\t// B doc.\n\tB string\n\tC[T any] struct {\n\t\tV T\n\t}\n\tD = A\n)\n\ntype E[T any] []T\n";
+    assert_eq!(
+        go_type_names(src),
+        ["A", "B", "C", "D", "E"].map(String::from).into()
+    );
 }
 
 /// Types declared by the hand-written Go (`types.go` + `multimodal_types.go`).
