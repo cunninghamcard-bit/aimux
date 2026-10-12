@@ -1474,6 +1474,31 @@ fn binary_failures(mutate: impl Fn(String) -> String) -> Vec<String> {
             ));
         }
     }
+    // Reverse direction: serde reads the generated Go's bytes back, gets the
+    // same value, and AudioData comes back as the Binary variant.
+    let gen_raw = |l: &str| {
+        run.results
+            .iter()
+            .find(|r| r.label == l)
+            .map(|r| r.gen_raw.clone())
+            .unwrap_or_default()
+    };
+    match serde_json::from_str::<AudioData>(&gen_raw("bin-AudioData")) {
+        Ok(AudioData::Binary(b)) if b == [0, 1, 127, 255] => {}
+        Ok(other) => out.push(format!(
+            "reverse bin-AudioData: serde read the Go output back as {other:?}, not Binary([0, 1, 127, 255])"
+        )),
+        Err(e) => out.push(format!("reverse bin-AudioData: serde rejected the Go output: {e}")),
+    }
+    match serde_json::from_str::<VideoData>(&gen_raw("bin-VideoData")) {
+        Ok(v) if serde_json::to_string(&v).unwrap() == cases[1].2 => {}
+        Ok(other) => out.push(format!(
+            "reverse bin-VideoData: serde read the Go output back as {other:?}"
+        )),
+        Err(e) => out.push(format!(
+            "reverse bin-VideoData: serde rejected the Go output: {e}"
+        )),
+    }
     if run.variants.get("bin-AudioData").map(String::as_str) != Some("Binary") {
         out.push(format!(
             "bin-AudioData decoded as {:?}, not Binary",
@@ -1488,6 +1513,17 @@ fn binary_audio_and_video_are_byte_identical_to_serde() {
     assert_eq!(binary_failures(|s| s), Vec::<String>::new());
     // Mutation (a): map Vec<u8> to Go's []byte. encoding/json writes base64.
     let a = binary_failures(|s| s.replace("[]U8", "[]byte"));
+    // The reverse direction catches it on its own too: serde reads the
+    // base64 back as AudioData::Base64 and rejects it for VideoData.
+    assert!(
+        a.iter()
+            .any(|m| m.starts_with("reverse bin-AudioData:") && m.contains("Base64(")),
+        "{a:#?}"
+    );
+    assert!(
+        a.iter().any(|m| m.starts_with("reverse bin-VideoData:")),
+        "{a:#?}"
+    );
     assert!(a.iter().any(|m| m.starts_with("bin-AudioData:")), "{a:#?}");
     assert!(a.iter().any(|m| m.starts_with("bin-VideoData:")), "{a:#?}");
     // Mutation (b): drop U8's MarshalJSON. A slice of a named uint8 type is
