@@ -237,13 +237,33 @@ fn u128_model() -> WireModel {
     }
 }
 
+/// `Swift::check` messages of the model itself: a synthetic model names no
+/// registry function, so every emit::registry entry is reported unused.
+fn own(e: Vec<String>) -> Vec<String> {
+    let unused = e
+        .iter()
+        .filter(|x| {
+            x.starts_with("emit::registry ")
+                && x.ends_with("not found in the manifest (no field names it)")
+        })
+        .count();
+    assert_eq!(
+        unused,
+        aimux_codegen::emit::registry::REGISTRY.len(),
+        "{e:?}"
+    );
+    e.into_iter()
+        .filter(|x| !x.starts_with("emit::registry "))
+        .collect()
+}
+
 #[test]
 fn u128_is_an_emitter_error() {
     let m = u128_model();
     match Swift::check(&m) {
         Ok(()) => panic!("expected an emitter error for u128, got Ok"),
         Err(e) => assert_eq!(
-            e,
+            own(e),
             vec!["Big.n: u128/i128 has no lossless Swift type; the Swift emitter refuses it"]
         ),
     }
@@ -272,7 +292,7 @@ fn variant_level_untagged_in_a_tagged_union_is_an_error() {
             },
         )],
     };
-    let e = Swift::check(&m).unwrap_err();
+    let e = own(Swift::check(&m).unwrap_err());
     assert!(
         e[0].starts_with("Mixed::Loose: variant-level untagged"),
         "{e:?}"
@@ -661,7 +681,8 @@ fn unregistered_custom_skip_is_an_error() {
     let f = field("op", WireTy::Named("Op".into()), omit);
     let e = Swift::check(&one_field(f, &["a", "b"])).unwrap_err();
     assert!(
-        e.iter().any(|x| x.contains("unregistered custom predicate")),
+        e.iter()
+            .any(|x| x.contains("unregistered custom predicate")),
         "{e:?}"
     );
     // A skip path that is not in the registry.

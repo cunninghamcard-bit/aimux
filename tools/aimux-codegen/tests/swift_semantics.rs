@@ -50,6 +50,8 @@ mod go_fixtures;
 mod go_fixtures_empty;
 #[path = "common/go_fixtures_tri.rs"]
 mod go_fixtures_tri;
+#[path = "common/registry_fixtures.rs"]
+mod registry_fixtures;
 
 fn workspace() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -1426,6 +1428,12 @@ fn all_fixtures() -> Vec<Fx> {
         }
         v.push((label, "InputRecord", j, Some(input)));
     }
+    // One generated field-absent fixture per emit::registry entry (the
+    // same ones the Go round trip runs).
+    for (label, ty, j) in registry_fixtures::registry_fixtures() {
+        let b = registry_fixtures::registry_back(&ty);
+        v.push((label.leak(), ty.leak(), j, Some(b)));
+    }
     v
 }
 
@@ -1557,6 +1565,7 @@ const KNOWN_DIFFS: &[(&str, &str, &str, &[&str])] = &[
             "empty-TraceRecord/usage=wrong",
             "empty-Usage/inputTokens=wrong",
             "empty-Usage/outputTokens=wrong",
+            "registry-HttpExchange-absent:crate::recording::default_finalized/timing=wrong",
         ],
     ),
     (
@@ -1656,6 +1665,8 @@ const KNOWN_DIFFS: &[(&str, &str, &str, &[&str])] = &[
             "skip-absent/prompt=wrong",
             "skip-decision/prompt=null",
             "skip-decision/prompt=wrong",
+            "registry-InputRecord-absent:crate::recording::RecordingOperation::is_language_model/prompt=null",
+            "registry-InputRecord-absent:crate::recording::RecordingOperation::is_language_model/prompt=wrong",
             "skip-language_model/prompt=null",
             "skip-language_model/prompt=wrong",
         ],
@@ -1733,15 +1744,15 @@ fn generated_swift_matches_manifest_and_serde() {
 const EXPECTED_KNOWN: &[(&str, usize)] = &[
     ("base64", 1),
     ("defaulted", 8),
-    ("lenient", 6),
+    ("lenient", 8),
     ("nullalias", 16),
-    ("seq", 31),
+    ("seq", 32),
     ("toolresult", 1),
     ("validated", 31),
 ];
 
 const EXPECTED_COUNTS: (usize, usize, usize, usize, usize, usize, usize) =
-    (309, 1083, 17, 45, 244, 26, 2145);
+    (309, 1083, 17, 45, 247, 26, 2169);
 
 /// Every `Defaulted<T>` field (a `#[serde(default)]` field whose Rust
 /// `Default` the Swift side cannot spell) rejects `null` like serde, and is

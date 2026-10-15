@@ -23,8 +23,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use super::{Emitter, registry};
 use super::go::pascal;
+use super::{Emitter, registry};
 use crate::Output;
 use crate::wire::{
     UnionRepr, VariantBody, WireBody, WireField, WireModel, WireTy, WireType, WireVariant,
