@@ -444,8 +444,6 @@ impl Gen {
         }
     }
 
-    /// One empty struct per fixed string: its zero value marshals as the
-    /// string, and decoding accepts only that string.
     /// `IsZero` for each string enum a custom `skip_serializing_if` skips
     /// (`omitzero`): the skipped value, and `""` (an absent key decodes to
     /// `""`, which serde reads as the `default`, the same skipped value).
@@ -459,6 +457,8 @@ impl Gen {
         }
     }
 
+    /// One empty struct per fixed string: its zero value marshals as the
+    /// string, and decoding accepts only that string.
     fn literal_types(&mut self) {
         let lits = self.literals.borrow().clone();
         for lit in lits {
