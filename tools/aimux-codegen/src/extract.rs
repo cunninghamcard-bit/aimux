@@ -354,6 +354,10 @@ pub struct FieldDef {
     /// Absent on input is accepted (`default`).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub default: bool,
+    /// `#[serde(default = "path")]`: the default comes from this function,
+    /// not `Default::default()`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_fn: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub flatten: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1253,6 +1257,8 @@ struct Member {
     aliases: Vec<String>,
     skip: bool,
     default: bool,
+    /// `default = "path"`: the function, verbatim.
+    default_fn: Option<String>,
     skip_serializing_if: bool,
     /// The `skip_serializing_if` predicate path, verbatim.
     skip_serializing_if_fn: Option<String>,
@@ -1281,7 +1287,11 @@ fn member(attrs: &[Attribute]) -> Result<Member, String> {
                     "skip" => m.skip = true,
                     "default" => {
                         m.default = true;
-                        skip_rest(&n)?;
+                        if n.input.peek(syn::Token![=]) {
+                            m.default_fn = Some(lit_str(&n)?);
+                        } else {
+                            skip_rest(&n)?;
+                        }
                     }
                     "skip_serializing_if" => {
                         m.skip_serializing_if = true;
@@ -1459,6 +1469,7 @@ fn fields_of(
                     }),
                     omit_when_empty: m.skip_serializing_if,
                     default: m.default,
+                    default_fn: m.default_fn,
                     flatten: m.flatten,
                     aliases: m.aliases,
                     serde_with: m.with,
@@ -1533,6 +1544,7 @@ fn ts_only_struct(fields: &Fields) -> Result<Shape, String> {
             ty,
             omit_when_empty: false,
             default: false,
+            default_fn: None,
             flatten,
             aliases: Vec::new(),
             serde_with: None,

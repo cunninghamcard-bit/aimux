@@ -2335,6 +2335,7 @@ fn syn_field(wire: &str, ty: wire::WireTy) -> wire::WireField {
         presence: wire::Presence::default(),
         aliases: vec![],
         skip_value: None,
+        default_fn: None,
     }
 }
 
@@ -2682,4 +2683,78 @@ fn custom_skip_predicate_matches_serde() {
         custom_skip_red(as_omitempty),
         BTreeSet::from(["skip-language_model"])
     );
+}
+
+/// Labels whose Go decode→encode differs from serde, for VideoCallOptions
+/// with `n` (`#[serde(default = "default_video_n")]`,
+/// aimux-core/src/video_model.rs) absent or set, under `mutate`.
+fn default_fn_red(mutate: impl Fn(String) -> String) -> BTreeSet<&'static str> {
+    use aimux_core::video_model::VideoCallOptions;
+    let base = go_fixtures_empty::empty_fixtures()
+        .into_iter()
+        .find(|f| f.0 == "empty-VideoCallOptions")
+        .unwrap()
+        .2;
+    let mut absent = base.clone();
+    absent.as_object_mut().unwrap().remove("n");
+    let mut three = base;
+    three["n"] = json!(3);
+    let samples: Vec<Fixture> = [("default-n-absent", absent), ("default-n-3", three)]
+        .into_iter()
+        .map(|(label, json)| Fixture {
+            label,
+            ty: "VideoCallOptions",
+            json,
+            back: Some(back::<VideoCallOptions>),
+        })
+        .collect();
+    let run = run_go("defaultfn", &samples, mutate);
+    let mut red = BTreeSet::new();
+    for (f, r) in samples.iter().zip(&run.results) {
+        assert_eq!(f.label, r.label);
+        let truth = f.back.unwrap()(&f.json).unwrap();
+        if !r.gen_err.is_empty() || !gen_is(r.gen_out.as_ref(), &truth, f.ty) {
+            red.insert(f.label);
+        }
+    }
+    red
+}
+
+/// `#[serde(default = "fn")]` (go::DEFAULT_FNS): an absent `n` decodes to
+/// 1 like serde, not Go's zero. Without the preset, `default-n-absent` is red.
+#[test]
+fn default_fn_matches_serde() {
+    let truth = back::<aimux_core::video_model::VideoCallOptions>(&json!({})).unwrap();
+    assert_eq!(truth["n"], json!(1), "serde default_video_n");
+    assert_eq!(default_fn_red(|s| s), BTreeSet::new());
+    let no_preset = |s: String| s.replace("p := plain{N: 1}", "p := plain{}");
+    assert_eq!(
+        default_fn_red(no_preset),
+        BTreeSet::from(["default-n-absent"])
+    );
+}
+
+/// An unregistered default fn is a generation error, as in Swift.
+#[test]
+fn unregistered_default_fn_is_a_go_error() {
+    let mut f = syn_field("n", wire::WireTy::Prim("u32".into()));
+    f.default_fn = Some("default_mystery".into());
+    let m = wire::WireModel {
+        types: vec![wire::WireType {
+            name: "Rec".into(),
+            doc_source: "synthetic.rs".into(),
+            body: wire::WireBody::Record { fields: vec![f] },
+        }],
+    };
+    let e = aimux_codegen::emit::go::Go::check(&m).unwrap_err();
+    assert_eq!(
+        e,
+        vec![
+            "Rec.n: #[serde(default = \"default_mystery\")] is not in go::DEFAULT_FNS; Go would decode the zero value"
+        ]
+    );
+    let dir = std::env::temp_dir().join(format!("aimux-go-defaultfn-{}", std::process::id()));
+    let err = aimux_codegen::emit::write(&aimux_codegen::emit::go::Go, &m, &dir).unwrap_err();
+    assert!(err.starts_with("go emitter: Rec.n:"), "{err}");
+    assert!(!dir.join("go").exists());
 }
