@@ -98,16 +98,24 @@
           }
         }
       },
-      "tsOverride": "AiMuxErrorWire",
+      "tsOverride": {
+        "type": {
+          "ref": {
+            "name": "AiMuxErrorWire",
+            "args": []
+          }
+        }
+      },
       "shape": {
         "kind": "enum",
         "representation": {
-          "style": "external"
+          "style": "internal",
+          "tag": "name"
         },
         "variants": [
           {
             "rust": "ApiCall",
-            "wire": "ApiCall",
+            "wire": "AI_APICallError",
             "shape": {
               "kind": "newtype",
               "inner": {
@@ -120,7 +128,7 @@
           },
           {
             "rust": "Retry",
-            "wire": "Retry",
+            "wire": "AI_RetryError",
             "shape": {
               "kind": "newtype",
               "inner": {
@@ -133,42 +141,75 @@
           },
           {
             "rust": "JsonParse",
-            "wire": "JsonParse",
-            "shape": {
-              "kind": "newtype",
-              "inner": {
-                "prim": "String"
-              }
-            }
-          },
-          {
-            "rust": "NoOutputGenerated",
-            "wire": "NoOutputGenerated",
-            "shape": {
-              "kind": "newtype",
-              "inner": {
-                "prim": "String"
-              }
-            }
-          },
-          {
-            "rust": "InvalidResponseData",
-            "wire": "InvalidResponseData",
-            "shape": {
-              "kind": "newtype",
-              "inner": {
-                "prim": "String"
-              }
-            }
-          },
-          {
-            "rust": "ToolCallNotFoundForApproval",
-            "wire": "ToolCallNotFoundForApproval",
+            "wire": "AI_JSONParseError",
             "shape": {
               "kind": "struct",
               "fields": [
                 {
-                  "wire": "tool_call_id",
+                  "wire": "message",
+                  "rust": "message",
+                  "type": {
+                    "prim": "String"
+                  },
+                  "omittedWhen": null,
+                  "null": {
+                    "input": "rejected",
+                    "output": "never"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "rust": "NoOutputGenerated",
+            "wire": "AI_NoOutputGeneratedError",
+            "shape": {
+              "kind": "struct",
+              "fields": [
+                {
+                  "wire": "message",
+                  "rust": "message",
+                  "type": {
+                    "prim": "String"
+                  },
+                  "omittedWhen": null,
+                  "null": {
+                    "input": "rejected",
+                    "output": "never"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "rust": "InvalidResponseData",
+            "wire": "AI_InvalidResponseDataError",
+            "shape": {
+              "kind": "struct",
+              "fields": [
+                {
+                  "wire": "message",
+                  "rust": "message",
+                  "type": {
+                    "prim": "String"
+                  },
+                  "omittedWhen": null,
+                  "null": {
+                    "input": "rejected",
+                    "output": "never"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "rust": "ToolCallNotFoundForApproval",
+            "wire": "AI_ToolCallNotFoundForApprovalError",
+            "shape": {
+              "kind": "struct",
+              "fields": [
+                {
+                  "wire": "toolCallId",
                   "rust": "tool_call_id",
                   "type": {
                     "prim": "String"
@@ -180,7 +221,7 @@
                   }
                 },
                 {
-                  "wire": "approval_id",
+                  "wire": "approvalId",
                   "rust": "approval_id",
                   "type": {
                     "prim": "String"
@@ -196,12 +237,12 @@
           },
           {
             "rust": "NoSuchTool",
-            "wire": "NoSuchTool",
+            "wire": "AI_NoSuchToolError",
             "shape": {
               "kind": "struct",
               "fields": [
                 {
-                  "wire": "tool_name",
+                  "wire": "toolName",
                   "rust": "tool_name",
                   "type": {
                     "prim": "String"
@@ -213,7 +254,7 @@
                   }
                 },
                 {
-                  "wire": "available_tools",
+                  "wire": "availableTools",
                   "rust": "available_tools",
                   "type": {
                     "option": {
@@ -231,7 +272,7 @@
                   }
                 },
                 {
-                  "wire": "tool_input",
+                  "wire": "toolInput",
                   "rust": "tool_input",
                   "type": {
                     "option": {
@@ -251,12 +292,12 @@
           },
           {
             "rust": "InvalidToolInput",
-            "wire": "InvalidToolInput",
+            "wire": "AI_InvalidToolInputError",
             "shape": {
               "kind": "struct",
               "fields": [
                 {
-                  "wire": "tool_name",
+                  "wire": "toolName",
                   "rust": "tool_name",
                   "type": {
                     "prim": "String"
@@ -268,7 +309,7 @@
                   }
                 },
                 {
-                  "wire": "tool_input",
+                  "wire": "toolInput",
                   "rust": "tool_input",
                   "type": {
                     "prim": "String"
@@ -296,12 +337,12 @@
           },
           {
             "rust": "ToolCallRepair",
-            "wire": "ToolCallRepair",
+            "wire": "AI_ToolCallRepairError",
             "shape": {
               "kind": "struct",
               "fields": [
                 {
-                  "wire": "original_error",
+                  "wire": "originalError",
                   "rust": "original_error",
                   "type": {
                     "ref": {
@@ -335,32 +376,54 @@
           },
           {
             "rust": "InvalidArgument",
-            "wire": "InvalidArgument",
-            "shape": {
-              "kind": "newtype",
-              "inner": {
-                "prim": "String"
-              }
-            }
-          },
-          {
-            "rust": "InvalidPrompt",
-            "wire": "InvalidPrompt",
-            "shape": {
-              "kind": "newtype",
-              "inner": {
-                "prim": "String"
-              }
-            }
-          },
-          {
-            "rust": "LoadApiKey",
-            "wire": "LoadApiKey",
+            "wire": "AI_InvalidArgumentError",
             "shape": {
               "kind": "struct",
               "fields": [
                 {
-                  "wire": "env_var",
+                  "wire": "message",
+                  "rust": "message",
+                  "type": {
+                    "prim": "String"
+                  },
+                  "omittedWhen": null,
+                  "null": {
+                    "input": "rejected",
+                    "output": "never"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "rust": "InvalidPrompt",
+            "wire": "AI_InvalidPromptError",
+            "shape": {
+              "kind": "struct",
+              "fields": [
+                {
+                  "wire": "message",
+                  "rust": "message",
+                  "type": {
+                    "prim": "String"
+                  },
+                  "omittedWhen": null,
+                  "null": {
+                    "input": "rejected",
+                    "output": "never"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "rust": "LoadApiKey",
+            "wire": "AI_LoadAPIKeyError",
+            "shape": {
+              "kind": "struct",
+              "fields": [
+                {
+                  "wire": "envVar",
                   "rust": "env_var",
                   "type": {
                     "prim": "String"
@@ -388,12 +451,12 @@
           },
           {
             "rust": "LoadSetting",
-            "wire": "LoadSetting",
+            "wire": "AI_LoadSettingError",
             "shape": {
               "kind": "struct",
               "fields": [
                 {
-                  "wire": "env_var",
+                  "wire": "envVar",
                   "rust": "env_var",
                   "type": {
                     "prim": "String"
@@ -405,7 +468,7 @@
                   }
                 },
                 {
-                  "wire": "name",
+                  "wire": "settingName",
                   "rust": "name",
                   "type": {
                     "prim": "String"
@@ -420,13 +483,148 @@
             }
           },
           {
-            "rust": "MissingToolResults",
-            "wire": "MissingToolResults",
+            "rust": "TokenExpired",
+            "wire": "AI_TokenExpiredError",
             "shape": {
               "kind": "struct",
               "fields": [
                 {
-                  "wire": "tool_call_ids",
+                  "wire": "message",
+                  "rust": "message",
+                  "type": {
+                    "prim": "String"
+                  },
+                  "omittedWhen": null,
+                  "null": {
+                    "input": "rejected",
+                    "output": "never"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "rust": "UnsupportedFunctionality",
+            "wire": "AI_UnsupportedFunctionalityError",
+            "shape": {
+              "kind": "struct",
+              "fields": [
+                {
+                  "wire": "message",
+                  "rust": "message",
+                  "type": {
+                    "prim": "String"
+                  },
+                  "omittedWhen": null,
+                  "null": {
+                    "input": "rejected",
+                    "output": "never"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "rust": "NoSuchModel",
+            "wire": "AI_NoSuchModelError",
+            "shape": {
+              "kind": "struct",
+              "fields": [
+                {
+                  "wire": "modelId",
+                  "rust": "model_id",
+                  "type": {
+                    "prim": "String"
+                  },
+                  "omittedWhen": null,
+                  "null": {
+                    "input": "rejected",
+                    "output": "never"
+                  }
+                },
+                {
+                  "wire": "modelType",
+                  "rust": "model_type",
+                  "type": {
+                    "prim": "String"
+                  },
+                  "default": true,
+                  "omittedWhen": null,
+                  "null": {
+                    "input": "rejected",
+                    "output": "never"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "rust": "NoSuchProvider",
+            "wire": "AI_NoSuchProviderError",
+            "shape": {
+              "kind": "struct",
+              "fields": [
+                {
+                  "wire": "providerId",
+                  "rust": "provider_id",
+                  "type": {
+                    "prim": "String"
+                  },
+                  "omittedWhen": null,
+                  "null": {
+                    "input": "rejected",
+                    "output": "never"
+                  }
+                },
+                {
+                  "wire": "modelId",
+                  "rust": "model_id",
+                  "type": {
+                    "prim": "String"
+                  },
+                  "omittedWhen": null,
+                  "null": {
+                    "input": "rejected",
+                    "output": "never"
+                  }
+                },
+                {
+                  "wire": "modelType",
+                  "rust": "model_type",
+                  "type": {
+                    "prim": "String"
+                  },
+                  "omittedWhen": null,
+                  "null": {
+                    "input": "rejected",
+                    "output": "never"
+                  }
+                },
+                {
+                  "wire": "availableProviders",
+                  "rust": "available_providers",
+                  "type": {
+                    "array": {
+                      "prim": "String"
+                    }
+                  },
+                  "omittedWhen": null,
+                  "null": {
+                    "input": "rejected",
+                    "output": "never"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "rust": "MissingToolResults",
+            "wire": "AI_MissingToolResultsError",
+            "shape": {
+              "kind": "struct",
+              "fields": [
+                {
+                  "wire": "toolCallIds",
                   "rust": "tool_call_ids",
                   "type": {
                     "array": {
@@ -444,7 +642,7 @@
           },
           {
             "rust": "ToolChoiceViolation",
-            "wire": "ToolChoiceViolation",
+            "wire": "AI_ToolChoiceViolationError",
             "shape": {
               "kind": "newtype",
               "inner": {
@@ -456,146 +654,66 @@
             }
           },
           {
-            "rust": "TokenExpired",
-            "wire": "TokenExpired",
-            "shape": {
-              "kind": "newtype",
-              "inner": {
-                "prim": "String"
-              }
-            }
-          },
-          {
-            "rust": "UnsupportedFunctionality",
-            "wire": "UnsupportedFunctionality",
-            "shape": {
-              "kind": "newtype",
-              "inner": {
-                "prim": "String"
-              }
-            }
-          },
-          {
-            "rust": "NoSuchModel",
-            "wire": "NoSuchModel",
-            "shape": {
-              "kind": "struct",
-              "fields": [
-                {
-                  "wire": "model_id",
-                  "rust": "model_id",
-                  "type": {
-                    "prim": "String"
-                  },
-                  "omittedWhen": null,
-                  "null": {
-                    "input": "rejected",
-                    "output": "never"
-                  }
-                },
-                {
-                  "wire": "model_type",
-                  "rust": "model_type",
-                  "type": {
-                    "prim": "String"
-                  },
-                  "default": true,
-                  "omittedWhen": null,
-                  "null": {
-                    "input": "rejected",
-                    "output": "never"
-                  }
-                }
-              ]
-            }
-          },
-          {
-            "rust": "NoSuchProvider",
-            "wire": "NoSuchProvider",
-            "shape": {
-              "kind": "struct",
-              "fields": [
-                {
-                  "wire": "provider_id",
-                  "rust": "provider_id",
-                  "type": {
-                    "prim": "String"
-                  },
-                  "omittedWhen": null,
-                  "null": {
-                    "input": "rejected",
-                    "output": "never"
-                  }
-                },
-                {
-                  "wire": "model_id",
-                  "rust": "model_id",
-                  "type": {
-                    "prim": "String"
-                  },
-                  "omittedWhen": null,
-                  "null": {
-                    "input": "rejected",
-                    "output": "never"
-                  }
-                },
-                {
-                  "wire": "model_type",
-                  "rust": "model_type",
-                  "type": {
-                    "prim": "String"
-                  },
-                  "omittedWhen": null,
-                  "null": {
-                    "input": "rejected",
-                    "output": "never"
-                  }
-                },
-                {
-                  "wire": "available_providers",
-                  "rust": "available_providers",
-                  "type": {
-                    "array": {
-                      "prim": "String"
-                    }
-                  },
-                  "omittedWhen": null,
-                  "null": {
-                    "input": "rejected",
-                    "output": "never"
-                  }
-                }
-              ]
-            }
-          },
-          {
             "rust": "Timeout",
-            "wire": "Timeout",
+            "wire": "TimeoutError",
             "shape": {
-              "kind": "newtype",
-              "inner": {
-                "prim": "String"
-              }
+              "kind": "struct",
+              "fields": [
+                {
+                  "wire": "message",
+                  "rust": "message",
+                  "type": {
+                    "prim": "String"
+                  },
+                  "omittedWhen": null,
+                  "null": {
+                    "input": "rejected",
+                    "output": "never"
+                  }
+                }
+              ]
             }
           },
           {
             "rust": "Aborted",
-            "wire": "Aborted",
+            "wire": "AbortError",
             "shape": {
-              "kind": "newtype",
-              "inner": {
-                "prim": "String"
-              }
+              "kind": "struct",
+              "fields": [
+                {
+                  "wire": "message",
+                  "rust": "message",
+                  "type": {
+                    "prim": "String"
+                  },
+                  "omittedWhen": null,
+                  "null": {
+                    "input": "rejected",
+                    "output": "never"
+                  }
+                }
+              ]
             }
           },
           {
             "rust": "Other",
-            "wire": "Other",
+            "wire": "AI_Error",
             "shape": {
-              "kind": "newtype",
-              "inner": {
-                "prim": "String"
-              }
+              "kind": "struct",
+              "fields": [
+                {
+                  "wire": "message",
+                  "rust": "message",
+                  "type": {
+                    "prim": "String"
+                  },
+                  "omittedWhen": null,
+                  "null": {
+                    "input": "rejected",
+                    "output": "never"
+                  }
+                }
+              ]
             }
           }
         ]
@@ -760,35 +878,14 @@
           "prim": "String"
         }
       },
-      "tsOverride": "`${number}:${number}`",
+      "tsOverride": {
+        "ts": "`${number}:${number}`"
+      },
       "shape": {
-        "kind": "struct",
-        "fields": [
-          {
-            "wire": "width",
-            "rust": "width",
-            "type": {
-              "prim": "u32"
-            },
-            "omittedWhen": null,
-            "null": {
-              "input": "rejected",
-              "output": "never"
-            }
-          },
-          {
-            "wire": "height",
-            "rust": "height",
-            "type": {
-              "prim": "u32"
-            },
-            "omittedWhen": null,
-            "null": {
-              "input": "rejected",
-              "output": "never"
-            }
-          }
-        ]
+        "kind": "newtype",
+        "inner": {
+          "prim": "String"
+        }
       }
     },
     {
@@ -1390,30 +1487,42 @@
       "name": "AudioChunk",
       "category": "multimodal",
       "source": "aimux-core/src/transcription_model.rs",
-      "tsOverride": "string",
+      "tsOverride": {
+        "ts": "string"
+      },
       "shape": {
         "kind": "handWritten",
-        "wire": "string"
+        "wire": {
+          "ts": "string"
+        }
       }
     },
     {
       "name": "AudioData",
       "category": "multimodal",
       "source": "aimux-core/src/speech_model.rs",
-      "tsOverride": "string",
+      "tsOverride": {
+        "ts": "string"
+      },
       "shape": {
         "kind": "handWritten",
-        "wire": "string"
+        "wire": {
+          "ts": "string"
+        }
       }
     },
     {
       "name": "AudioInput",
       "category": "multimodal",
       "source": "aimux-core/src/transcription_model.rs",
-      "tsOverride": "string",
+      "tsOverride": {
+        "ts": "string"
+      },
       "shape": {
         "kind": "handWritten",
-        "wire": "string"
+        "wire": {
+          "ts": "string"
+        }
       }
     },
     {
@@ -1618,7 +1727,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -1746,6 +1857,10 @@
               "output": "never"
             }
           }
+        ],
+        "skipped": [
+          "abort_signal",
+          "recording_context"
         ]
       }
     },
@@ -2883,7 +2998,21 @@
             "type": {
               "codec": {
                 "rust": "DecisionQuestions",
-                "wire": "std::collections::HashMap<String, DecisionQuestion>"
+                "wire": {
+                  "type": {
+                    "map": {
+                      "key": {
+                        "prim": "String"
+                      },
+                      "value": {
+                        "ref": {
+                          "name": "DecisionQuestion",
+                          "args": []
+                        }
+                      }
+                    }
+                  }
+                }
               }
             },
             "omittedWhen": null,
@@ -2965,6 +3094,9 @@
               "output": "byType"
             }
           }
+        ],
+        "skipped": [
+          "abort_signal"
         ]
       }
     },
@@ -2981,7 +3113,21 @@
             "type": {
               "codec": {
                 "rust": "IndexMap<String,DecisionAnswer>",
-                "wire": "std::collections::HashMap<String, DecisionAnswer>"
+                "wire": {
+                  "type": {
+                    "map": {
+                      "key": {
+                        "prim": "String"
+                      },
+                      "value": {
+                        "ref": {
+                          "name": "DecisionAnswer",
+                          "args": []
+                        }
+                      }
+                    }
+                  }
+                }
               }
             },
             "omittedWhen": null,
@@ -3172,7 +3318,20 @@
                   "type": {
                     "codec": {
                       "rust": "Option<IndexMap<String,f64>>",
-                      "wire": "Option<std::collections::HashMap<String, f64>>"
+                      "wire": {
+                        "type": {
+                          "option": {
+                            "map": {
+                              "key": {
+                                "prim": "String"
+                              },
+                              "value": {
+                                "prim": "f64"
+                              }
+                            }
+                          }
+                        }
+                      }
                     }
                   },
                   "omitWhenEmpty": true,
@@ -3210,7 +3369,20 @@
                   "type": {
                     "codec": {
                       "rust": "Option<IndexMap<String,f64>>",
-                      "wire": "Option<std::collections::HashMap<String, f64>>"
+                      "wire": {
+                        "type": {
+                          "option": {
+                            "map": {
+                              "key": {
+                                "prim": "String"
+                              },
+                              "value": {
+                                "prim": "f64"
+                              }
+                            }
+                          }
+                        }
+                      }
                     }
                   },
                   "omitWhenEmpty": true,
@@ -3335,7 +3507,21 @@
             "type": {
               "codec": {
                 "rust": "DecisionQuestions",
-                "wire": "std::collections::HashMap<String, DecisionQuestion>"
+                "wire": {
+                  "type": {
+                    "map": {
+                      "key": {
+                        "prim": "String"
+                      },
+                      "value": {
+                        "ref": {
+                          "name": "DecisionQuestion",
+                          "args": []
+                        }
+                      }
+                    }
+                  }
+                }
               }
             },
             "omittedWhen": null,
@@ -3382,6 +3568,10 @@
               "output": "byType"
             }
           }
+        ],
+        "skipped": [
+          "abort_signal",
+          "recording_context"
         ]
       }
     },
@@ -3466,7 +3656,23 @@
                   "type": {
                     "codec": {
                       "rust": "IndexMap<String,Option<DecisionInput>>",
-                      "wire": "std::collections::HashMap<String, Option<DecisionInput>>"
+                      "wire": {
+                        "type": {
+                          "map": {
+                            "key": {
+                              "prim": "String"
+                            },
+                            "value": {
+                              "option": {
+                                "ref": {
+                                  "name": "DecisionInput",
+                                  "args": []
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
                     }
                   },
                   "omittedWhen": null,
@@ -3614,7 +3820,21 @@
             "type": {
               "codec": {
                 "rust": "IndexMap<String,DecisionAnswer>",
-                "wire": "std::collections::HashMap<String, DecisionAnswer>"
+                "wire": {
+                  "type": {
+                    "map": {
+                      "key": {
+                        "prim": "String"
+                      },
+                      "value": {
+                        "ref": {
+                          "name": "DecisionAnswer",
+                          "args": []
+                        }
+                      }
+                    }
+                  }
+                }
               }
             },
             "omittedWhen": null,
@@ -3898,6 +4118,9 @@
               "output": "byType"
             }
           }
+        ],
+        "skipped": [
+          "abort_signal"
         ]
       }
     },
@@ -4076,10 +4299,14 @@
       "name": "FileBytes",
       "category": "core",
       "source": "aimux-core/src/shared.rs",
-      "tsOverride": "string",
+      "tsOverride": {
+        "ts": "string"
+      },
       "shape": {
         "kind": "handWritten",
-        "wire": "string"
+        "wire": {
+          "ts": "string"
+        }
       }
     },
     {
@@ -5300,7 +5527,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -5495,6 +5724,11 @@
               "output": "never"
             }
           }
+        ],
+        "skipped": [
+          "abort_signal",
+          "repair_tool_call",
+          "download"
         ]
       }
     },
@@ -5590,7 +5824,16 @@
             "type": {
               "codec": {
                 "rust": "Vec<&'a Source>",
-                "wire": "Vec<crate::result::TypedSource>"
+                "wire": {
+                  "type": {
+                    "array": {
+                      "ref": {
+                        "name": "TypedSource",
+                        "args": []
+                      }
+                    }
+                  }
+                }
               }
             },
             "serdeWith": "with=crate::wire::typed_vec",
@@ -5606,7 +5849,16 @@
             "type": {
               "codec": {
                 "rust": "Vec<&'a ToolCall>",
-                "wire": "Vec<crate::tool::TypedToolCall>"
+                "wire": {
+                  "type": {
+                    "array": {
+                      "ref": {
+                        "name": "TypedToolCall",
+                        "args": []
+                      }
+                    }
+                  }
+                }
               }
             },
             "serdeWith": "with=crate::wire::typed_vec",
@@ -5622,7 +5874,16 @@
             "type": {
               "codec": {
                 "rust": "Vec<&'a TypedToolResult>",
-                "wire": "Vec<crate::result::TaggedToolResult>"
+                "wire": {
+                  "type": {
+                    "array": {
+                      "ref": {
+                        "name": "TaggedToolResult",
+                        "args": []
+                      }
+                    }
+                  }
+                }
               }
             },
             "serdeWith": "with=crate::wire::typed_vec",
@@ -6105,6 +6366,7 @@
               "prim": "bool"
             },
             "default": true,
+            "defaultFn": "crate::recording::default_finalized",
             "omittedWhen": null,
             "null": {
               "input": "rejected",
@@ -6264,7 +6526,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -6384,6 +6648,9 @@
               "output": "byType"
             }
           }
+        ],
+        "skipped": [
+          "abort_signal"
         ]
       }
     },
@@ -6462,20 +6729,28 @@
       "name": "ImageFileData",
       "category": "multimodal",
       "source": "aimux-core/src/image_model.rs",
-      "tsOverride": "string",
+      "tsOverride": {
+        "ts": "string"
+      },
       "shape": {
         "kind": "handWritten",
-        "wire": "string"
+        "wire": {
+          "ts": "string"
+        }
       }
     },
     {
       "name": "ImageOutputs",
       "category": "multimodal",
       "source": "aimux-core/src/image_model.rs",
-      "tsOverride": "Array<string>",
+      "tsOverride": {
+        "ts": "Array<string>"
+      },
       "shape": {
         "kind": "handWritten",
-        "wire": "Array<string>"
+        "wire": {
+          "ts": "Array<string>"
+        }
       }
     },
     {
@@ -6751,7 +7026,7 @@
             },
             "omitWhenEmpty": true,
             "default": true,
-            "omittedWhen": "RecordingOperation::is_language_model",
+            "omittedWhen": "crate::recording::RecordingOperation::is_language_model",
             "null": {
               "input": "byType",
               "output": "byType"
@@ -7260,7 +7535,9 @@
             "type": {
               "codec": {
                 "rust": "Option<serde_json::Map<String,Value>>",
-                "wire": "Record<string, unknown>"
+                "wire": {
+                  "ts": "Record<string, unknown>"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -7549,7 +7826,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -7566,7 +7845,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -7583,7 +7864,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -8126,7 +8409,9 @@
       "name": "NamespacedKind",
       "category": "core",
       "source": "aimux-core/src/types.rs",
-      "tsOverride": "`${string}.${string}`",
+      "tsOverride": {
+        "ts": "`${string}.${string}`"
+      },
       "shape": {
         "kind": "newtype",
         "inner": {
@@ -9153,6 +9438,7 @@
       "name": "RawToolCall",
       "category": "tool",
       "source": "aimux-core/src/tool.rs",
+      "typeTag": "tool-call",
       "shape": {
         "kind": "struct",
         "fields": [
@@ -9674,7 +9960,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -10160,6 +10448,9 @@
               "output": "byType"
             }
           }
+        ],
+        "skipped": [
+          "abort_signal"
         ]
       }
     },
@@ -10757,7 +11048,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -10884,7 +11177,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -11074,6 +11369,9 @@
               "output": "byType"
             }
           }
+        ],
+        "skipped": [
+          "abort_signal"
         ]
       }
     },
@@ -11621,35 +11919,14 @@
           "prim": "String"
         }
       },
-      "tsOverride": "`${number}x${number}`",
+      "tsOverride": {
+        "ts": "`${number}x${number}`"
+      },
       "shape": {
-        "kind": "struct",
-        "fields": [
-          {
-            "wire": "width",
-            "rust": "width",
-            "type": {
-              "prim": "u32"
-            },
-            "omittedWhen": null,
-            "null": {
-              "input": "rejected",
-              "output": "never"
-            }
-          },
-          {
-            "wire": "height",
-            "rust": "height",
-            "type": {
-              "prim": "u32"
-            },
-            "omittedWhen": null,
-            "null": {
-              "input": "rejected",
-              "output": "never"
-            }
-          }
-        ]
+        "kind": "newtype",
+        "inner": {
+          "prim": "String"
+        }
       }
     },
     {
@@ -11693,6 +11970,7 @@
       "name": "Source",
       "category": "core",
       "source": "aimux-core/src/result.rs",
+      "typeTag": "source",
       "shape": {
         "kind": "enum",
         "representation": {
@@ -12023,6 +12301,9 @@
               "output": "byType"
             }
           }
+        ],
+        "skipped": [
+          "abort_signal"
         ]
       }
     },
@@ -13256,10 +13537,7 @@
             "shape": {
               "kind": "newtype",
               "inner": {
-                "ref": {
-                  "name": "C",
-                  "args": []
-                }
+                "generic": "C"
               }
             }
           },
@@ -13282,10 +13560,7 @@
             "shape": {
               "kind": "newtype",
               "inner": {
-                "ref": {
-                  "name": "R",
-                  "args": []
-                }
+                "generic": "R"
               }
             }
           },
@@ -13295,10 +13570,7 @@
             "shape": {
               "kind": "newtype",
               "inner": {
-                "ref": {
-                  "name": "R",
-                  "args": []
-                }
+                "generic": "R"
               }
             }
           },
@@ -13351,10 +13623,7 @@
             "shape": {
               "kind": "newtype",
               "inner": {
-                "ref": {
-                  "name": "A",
-                  "args": []
-                }
+                "generic": "A"
               }
             }
           },
@@ -13580,7 +13849,9 @@
             "type": {
               "codec": {
                 "rust": "()",
-                "wire": "\"tool-result\""
+                "wire": {
+                  "literal": "tool-result"
+                }
               }
             },
             "omittedWhen": null,
@@ -14568,7 +14839,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -14585,7 +14858,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -14602,7 +14877,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -14619,7 +14896,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -14646,7 +14925,9 @@
             "type": {
               "codec": {
                 "rust": "u64",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "aliases": [
@@ -14664,7 +14945,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -14746,7 +15029,14 @@
             "type": {
               "codec": {
                 "rust": "crate::tool::ToolCall",
-                "wire": "crate::tool::TypedToolCall"
+                "wire": {
+                  "type": {
+                    "ref": {
+                      "name": "TypedToolCall",
+                      "args": []
+                    }
+                  }
+                }
               }
             },
             "serdeWith": "with=crate::wire::typed",
@@ -14804,6 +15094,9 @@
               "output": "never"
             }
           }
+        ],
+        "skipped": [
+          "input_schema_input"
         ]
       }
     },
@@ -14832,7 +15125,14 @@
             "type": {
               "codec": {
                 "rust": "crate::tool::ToolCall",
-                "wire": "crate::tool::TypedToolCall"
+                "wire": {
+                  "type": {
+                    "ref": {
+                      "name": "TypedToolCall",
+                      "args": []
+                    }
+                  }
+                }
               }
             },
             "serdeWith": "with=crate::wire::typed",
@@ -14962,6 +15262,7 @@
       "name": "ToolCall",
       "category": "tool",
       "source": "aimux-core/src/tool.rs",
+      "typeTag": "tool-call",
       "shape": {
         "kind": "struct",
         "fields": [
@@ -15242,10 +15543,14 @@
       "name": "ToolChoice",
       "category": "tool",
       "source": "aimux-core/src/tool.rs",
-      "tsOverride": "\"auto\" | \"none\" | \"required\" | { type: \"tool\"; toolName: string }",
+      "tsOverride": {
+        "ts": "\"auto\" | \"none\" | \"required\" | { type: \"tool\"; toolName: string }"
+      },
       "shape": {
         "kind": "handWritten",
-        "wire": "\"auto\" | \"none\" | \"required\" | { type: \"tool\"; toolName: string }"
+        "wire": {
+          "ts": "\"auto\" | \"none\" | \"required\" | { type: \"tool\"; toolName: string }"
+        }
       }
     },
     {
@@ -17063,7 +17368,9 @@
             "type": {
               "codec": {
                 "rust": "i64",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omittedWhen": null,
@@ -17094,7 +17401,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -17212,6 +17521,10 @@
               "output": "never"
             }
           }
+        ],
+        "skipped": [
+          "monotonic_sent_ms",
+          "scope_key"
         ]
       }
     },
@@ -17499,6 +17812,10 @@
               "output": "byType"
             }
           }
+        ],
+        "skipped": [
+          "abort_signal",
+          "download"
         ]
       }
     },
@@ -18324,7 +18641,9 @@
             "type": {
               "codec": {
                 "rust": "()",
-                "wire": "\"source\""
+                "wire": {
+                  "literal": "source"
+                }
               }
             },
             "omittedWhen": null,
@@ -18365,7 +18684,9 @@
             "type": {
               "codec": {
                 "rust": "()",
-                "wire": "\"tool-call\""
+                "wire": {
+                  "literal": "tool-call"
+                }
               }
             },
             "omittedWhen": null,
@@ -18506,6 +18827,7 @@
       "name": "TypedToolResult",
       "category": "core",
       "source": "aimux-core/src/result.rs",
+      "typeTag": "tool-result",
       "shape": {
         "kind": "struct",
         "fields": [
@@ -18696,6 +19018,9 @@
               "output": "byType"
             }
           }
+        ],
+        "skipped": [
+          "abort_signal"
         ]
       }
     },
@@ -19081,7 +19406,9 @@
             "type": {
               "codec": {
                 "rust": "Option<serde_json::Map<String,Value>>",
-                "wire": "Record<string, unknown>"
+                "wire": {
+                  "ts": "Record<string, unknown>"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -19330,7 +19657,9 @@
                   "type": {
                     "codec": {
                       "rust": "Vec<u8>",
-                      "wire": "string"
+                      "wire": {
+                        "ts": "string"
+                      }
                     }
                   },
                   "serdeWith": "with=crate::wire::base64_bytes",
@@ -19697,6 +20026,7 @@
               "prim": "u32"
             },
             "default": true,
+            "defaultFn": "crate::video_model::default_video_n",
             "omittedWhen": null,
             "null": {
               "input": "rejected",
@@ -19779,7 +20109,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -19956,6 +20288,10 @@
               "output": "byType"
             }
           }
+        ],
+        "skipped": [
+          "abort_signal",
+          "download"
         ]
       }
     },
@@ -20048,7 +20384,9 @@
                   "type": {
                     "codec": {
                       "rust": "Vec<u8>",
-                      "wire": "string"
+                      "wire": {
+                        "ts": "string"
+                      }
                     }
                   },
                   "serdeWith": "with=crate::wire::base64_bytes",
@@ -20167,10 +20505,14 @@
       "name": "VideoFileData",
       "category": "multimodal",
       "source": "aimux-core/src/video_model.rs",
-      "tsOverride": "string",
+      "tsOverride": {
+        "ts": "string"
+      },
       "shape": {
         "kind": "handWritten",
-        "wire": "string"
+        "wire": {
+          "ts": "string"
+        }
       }
     },
     {
@@ -20253,7 +20595,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -20270,7 +20614,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -21191,10 +21537,14 @@
       "name": "Timestamp",
       "category": "core",
       "source": "aimux-core/src/timestamp.rs",
-      "tsOverride": "string",
+      "tsOverride": {
+        "ts": "string"
+      },
       "shape": {
         "kind": "handWritten",
-        "wire": "string"
+        "wire": {
+          "ts": "string"
+        }
       }
     }
   ],

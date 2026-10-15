@@ -414,10 +414,10 @@ fn serde_attribute_mutations_change_the_modelled_field() {
         ),
         (
             "flatten",
-            "tool.rs",
-            "#[serde(default, skip_serializing_if = \"Option::is_none\")]",
-            "#[serde(flatten, default, skip_serializing_if = \"Option::is_none\")]",
-            |m| find_field(find_type(m, "FunctionTool"), "description")["flatten"].clone(),
+            "model_catalogue.rs",
+            "#[serde(default)]\n    pub limits: ModelLimits,",
+            "#[serde(default, flatten)]\n    pub limits: ModelLimits,",
+            |m| find_field(find_type(m, "ModelSpec"), "limits")["flatten"].clone(),
             serde_json::Value::Null,
             serde_json::json!(true),
         ),
@@ -627,7 +627,10 @@ fn ts_only_tagged_wrapper_is_modelled_and_guarded() {
 fn serde_transparent_is_a_newtype_and_needs_one_field() {
     let m = manifest_json(&inputs());
     let kind = find_type(&m, "NamespacedKind");
-    assert!(kind["tsOverride"].is_string());
+    assert_eq!(
+        kind["tsOverride"],
+        serde_json::json!({ "ts": "`${string}.${string}`" })
+    );
     assert_eq!(kind["shape"]["kind"], "newtype");
     assert_eq!(
         kind["shape"]["inner"],
@@ -741,8 +744,7 @@ fn assert_wrapper_matches<T: serde::Serialize + aimux_core::wire::TypeTag>(
     let t = find_type(m, wrapper);
     let fields = t["shape"]["fields"].as_array().unwrap();
     let tag = fields.iter().find(|f| f["wire"] == "type").unwrap();
-    let literal: String =
-        serde_json::from_str(tag["type"]["codec"]["wire"].as_str().unwrap()).unwrap();
+    let literal = tag["type"]["codec"]["wire"]["literal"].as_str().unwrap();
     let inner = fields.iter().find(|f| f["flatten"] == true).unwrap();
     let inner_name = inner["type"]["ref"]["name"].as_str().unwrap();
     assert_eq!(
@@ -751,7 +753,7 @@ fn assert_wrapper_matches<T: serde::Serialize + aimux_core::wire::TypeTag>(
     );
 
     let tagged = serde_json::to_value(aimux_core::wire::Tagged(value)).unwrap();
-    assert_eq!(tagged["type"], literal.as_str(), "{wrapper}");
+    assert_eq!(tagged["type"], literal, "{wrapper}");
     let mut rest = tagged.as_object().unwrap().clone();
     rest.remove("type");
     assert_eq!(
@@ -798,11 +800,8 @@ fn ts_only_wrappers_match_wire_tagged_output() {
     // Nested: ToolApprovalResponseOutput.toolCall is declared as
     // TypedToolCall and serialized through `crate::wire::typed`.
     let field = find_field(find_type(&m, "ToolApprovalResponseOutput"), "tool_call");
-    assert!(
-        field["type"]["codec"]["wire"]
-            .as_str()
-            .unwrap()
-            .ends_with("TypedToolCall"),
+    assert_eq!(
+        field["type"]["codec"]["wire"]["type"]["ref"]["name"], "TypedToolCall",
         "{field}"
     );
     let reply = ToolApprovalResponseOutput {
@@ -858,8 +857,9 @@ fn option_option_with_skip_writes_some_none_as_null() {
 
 /// `Option<T>` without `skip_serializing_if` (`ChatCompletionChoice
 /// .finish_reason`, openai_output.rs:73): `None` is written as `null`. The
-/// manifest says `whenNone`; the skipped neighbour `logprobs` says `never`
-/// for its key and `asValue` for a held JSON null.
+/// manifest says `whenNone`. The neighbour `logprobs` (`Option<Value>` +
+/// `skip_serializing_if = "Option::is_none"`) leaves `None` out
+/// (`omittedWhen`) and writes a held JSON `null` (`asValue`).
 #[test]
 fn option_without_skip_writes_none_as_null() {
     use aimux_core::openai_output::{ChatCompletionChoice, ChatCompletionMessage};
@@ -868,7 +868,9 @@ fn option_without_skip_writes_none_as_null() {
     let finish = find_field(t, "finish_reason");
     assert_eq!(finish["null"]["output"], "whenNone");
     assert!(finish["omittedWhen"].is_null());
-    assert_eq!(find_field(t, "logprobs")["omittedWhen"], "Option::is_none");
+    let logprobs = find_field(t, "logprobs");
+    assert_eq!(logprobs["omittedWhen"], "Option::is_none");
+    assert_eq!(logprobs["null"]["output"], "asValue");
     let choice = ChatCompletionChoice {
         index: 0,
         message: ChatCompletionMessage {
@@ -885,6 +887,12 @@ fn option_without_skip_writes_none_as_null() {
     let obj = written.as_object().unwrap();
     assert_eq!(obj.get("finish_reason"), Some(&serde_json::Value::Null));
     assert!(!obj.contains_key("logprobs"));
+    let held = serde_json::to_value(ChatCompletionChoice {
+        logprobs: Some(serde_json::Value::Null),
+        ..choice
+    })
+    .unwrap();
+    assert_eq!(held.get("logprobs"), Some(&serde_json::Value::Null));
 }
 
 /// `nonNullJson` (`ToolResult.result`, tool.rs:219): the manifest says
@@ -927,12 +935,13 @@ fn deserialize_with_field_null_is_codec() {
     assert_eq!(a["null"]["output"], "whenNone", "{a}");
 }
 
-/// `skip_serializing_if` predicates are matched by last path segment
-/// (`is_none`, `is_empty`, ..); any other predicate, or an `Option` field
-/// skipped by something other than `is_none`, fails generation with
-/// file:line instead of defaulting to `whenNone`.
+/// Standard `skip_serializing_if` predicates (`is_none`, `is_empty`) are
+/// matched by last path segment; any other predicate and any
+/// `default = "fn"` must be in emit::registry by full path, else
+/// generation fails with file:line. An `Option` field skipped by something
+/// other than `is_none` fails too, instead of defaulting to `whenNone`.
 #[test]
-fn skip_predicates_are_registered_by_last_segment() {
+fn skip_predicates_and_default_fns_are_registered() {
     let ok = extract_one(
         "#[derive(Serialize, Deserialize, TS)]\n#[ts(export)]\npub struct S {\n    #[serde(skip_serializing_if = \"crate::util::is_empty\")]\n    pub a: Vec<u32>,\n    #[serde(skip_serializing_if = \"std::option::Option::is_none\")]\n    pub b: Option<u32>,\n}\n",
     )
@@ -949,7 +958,17 @@ fn skip_predicates_are_registered_by_last_segment() {
     .unwrap_err();
     assert!(
         errs.iter().any(
-            |e| e == "x/sample.rs:5: S.a: unregistered skip_serializing_if predicate `is_zero`"
+            |e| e == "x/sample.rs:5: S.a: skip_serializing_if `crate::x::sample::is_zero` is not in emit::registry::REGISTRY"
+        ),
+        "{errs:?}"
+    );
+    let errs = extract_one(
+        "#[derive(Serialize, Deserialize, TS)]\n#[ts(export)]\npub struct S {\n    #[serde(default = \"default_n\")]\n    pub a: u32,\n}\n",
+    )
+    .unwrap_err();
+    assert!(
+        errs.iter().any(
+            |e| e == "x/sample.rs:5: S.a: default = `crate::x::sample::default_n` is not in emit::registry::REGISTRY"
         ),
         "{errs:?}"
     );
@@ -1011,6 +1030,68 @@ fn presence_codec_needs_a_nullable_payload() {
                 && e.contains(
                     "ApiCallError.data: presence codec needs Option<Option<T>> or Option<Value>"
                 )),
+        "{errs:?}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A `serialize_with` field (declared with `#[ts(type)]`) leaves null
+/// *output* to its codec; input stays the type's own rule.
+#[test]
+fn serialize_with_field_null_output_is_codec() {
+    let t = extract_one(
+        "#[derive(Serialize, Deserialize, TS)]\n#[ts(export)]\npub struct S {\n    #[serde(serialize_with = \"as_text\")]\n    #[ts(type = \"string\")]\n    pub a: Option<u32>,\n}\n",
+    )
+    .unwrap();
+    let a = &t["shape"]["fields"][0];
+    assert_eq!(a["null"]["output"], "codec", "{a}");
+    assert_eq!(a["null"]["input"], "asAbsent", "{a}");
+    assert_eq!(
+        a["type"]["codec"]["wire"],
+        serde_json::json!({ "ts": "string" })
+    );
+}
+
+/// `#[ts(as = "<Rust type>")]` is recorded as a resolved type reference,
+/// checked like any field type: `ToolApprovalRequestOutput.tool_call`
+/// (result.rs:254) and a map override (decision_model.rs:173) resolve, and
+/// pointing the override at an unknown type fails generation.
+#[test]
+fn ts_as_override_is_a_checked_type_reference() {
+    let m = manifest_json(&inputs());
+    let call = find_field(find_type(&m, "ToolApprovalRequestOutput"), "tool_call");
+    assert_eq!(call["type"]["codec"]["rust"], "crate::tool::ToolCall");
+    assert_eq!(
+        call["type"]["codec"]["wire"],
+        serde_json::json!({ "type": { "ref": { "name": "TypedToolCall", "args": [] } } })
+    );
+    let found = m["types"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|t| t["shape"]["fields"].as_array().cloned().unwrap_or_default())
+        .any(|f| {
+            f["type"]["codec"]["wire"]["type"]["map"]["value"]["ref"]["name"] == "DecisionQuestion"
+        });
+    assert!(
+        found,
+        "HashMap<String, DecisionQuestion> override not structured"
+    );
+
+    let (dir, i) = scratch_src("ts_as_unknown");
+    let path = i.src_root.join("result.rs");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let from = "#[ts(as = \"crate::tool::TypedToolCall\")]";
+    assert!(text.contains(from));
+    std::fs::write(
+        &path,
+        text.replacen(from, "#[ts(as = \"crate::tool::NoSuchCall\")]", 1),
+    )
+    .unwrap();
+    let errs = errors(&i);
+    assert!(
+        errs.iter()
+            .any(|e| e.starts_with("aimux-core/src/result.rs:") && e.contains("NoSuchCall")),
         "{errs:?}"
     );
     let _ = std::fs::remove_dir_all(dir);

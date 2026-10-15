@@ -1,0 +1,134 @@
+[
+  {
+    "type": "EmbeddingResult",
+    "field": "warnings",
+    "verdict": "手写错",
+    "reason": "The Rust field `warnings` has no skip_serializing_if, so serde always writes it (empty value [], fixture empty-EmbeddingResult); the hand-written Go field is `omitempty` and drops it."
+  },
+  {
+    "type": "GenerateObjectResult",
+    "field": "warnings",
+    "verdict": "手写错",
+    "reason": "The Rust field `warnings` has no skip_serializing_if, so serde always writes it (empty value [], fixture empty-GenerateObjectResult); the hand-written Go field is `omitempty` and drops it."
+  },
+  {
+    "type": "GenerateResult",
+    "field": "content",
+    "verdict": "手写错",
+    "reason": "The Rust field `content` has no skip_serializing_if, so serde always writes it (empty value [], fixture empty-GenerateResult); the hand-written Go field is `omitempty` and drops it."
+  },
+  {
+    "type": "GenerateResult",
+    "field": "warnings",
+    "verdict": "手写错",
+    "reason": "The Rust field `warnings` has no skip_serializing_if, so serde always writes it (empty value [], fixture empty-GenerateResult); the hand-written Go field is `omitempty` and drops it."
+  },
+  {
+    "type": "GenerateTextOptions",
+    "field": "tools[0].inputExamples",
+    "verdict": "手写错",
+    "reason": "Rust `FunctionTool.input_examples: Option<Vec<_>>` skips only `None` (tool.rs, `skip_serializing_if = \"Option::is_none\"`), so `Some(vec![])` is written as []; the hand-written `InputExamples []FunctionToolInputExample` is `omitempty` (types.go:536) and drops it."
+  },
+  {
+    "type": "ImageResult",
+    "field": "warnings",
+    "verdict": "手写错",
+    "reason": "ImageResult.warnings has no skip_serializing_if: serde writes `[]`; the hand-written field is `omitempty` and drops it."
+  },
+  {
+    "type": "SearchResult",
+    "field": "warnings",
+    "verdict": "手写错",
+    "reason": "The Rust field `warnings` has no skip_serializing_if, so serde always writes it (empty value [], fixture empty-SearchResult); the hand-written Go field is `omitempty` and drops it."
+  },
+  {
+    "type": "SpeechResult",
+    "field": "usage",
+    "verdict": "手写错",
+    "reason": "v4 adds `SpeechResult.usage: Option<JsonObject>` without skip_serializing_if (speech_model.rs:133), so serde writes it (null or an object); the hand-written SpeechResult (multimodal_types.go:104-110) has no such field."
+  },
+  {
+    "type": "SpeechResult",
+    "field": "usage.x.k",
+    "verdict": "手写错",
+    "reason": "Same field as `SpeechResult | usage`: v4 speech_model.rs:133 `usage` is missing from the hand-written SpeechResult (multimodal_types.go:104-110), so its object payload is dropped."
+  },
+  {
+    "type": "SpeechResult",
+    "field": "warnings",
+    "verdict": "手写错",
+    "reason": "The Rust field `warnings` has no skip_serializing_if, so serde always writes it (empty value [], fixture empty-SpeechResult); the hand-written Go field is `omitempty` and drops it."
+  },
+  {
+    "type": "StepResponse",
+    "field": "messages",
+    "verdict": "手写错",
+    "reason": "The Rust field `messages` has no skip_serializing_if, so serde always writes it (empty value [], fixture empty-StepResponse / empty-StepResult); the hand-written Go field is `omitempty` and drops it. (step_result.rs:190; types.go:335-342)"
+  },
+  {
+    "type": "StepResult",
+    "field": "content",
+    "verdict": "手写错",
+    "reason": "The Rust field `content` has no skip_serializing_if, so serde always writes it (empty value [], fixture empty-StepResult); the hand-written Go field is `omitempty` and drops it. (step_result.rs:233; types.go:352-374)"
+  },
+  {
+    "type": "StepResult",
+    "field": "response.messages",
+    "verdict": "手写错",
+    "reason": "The Rust field `messages` has no skip_serializing_if, so serde always writes it (empty value [], fixture empty-StepResult); the hand-written Go field is `omitempty` and drops it. (StepResponse, step_result.rs:190)"
+  },
+  {
+    "type": "StepResult",
+    "field": "warnings",
+    "verdict": "手写错",
+    "reason": "The Rust field `warnings` has no skip_serializing_if, so serde always writes it (empty value [], fixture empty-StepResult); the hand-written Go field is `omitempty` and drops it. (step_result.rs:233; types.go:352-374)"
+  },
+  {
+    "type": "StreamPart",
+    "field": "(all fields)",
+    "verdict": "手写错",
+    "reason": "The hand-written StreamPart is {Type, Raw} with `json:\"-\"` on both, so json.Marshal writes `{}` for every part."
+  },
+  {
+    "type": "TranscriptionCallOptions",
+    "field": "(decode)",
+    "verdict": "手写错",
+    "reason": "Rust `AudioInput::Binary(Vec<u8>)` writes a JSON array of numbers; the hand-written `Audio Bytes` (multimodal_types.go:21, :210) decodes only a base64 string and rejects it. AudioInput is `handWritten` (`#[ts(as)]`) in the v4 manifest; its codec is U3."
+  },
+  {
+    "type": "TranscriptionResult",
+    "field": "segments",
+    "verdict": "手写错",
+    "reason": "The Rust field `segments` has no skip_serializing_if, so serde always writes it (empty value [], fixture empty-TranscriptionResult); the hand-written Go field is `omitempty` and drops it."
+  },
+  {
+    "type": "TranscriptionResult",
+    "field": "warnings",
+    "verdict": "手写错",
+    "reason": "The Rust field `warnings` has no skip_serializing_if, so serde always writes it (empty value [], fixture empty-TranscriptionResult); the hand-written Go field is `omitempty` and drops it."
+  },
+  {
+    "type": "UploadFileResult",
+    "field": "warnings",
+    "verdict": "手写错",
+    "reason": "The Rust field `warnings` has no skip_serializing_if, so serde always writes it (empty value [], fixture empty-UploadFileResult); the hand-written Go field is `omitempty` and drops it."
+  },
+  {
+    "type": "VideoData",
+    "field": "(decode)",
+    "verdict": "手写错",
+    "reason": "Rust `VideoData` binary data (`Vec<u8>`) is a JSON array of numbers; the hand-written `Data Bytes` (multimodal_types.go:21, :260) decodes only a base64 string and rejects it."
+  },
+  {
+    "type": "VideoData",
+    "field": "url",
+    "verdict": "手写错",
+    "reason": "The Rust field `url` has no skip_serializing_if, so serde always writes it (empty value \"\", fixture empty-VideoData); the hand-written Go field is `omitempty` and drops it."
+  },
+  {
+    "type": "VideoResult",
+    "field": "warnings",
+    "verdict": "手写错",
+    "reason": "The Rust field `warnings` has no skip_serializing_if, so serde always writes it (empty value [], fixture empty-VideoResult); the hand-written Go field is `omitempty` and drops it."
+  }
+]

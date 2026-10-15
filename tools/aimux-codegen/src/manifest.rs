@@ -64,7 +64,7 @@ struct Generator {
     version: &'static str,
 }
 
-const SRC_PREFIX: &str = "aimux-core/src";
+pub const SRC_PREFIX: &str = "aimux-core/src";
 
 /// Manifest and coverage outputs (`manifest.json`, `coverage.txt`).
 ///
