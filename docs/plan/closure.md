@@ -171,9 +171,9 @@ except the file-size table (split scope is D10).
 | aimux-providers/src/open_responses.rs | 1459 | src |
 | aimux-providers/tests/conformance_test.rs | 1428 | test |
 | bindings/python/src/lib.rs | 1358 | src |
+| tools/aimux-codegen/src/extract.rs | 1333 | src |
 | aimux-ffi/tests/exports_smoke_test.rs | 1310 | test |
 | aimux-providers/src/xai/responses/mod.rs | 1309 | src |
-| tools/aimux-codegen/src/extract.rs | 1262 | src |
 | aimux-core/src/video_model.rs | 1249 | src |
 | aimux-providers/src/vertex/model.rs | 1237 | src |
 | aimux-providers/src/openai/convert.rs | 1220 | src |

@@ -40,7 +40,6 @@ pub const CATEGORY_BY_FILE: &[(&str, &str)] = &[
     ("aimux-core/src/transcription_model.rs", "multimodal"),
     ("aimux-core/src/video_model.rs", "multimodal"),
     ("aimux-core/src/model_catalogue.rs", "provider"),
-    ("aimux-core/src/model_id.rs", "provider"),
     ("aimux-core/src/message.rs", "user"),
     ("aimux-core/src/language_model_message.rs", "user"),
     ("aimux-core/src/options.rs", "user"),
