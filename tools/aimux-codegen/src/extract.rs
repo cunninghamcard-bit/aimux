@@ -61,6 +61,8 @@ pub const CODECS: &[(&str, &str)] = &[];
 pub struct FieldCodec {
     /// Containing type.
     pub owner: &'static str,
+    /// Enum variant holding the field (`""` for a struct field).
+    pub variant: &'static str,
     /// Rust field name (without `r#`).
     pub field: &'static str,
     /// The serde attribute as `<key>=<fn>`.
@@ -79,6 +81,7 @@ pub const FIELD_CODECS: &[FieldCodec] = &[
     // aimux-core/src/recording.rs:95 (v4: schemas 1 and 2 are read)
     FieldCodec {
         owner: "Recording",
+        variant: "",
         field: "schema",
         serde: "deserialize_with=deserialize_known_schema",
         name: "knownRecordingSchema",
@@ -88,6 +91,7 @@ pub const FIELD_CODECS: &[FieldCodec] = &[
     // aimux-core/src/recording.rs:189
     FieldCodec {
         owner: "InputRecord",
+        variant: "",
         field: "prompt",
         serde: "deserialize_with=deserialize_prompt",
         name: "readablePrompt",
@@ -97,6 +101,7 @@ pub const FIELD_CODECS: &[FieldCodec] = &[
     // aimux-core/src/tool.rs:219
     FieldCodec {
         owner: "ToolResult",
+        variant: "",
         field: "result",
         serde: "deserialize_with=non_null_json",
         name: "nonNullJson",
@@ -106,6 +111,7 @@ pub const FIELD_CODECS: &[FieldCodec] = &[
     // aimux-core/src/parse_tool_call.rs:468
     FieldCodec {
         owner: "ToolCallRepairReply",
+        variant: "Repaired",
         field: "tool_call",
         serde: "deserialize_with=crate::wire::typed::deserialize",
         name: "typeTagged",
@@ -115,12 +121,14 @@ pub const FIELD_CODECS: &[FieldCodec] = &[
     // aimux-core/src/decision_model.rs:88-100
     presence(
         "DecisionBooleanCriteria",
+        "",
         "true_",
         "deserialize_with=present",
         true,
     ),
     presence(
         "DecisionBooleanCriteria",
+        "",
         "false_",
         "deserialize_with=present",
         true,
@@ -128,6 +136,7 @@ pub const FIELD_CODECS: &[FieldCodec] = &[
     // aimux-core/src/error.rs:76
     presence(
         "ApiCallError",
+        "",
         "data",
         "deserialize_with=crate::wire::present",
         false,
@@ -135,6 +144,7 @@ pub const FIELD_CODECS: &[FieldCodec] = &[
     // aimux-core/src/embedding_model.rs:129
     presence(
         "EmbeddingResponse",
+        "",
         "body",
         "deserialize_with=crate::wire::present",
         false,
@@ -142,6 +152,7 @@ pub const FIELD_CODECS: &[FieldCodec] = &[
     // aimux-core/src/reranking_model.rs:159
     presence(
         "RerankingResponse",
+        "",
         "body",
         "deserialize_with=crate::wire::present",
         false,
@@ -149,6 +160,7 @@ pub const FIELD_CODECS: &[FieldCodec] = &[
     // aimux-core/src/search_model.rs:181
     presence(
         "SearchResponse",
+        "",
         "body",
         "deserialize_with=crate::wire::present",
         false,
@@ -156,6 +168,7 @@ pub const FIELD_CODECS: &[FieldCodec] = &[
     // aimux-core/src/shared.rs:422
     presence(
         "ResponseInfo",
+        "",
         "body",
         "deserialize_with=crate::wire::present",
         false,
@@ -163,6 +176,7 @@ pub const FIELD_CODECS: &[FieldCodec] = &[
     // aimux-core/src/shared.rs:439
     presence(
         "RequestInfo",
+        "",
         "body",
         "deserialize_with=crate::wire::present",
         false,
@@ -170,6 +184,7 @@ pub const FIELD_CODECS: &[FieldCodec] = &[
     // aimux-core/src/speech_model.rs:161
     presence(
         "SpeechRequest",
+        "",
         "body",
         "deserialize_with=crate::wire::present",
         false,
@@ -177,6 +192,7 @@ pub const FIELD_CODECS: &[FieldCodec] = &[
     // aimux-core/src/speech_model.rs:188
     presence(
         "SpeechResponse",
+        "",
         "body",
         "deserialize_with=crate::wire::present",
         false,
@@ -184,6 +200,7 @@ pub const FIELD_CODECS: &[FieldCodec] = &[
     // aimux-core/src/step_result.rs:205
     presence(
         "StepResponse",
+        "",
         "body",
         "deserialize_with=crate::wire::present",
         false,
@@ -191,6 +208,7 @@ pub const FIELD_CODECS: &[FieldCodec] = &[
     // aimux-core/src/transcription_model.rs:246
     presence(
         "TranscriptionResponse",
+        "",
         "body",
         "deserialize_with=crate::wire::present",
         false,
@@ -198,6 +216,7 @@ pub const FIELD_CODECS: &[FieldCodec] = &[
     // aimux-core/src/transcription_model.rs:384
     presence(
         "TranscriptionStreamPart",
+        "ResponseMetadata",
         "body",
         "deserialize_with=crate::wire::present",
         false,
@@ -205,6 +224,7 @@ pub const FIELD_CODECS: &[FieldCodec] = &[
     // aimux-core/src/content.rs:187
     presence(
         "AssistantContentPart",
+        "ToolApprovalRequest",
         "input_schema_input",
         "deserialize_with=crate::wire::present",
         false,
@@ -217,12 +237,14 @@ pub const FIELD_CODECS: &[FieldCodec] = &[
 /// `Some(Value::Null)`.
 const fn presence(
     owner: &'static str,
+    variant: &'static str,
     field: &'static str,
     serde: &'static str,
     tri_state: bool,
 ) -> FieldCodec {
     FieldCodec {
         owner,
+        variant,
         field,
         serde,
         name: "presence",
@@ -264,6 +286,9 @@ pub enum Shape {
         fields: Vec<FieldDef>,
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         deny_unknown_fields: bool,
+        /// Rust fields with `#[serde(skip)]`: never on the wire.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        skipped: Vec<String>,
     },
     /// Tuple struct with one field: the wire is the inner value.
     Newtype {
@@ -340,6 +365,9 @@ pub struct FieldDef {
     pub omitted_when: Option<String>,
     /// (b) How `null` is read and written for this field.
     pub null: NullHandling,
+    /// Source line of the field (for diagnostics; not in the manifest).
+    #[serde(skip)]
+    pub line: usize,
 }
 
 /// `null` handling of one field, derived from its Rust type and serde
@@ -670,6 +698,42 @@ pub fn extract(src_root: &Path, rel_prefix: &str) -> Result<Model, Vec<String>> 
         for t in f.def.proxy.values() {
             ctx.check(t);
         }
+        for (k, v) in &f.def.concrete {
+            if !f.def.generics.contains(k) {
+                ctx.errors.push(format!(
+                    "{}: `ts(concrete({k} = ..))` names no type parameter of {}",
+                    ctx.at, f.def.name
+                ));
+            }
+            match syn::parse_str::<Type>(v) {
+                Ok(ty) => {
+                    ctx.generics = BTreeSet::new();
+                    ctx.check(&type_ref(&ty));
+                    ctx.generics = f.def.generics.iter().cloned().collect();
+                }
+                Err(_) => ctx.errors.push(format!(
+                    "{}: unresolved generic parameter `{k}`: cannot parse `ts(concrete)` type `{v}`",
+                    ctx.at
+                )),
+            }
+        }
+    }
+    let shapes: BTreeMap<String, Shape> = found
+        .iter()
+        .map(|f| (f.def.name.clone(), f.def.shape.clone()))
+        .collect();
+    for f in &mut found {
+        apply_proxy(f, &shapes, &mut errors);
+    }
+    let alias_types: BTreeMap<String, TypeRef> = aliases
+        .iter()
+        .map(|(k, (a, _))| (k.clone(), a.ty.clone()))
+        .collect();
+    for f in found
+        .iter()
+        .filter(|f| f.exported || reached.contains(&f.def.name))
+    {
+        check_flatten(&f.def, &f.def.shape, &shapes, &alias_types, &mut errors);
     }
     if !errors.is_empty() {
         return Err(errors);
@@ -692,6 +756,107 @@ pub fn extract(src_root: &Path, rel_prefix: &str) -> Result<Model, Vec<String>> 
         auxiliary_types,
         aliases,
     })
+}
+
+/// `#[serde(from|try_from = X, into = Y)]`: with X == Y the wire is X's
+/// shape (a DTO's own shape, or a newtype over a primitive/container).
+/// Different directions (or a one-way proxy) cannot be described by one
+/// wire shape: an error with file:line.
+fn apply_proxy(f: &mut Found, shapes: &BTreeMap<String, Shape>, errors: &mut Vec<String>) {
+    if f.def.proxy.is_empty() {
+        return;
+    }
+    let at = format!("{}:{}", f.def.source, f.line);
+    let from = f
+        .def
+        .proxy
+        .get("from")
+        .or_else(|| f.def.proxy.get("try_from"));
+    let into = f.def.proxy.get("into");
+    let text = |t: Option<&TypeRef>| {
+        t.map_or_else(
+            || format!("(none: own derive of {})", f.def.name),
+            |t| serde_json::to_string(t).unwrap_or_default(),
+        )
+    };
+    let (Some(from_t), Some(into_t)) = (from, into) else {
+        errors.push(format!(
+            "{at}: {} proxy directions differ: from = {}, into = {}",
+            f.def.name,
+            text(from),
+            text(into)
+        ));
+        return;
+    };
+    let (a, b) = (text(Some(from_t)), text(Some(into_t)));
+    if a != b {
+        errors.push(format!(
+            "{at}: {} proxy directions differ: from = {a}, into = {b}",
+            f.def.name
+        ));
+        return;
+    }
+    f.def.shape = match from_t {
+        TypeRef::Ref { name, args } if args.is_empty() && shapes.contains_key(name) => {
+            shapes[name].clone()
+        }
+        other => Shape::Newtype {
+            inner: other.clone(),
+        },
+    };
+}
+
+/// A `flatten` field must name a struct-shaped DTO (directly or through an
+/// alias); anything else (a map, an enum, an `Option`, a primitive) cannot be
+/// expanded into named fields: an error with file:line.
+fn check_flatten(
+    def: &TypeDef,
+    shape: &Shape,
+    shapes: &BTreeMap<String, Shape>,
+    aliases: &BTreeMap<String, TypeRef>,
+    errors: &mut Vec<String>,
+) {
+    match shape {
+        Shape::Struct { fields, .. } => {
+            for f in fields.iter().filter(|f| f.flatten) {
+                let mut ty = &f.ty;
+                let mut hops = 0;
+                while let TypeRef::Ref { name, args } = ty {
+                    match aliases.get(name) {
+                        Some(t) if args.is_empty() && hops < 16 => {
+                            ty = t;
+                            hops += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                // A struct DTO, or (v4 `TypedSource` result.rs:325 over
+                // `Source`) an internally tagged enum: serde merges the
+                // variant's fields, tag included, into the outer object.
+                let ok = matches!(ty, TypeRef::Ref { name, .. }
+                if matches!(
+                    shapes.get(name),
+                    Some(Shape::Struct { .. } | Shape::Enum { representation: Representation::Internal { .. }, .. })
+                ));
+                if !ok {
+                    errors.push(format!(
+                        "{}:{}: {}.{}: `flatten` of {} cannot be expanded (only a struct DTO or an internally tagged enum can)",
+                        def.source,
+                        f.line,
+                        def.name,
+                        f.rust,
+                        serde_json::to_string(&f.ty).unwrap_or_default()
+                    ));
+                }
+            }
+        }
+        Shape::Enum { variants, .. } => {
+            for v in variants {
+                check_flatten(def, &v.shape, shapes, aliases, errors);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn refs_in_shape(shape: &Shape, out: &mut BTreeSet<String>) {
@@ -826,6 +991,9 @@ fn consider(
         return;
     }
     let line = ident.span().start().line;
+    if let Some(msg) = cfg_attr_problem(attrs) {
+        errors.push(format!("{rel}:{line}: {msg}"));
+    }
     let mut c = match container(attrs) {
         Ok(c) => c,
         Err(e) => {
@@ -841,14 +1009,24 @@ fn consider(
         c.ts_only = true;
         shape(&c)
     };
+    let type_params: Vec<String> = generics
+        .type_params()
+        .map(|p| p.ident.to_string())
+        .collect();
     let shape = match shape {
-        Ok(s) => s,
+        Ok(mut s) => {
+            generic_params_in_shape(&mut s, &type_params);
+            s
+        }
         Err(e) => {
             match e.strip_prefix('@').and_then(|r| r.split_once('@')) {
                 Some((l, msg)) => errors.push(format!("{rel}:{l}: {msg}")),
                 None => errors.push(format!("{rel}:{line}: {ident} {e}")),
             }
-            return;
+            // Keep the name resolvable so references to this type do not
+            // add a second, cascading `unregistered type` error. Generation
+            // already fails on the error above.
+            Shape::Unit
         }
     };
     let category = CATEGORY_BY_FILE
@@ -870,10 +1048,7 @@ fn consider(
             ts_name: c.ts_rename.clone(),
             category,
             source: rel.to_string(),
-            generics: generics
-                .type_params()
-                .map(|p| p.ident.to_string())
-                .collect(),
+            generics: type_params,
             concrete: c.concrete.clone(),
             proxy,
             ts_override: match c.ts_override.as_ref().map(TsOverride::wire).transpose() {
@@ -888,6 +1063,43 @@ fn consider(
         line,
         exported: c.ts_export,
     });
+}
+
+/// A bare `Ref` named like one of the item's type parameters is that
+/// parameter: [`TypeRef::Generic`].
+fn generic_params_in_shape(shape: &mut Shape, params: &[String]) {
+    if params.is_empty() {
+        return;
+    }
+    match shape {
+        Shape::Struct { fields, .. } => fields
+            .iter_mut()
+            .for_each(|f| generic_params_in(&mut f.ty, params)),
+        Shape::Newtype { inner } => generic_params_in(inner, params),
+        Shape::Tuple { items } => items.iter_mut().for_each(|t| generic_params_in(t, params)),
+        Shape::Unit | Shape::HandWritten { .. } => {}
+        Shape::Enum { variants, .. } => variants
+            .iter_mut()
+            .for_each(|v| generic_params_in_shape(&mut v.shape, params)),
+    }
+}
+
+fn generic_params_in(t: &mut TypeRef, params: &[String]) {
+    match t {
+        TypeRef::Option(i) | TypeRef::Array(i) | TypeRef::TriState(i) => {
+            generic_params_in(i, params);
+        }
+        TypeRef::Map { key, value } => {
+            generic_params_in(key, params);
+            generic_params_in(value, params);
+        }
+        TypeRef::Tuple(items) => items.iter_mut().for_each(|i| generic_params_in(i, params)),
+        TypeRef::Ref { name, args } if args.is_empty() && params.contains(name) => {
+            *t = TypeRef::Generic(name.clone());
+        }
+        TypeRef::Ref { args, .. } => args.iter_mut().for_each(|i| generic_params_in(i, params)),
+        _ => {}
+    }
 }
 
 fn derives_ts(attrs: &[Attribute]) -> bool {
@@ -1067,9 +1279,30 @@ fn at_line(line: usize, msg: &str) -> String {
     format!("@{line}@{msg}")
 }
 
+/// `#[cfg_attr(.., serde(..))]` / `#[cfg_attr(.., ts(..))]` would make the
+/// wire depend on build configuration the extractor cannot see: an error.
+fn no_cfg_attr(attrs: &[Attribute], line: usize) -> Result<(), String> {
+    match cfg_attr_problem(attrs) {
+        Some(msg) => Err(at_line(line, &msg)),
+        None => Ok(()),
+    }
+}
+
+fn cfg_attr_problem(attrs: &[Attribute]) -> Option<String> {
+    attrs.iter().find_map(|a| {
+        if !a.path().is_ident("cfg_attr") {
+            return None;
+        }
+        let text = a.meta.to_token_stream().to_string().replace(' ', "");
+        (text.contains("serde(") || text.contains("ts("))
+            .then(|| format!("`cfg_attr` carrying serde/ts attributes is not supported: #[{text}]"))
+    })
+}
+
 /// Check a `with`-style field: `#[ts(type)]` or a [`FIELD_CODECS`] entry.
 fn field_codec(
     owner: &str,
+    variant: &str,
     field: &str,
     m: &Member,
     line: usize,
@@ -1082,24 +1315,38 @@ fn field_codec(
     }
     FIELD_CODECS
         .iter()
-        .find(|c| c.owner == owner && c.field == field && c.serde == with)
+        .find(|c| {
+            c.owner == owner && c.variant == variant && c.field == field && c.serde == with
+        })
         .map(Some)
         .ok_or_else(|| {
+            let path = if variant.is_empty() {
+                format!("{owner}.{field}")
+            } else {
+                format!("{owner}::{variant}.{field}")
+            };
             at_line(
                 line,
-                &format!("{owner}.{field} uses serde `{with}` but has no `#[ts(type)]` and no FIELD_CODECS registration"),
+                &format!("{path} uses serde `{with}` but has no `#[ts(type)]` and no FIELD_CODECS registration"),
             )
         })
 }
 
-fn fields_of(owner: &str, fields: &Fields, rename_all: Option<&str>) -> Result<Shape, String> {
+fn fields_of(
+    owner: &str,
+    variant: &str,
+    fields: &Fields,
+    rename_all: Option<&str>,
+) -> Result<Shape, String> {
     match fields {
         Fields::Unit => Ok(Shape::Unit),
         Fields::Unnamed(u) => {
             let mut items = Vec::new();
             for (i, f) in u.unnamed.iter().enumerate() {
+                let line = f.ty.span().start().line;
+                no_cfg_attr(&f.attrs, line)?;
                 let m = member(&f.attrs)?;
-                field_codec(owner, &i.to_string(), &m, f.ty.span().start().line)?;
+                field_codec(owner, variant, &i.to_string(), &m, line)?;
                 items.push(overridden(&f.ty, m.ts_type.as_ref())?);
             }
             if items.len() == 1 {
@@ -1112,23 +1359,26 @@ fn fields_of(owner: &str, fields: &Fields, rename_all: Option<&str>) -> Result<S
         }
         Fields::Named(n) => {
             let mut out = Vec::new();
+            let mut skipped = Vec::new();
             for f in &n.named {
+                let line = f.ident.as_ref().map_or(0, |i| i.span().start().line);
+                no_cfg_attr(&f.attrs, line)?;
                 let m = member(&f.attrs)?;
-                if m.skip {
-                    continue;
-                }
                 let rust = f
                     .ident
                     .as_ref()
                     .map(ToString::to_string)
                     .unwrap_or_default();
                 let rust = rust.strip_prefix("r#").unwrap_or(&rust).to_string();
+                if m.skip {
+                    skipped.push(rust);
+                    continue;
+                }
                 let wire = m
                     .rename
                     .clone()
                     .unwrap_or_else(|| rename(&rust, rename_all, false));
-                let line = f.ident.as_ref().map_or(0, |i| i.span().start().line);
-                let codec = field_codec(owner, &rust, &m, line)?;
+                let codec = field_codec(owner, variant, &rust, &m, line)?;
                 let null = null_handling(owner, &rust, &type_ref(&f.ty), &m, codec)
                     .map_err(|e| at_line(line, &e))?;
                 let mut ty =
@@ -1161,6 +1411,7 @@ fn fields_of(owner: &str, fields: &Fields, rename_all: Option<&str>) -> Result<S
                     flatten: m.flatten,
                     aliases: m.aliases,
                     serde_with: m.with,
+                    line,
                     omitted_when: m.skip_serializing_if_fn,
                     null,
                 });
@@ -1168,6 +1419,7 @@ fn fields_of(owner: &str, fields: &Fields, rename_all: Option<&str>) -> Result<S
             Ok(Shape::Struct {
                 fields: out,
                 deny_unknown_fields: false,
+                skipped,
             })
         }
     }
@@ -1177,7 +1429,7 @@ fn struct_shape(owner: &str, fields: &Fields, c: &Container) -> Result<Shape, St
     if c.ts_only {
         return ts_only_struct(fields);
     }
-    let mut shape = fields_of(owner, fields, c.rename_all.as_deref())?;
+    let mut shape = fields_of(owner, "", fields, c.rename_all.as_deref())?;
     if c.transparent {
         return match shape {
             Shape::Newtype { .. } => Ok(shape),
@@ -1236,6 +1488,7 @@ fn ts_only_struct(fields: &Fields) -> Result<Shape, String> {
             codec: None,
             omitted_when: None,
             null,
+            line: f.ident.as_ref().map_or(0, |i| i.span().start().line),
         });
     }
     if out.is_empty() {
@@ -1244,6 +1497,7 @@ fn ts_only_struct(fields: &Fields) -> Result<Shape, String> {
     Ok(Shape::Struct {
         fields: out,
         deny_unknown_fields: false,
+        skipped: Vec::new(),
     })
 }
 
@@ -1263,11 +1517,13 @@ fn enum_shape(owner: &str, e: &syn::ItemEnum, c: &Container) -> Result<Shape, St
     };
     let mut variants = Vec::new();
     for v in &e.variants {
+        no_cfg_attr(&v.attrs, v.ident.span().start().line)?;
         let m = member(&v.attrs)?;
         if m.skip {
             continue;
         }
         let rust = v.ident.to_string();
+        let rust_name = rust.clone();
         let untagged = matches!(representation, Representation::Untagged) || {
             v.attrs.iter().any(|a| {
                 a.path().is_ident("serde")
@@ -1289,7 +1545,7 @@ fn enum_shape(owner: &str, e: &syn::ItemEnum, c: &Container) -> Result<Shape, St
             wire,
             aliases: m.aliases,
             other: m.other,
-            shape: fields_of(owner, &v.fields, vc.as_deref())?,
+            shape: fields_of(owner, &rust_name, &v.fields, vc.as_deref())?,
         });
     }
     Ok(Shape::Enum {
@@ -1417,6 +1673,13 @@ pub fn rust_text(ty: &Type) -> String {
     out
 }
 
+/// [`TypeRef`] of a Rust type written as text (e.g. a `ts(concrete)` value or
+/// the Rust side of a codec), or `None` when it does not parse.
+#[must_use]
+pub fn parse_type_ref(text: &str) -> Option<TypeRef> {
+    syn::parse_str::<Type>(text).ok().map(|t| type_ref(&t))
+}
+
 /// A field type with its `#[ts(as|type)]` override applied.
 fn overridden(ty: &Type, o: Option<&TsOverride>) -> Result<TypeRef, String> {
     match o {
@@ -1526,7 +1789,15 @@ impl Resolve<'_> {
                 wire: CodecWire::Type(inner),
                 ..
             } => self.check(inner),
-            TypeRef::Prim(_) | TypeRef::Json | TypeRef::Codec { .. } | TypeRef::Generic(_) => {}
+            TypeRef::Prim(_) | TypeRef::Json | TypeRef::Codec { .. } => {}
+            TypeRef::Generic(g) => {
+                if !self.generics.contains(g) {
+                    self.errors.push(format!(
+                        "{}: unresolved generic parameter `{g}` (no `ts(concrete)` and not a type parameter)",
+                        self.at
+                    ));
+                }
+            }
             TypeRef::Option(i) | TypeRef::Array(i) | TypeRef::TriState(i) => self.check(i),
             TypeRef::Map { key, value } => {
                 self.check(key);
@@ -1535,8 +1806,7 @@ impl Resolve<'_> {
             TypeRef::Tuple(items) => items.iter().for_each(|i| self.check(i)),
             TypeRef::Ref { name, args } => {
                 args.iter().for_each(|i| self.check(i));
-                if self.generics.contains(name)
-                    || self.exported.contains(name)
+                if self.exported.contains(name)
                     || self.aliases.contains(name)
                     || (self.allow_aux && self.unexported_ts.contains(name))
                     || CODECS.iter().any(|(n, _)| n == name)
