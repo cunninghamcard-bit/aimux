@@ -1086,10 +1086,13 @@ enum FV {
 
 struct Sim<'a> {
     swift: &'a Swift,
+    /// Every type name [`Sim::value`] was asked for.
+    seen: std::cell::RefCell<BTreeSet<String>>,
 }
 
 impl Sim<'_> {
     fn value(&self, ty: &str, v: &Value, depth: usize) -> Result<Value, String> {
+        self.seen.borrow_mut().insert(ty.to_string());
         if depth > 64 {
             return Err("depth".into());
         }
@@ -1519,6 +1522,80 @@ fn all_fixtures() -> Vec<Fx> {
         model_spec_non_default(),
         Some(back::<aimux_core::model_catalogue::ModelSpec>),
     ));
+    // Hand-written Swift types (bindings/swift/Sources/Aimux) no generated
+    // fixture reaches (see
+    // every_hand_written_type_with_a_generated_counterpart_has_a_fixture).
+    let hw: [(&'static str, &'static str, Value, Back); 11] = [
+        (
+            "hand-ModelPrompt-text",
+            "ModelPrompt",
+            json!("hi"),
+            back::<aimux_core::message::ModelPrompt>,
+        ),
+        (
+            "hand-ResponseFormat-json",
+            "ResponseFormat",
+            json!({"type": "json", "name": "n"}),
+            back::<aimux_core::options::ResponseFormat>,
+        ),
+        (
+            "hand-ResponseFormat-text",
+            "ResponseFormat",
+            json!({"type": "text"}),
+            back::<aimux_core::options::ResponseFormat>,
+        ),
+        (
+            "hand-ToolResultContent-text",
+            "ToolResultContent",
+            json!({"type": "text", "text": "t"}),
+            back::<aimux_core::language_model_message::ToolResultContent>,
+        ),
+        (
+            "hand-ToolResultContent-file",
+            "ToolResultContent",
+            json!({"type": "file", "data": {"type": "url", "url": "https://x"}, "mediaType": "image/png"}),
+            back::<aimux_core::language_model_message::ToolResultContent>,
+        ),
+        (
+            "hand-FilePartData-tagged",
+            "FilePartData",
+            json!({"type": "url", "url": "https://x"}),
+            back::<aimux_core::content::FilePartData>,
+        ),
+        (
+            "hand-FilePartData-string",
+            "FilePartData",
+            json!("abc"),
+            back::<aimux_core::content::FilePartData>,
+        ),
+        (
+            "hand-ReasoningFilePartData-string",
+            "ReasoningFilePartData",
+            json!("abc"),
+            back::<aimux_core::content::ReasoningFilePartData>,
+        ),
+        (
+            "hand-ReasoningPart-text",
+            "ReasoningPart",
+            json!({"type": "reasoning", "text": "t"}),
+            back::<aimux_core::result::ReasoningPart>,
+        ),
+        (
+            "hand-TextStreamPart-TextStart",
+            "TextStreamPart",
+            json!({"type": "text-start", "id": "a"}),
+            back::<aimux_core::stream_part::TextStreamPart>,
+        ),
+        (
+            "hand-ToolOutputDenied",
+            "ToolOutputDenied",
+            json!({"toolCallId": "c", "toolName": "t"}),
+            back::<aimux_core::result::ToolOutputDenied>,
+        ),
+    ];
+    for (label, ty, j, b) in hw {
+        v.push((label, ty, j, Some(b)));
+    }
     // One generated field-absent fixture per emit::registry entry (the
     // same ones the Go round trip runs).
     for (label, ty, j) in registry_fixtures::registry_fixtures() {
@@ -1551,7 +1628,10 @@ fn flip(v: &Value) -> Value {
 }
 
 fn sim_check(m: &Manifest, swift: &Swift, r: &mut Report) {
-    let sim = Sim { swift };
+    let sim = Sim {
+        swift,
+        seen: Default::default(),
+    };
     for (label, ty, json, back) in all_fixtures() {
         let name = swift_name(m, swift, ty, &json);
         if !swift.contains_key(&name) {
@@ -1909,7 +1989,7 @@ fn known_difference_with_a_different_message_is_red() {
 }
 
 const EXPECTED_COUNTS: (usize, usize, usize, usize, usize, usize, usize) =
-    (309, 1083, 17, 45, 250, 26, 2205);
+    (309, 1083, 17, 45, 261, 26, 2253);
 
 /// Every `Defaulted<T>` field (a `#[serde(default)]` field whose Rust
 /// `Default` the Swift side cannot spell) rejects `null` like serde, and is
@@ -1917,7 +1997,10 @@ const EXPECTED_COUNTS: (usize, usize, usize, usize, usize, usize, usize) =
 #[test]
 fn defaulted_fields_reject_null() {
     let swift = parse(&committed_types());
-    let sim = Sim { swift: &swift };
+    let sim = Sim {
+        swift: &swift,
+        seen: Default::default(),
+    };
     let mut found = BTreeSet::new();
     for (name, d) in &swift {
         let Decl::Struct(fs) = d else { continue };
@@ -2186,7 +2269,10 @@ fn reject_cases_are_rejected_by_serde_and_swift() {
     use aimux_core::model_catalogue::ModelModalities;
     use aimux_core::types::{LanguageModelUsage, Usage};
     let swift = parse(&committed_types());
-    let sim = Sim { swift: &swift };
+    let sim = Sim {
+        swift: &swift,
+        seen: Default::default(),
+    };
     let usage = json!({"inputTokens": {"total": 1}, "outputTokens": {"total": 1}});
     let with = |path: &[&str], v: Value| {
         let mut x = usage.clone();
@@ -2304,4 +2390,120 @@ fn same_compares_numbers_by_value_only_on_float_paths() {
         &json!({"index": 9_007_199_254_740_993_u64, "relevanceScore": 0.5}),
         &json!({"index": 9_007_199_254_740_992_u64, "relevanceScore": 0.5}),
     ));
+}
+
+/// Top-level type names of a Swift source (`struct` / `enum` / `class` /
+/// `actor` / `typealias` / `protocol` at brace depth 0), skipping comments
+/// and string literals. Nested and `extension` members are not top-level.
+/// (#55 read these with `swiftc -dump-parse`; Swift is not run here.)
+fn top_level_types(src: &str) -> BTreeSet<String> {
+    let b = src.as_bytes();
+    let mut out = BTreeSet::new();
+    let (mut i, mut depth) = (0usize, 0usize);
+    let mut word = String::new();
+    let mut prev = String::new();
+    let mut flush = |w: &mut String, prev: &mut String, depth: usize| {
+        if !w.is_empty() {
+            if depth == 0
+                && matches!(
+                    prev.as_str(),
+                    "struct" | "enum" | "class" | "actor" | "typealias" | "protocol"
+                )
+            {
+                out.insert(w.clone());
+            }
+            *prev = std::mem::take(w);
+        }
+    };
+    while i < b.len() {
+        let c = b[i];
+        if c == b'/' && b.get(i + 1) == Some(&b'/') {
+            while i < b.len() && b[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if c == b'/' && b.get(i + 1) == Some(&b'*') {
+            i += 2;
+            while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
+                i += 1;
+            }
+            i += 2;
+            continue;
+        }
+        if c == b'"' {
+            flush(&mut word, &mut prev, depth);
+            let triple = b[i..].starts_with(b"\"\"\"");
+            i += if triple { 3 } else { 1 };
+            while i < b.len() {
+                if b[i] == b'\\' {
+                    i += 2;
+                    continue;
+                }
+                if triple && b[i..].starts_with(b"\"\"\"") {
+                    i += 3;
+                    break;
+                }
+                if !triple && b[i] == b'"' {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            prev.clear();
+            continue;
+        }
+        if c.is_ascii_alphanumeric() || c == b'_' {
+            word.push(c as char);
+        } else {
+            flush(&mut word, &mut prev, depth);
+            match c {
+                b'{' => depth += 1,
+                b'}' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    flush(&mut word, &mut prev, depth);
+    out
+}
+
+#[test]
+fn top_level_reader_sees_one_line_and_skips_nested_and_extension() {
+    let sample = "public struct A {}; public enum B {}\npublic struct Outer {\n    public struct Inner {}\n}\nextension Outer {\n    public enum Ext {}\n}\npublic typealias T = Int\n// struct Commented {}\nlet s = \"struct InString {\"\n";
+    let want: BTreeSet<String> = ["A", "B", "Outer", "T"].map(String::from).into();
+    assert_eq!(top_level_types(sample), want);
+}
+
+/// #55 wire_diff_swift.rs:1127: every hand-written Swift type
+/// (bindings/swift/Sources/Aimux, the files #55 read) with a generated
+/// counterpart is simulated by at least one fixture.
+#[test]
+fn every_hand_written_type_with_a_generated_counterpart_has_a_fixture() {
+    let dir = workspace().join("bindings/swift/Sources/Aimux");
+    let mut hand = BTreeSet::new();
+    for f in ["Types.swift", "Multimodal.swift", "DecisionModel.swift"] {
+        hand.extend(top_level_types(
+            &std::fs::read_to_string(dir.join(f)).unwrap(),
+        ));
+    }
+    let text = committed_types();
+    let swift = parse(&text);
+    let m = manifest(&text);
+    // A type is simulated when any fixture's simulation reaches it (as a
+    // fixture's own type or nested inside one).
+    let sim = Sim {
+        swift: &swift,
+        seen: Default::default(),
+    };
+    for (_, ty, j, _) in all_fixtures() {
+        let _ = sim.value(&swift_name(&m, &swift, ty, &j), &j, 0);
+    }
+    let simulated = sim.seen.into_inner();
+    let both: Vec<&String> = hand.iter().filter(|t| swift.contains_key(*t)).collect();
+    assert!(!both.is_empty());
+    let uncovered: Vec<&&String> = both.iter().filter(|t| !simulated.contains(**t)).collect();
+    eprintln!("hand-written with a generated counterpart: {}", both.len());
+    assert_eq!(uncovered, Vec::<&&String>::new());
 }
