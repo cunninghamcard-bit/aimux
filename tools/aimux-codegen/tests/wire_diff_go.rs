@@ -22,6 +22,8 @@ mod go_fixtures;
 mod go_fixtures_empty;
 #[path = "common/go_fixtures_tri.rs"]
 mod go_fixtures_tri;
+#[path = "common/go_fixtures_untagged.rs"]
+mod go_fixtures_untagged;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -913,8 +915,8 @@ struct Compared {
 }
 
 /// The IR, for type-directed comparison.
-fn ir() -> &'static BTreeMap<String, wire::WireType> {
-    static IR: std::sync::OnceLock<BTreeMap<String, wire::WireType>> = std::sync::OnceLock::new();
+fn ir() -> &'static Ir {
+    static IR: std::sync::OnceLock<Ir> = std::sync::OnceLock::new();
     IR.get_or_init(|| {
         wire::from_inputs(&Inputs::from_workspace(&workspace()))
             .unwrap()
@@ -933,15 +935,160 @@ fn join_key(path: &str, k: &str) -> String {
     }
 }
 
+type Ir = BTreeMap<String, wire::WireType>;
+
 /// JSON paths (in [`diff`]'s `a.b[0]` form) of `v` whose IR type is an
 /// `f32` / `f64` primitive, found by walking `v` along the IR type `ty`.
+/// Each union contributes only the variant `v` actually is: a tagged union
+/// by its tag, an untagged union by serde's rule, the first variant in
+/// declaration order that `v` decodes as ([`decodes`]).
 fn float_paths(ty: &str, v: &Value) -> BTreeSet<String> {
+    float_paths_in(ir(), ty, v)
+}
+
+fn float_paths_in(m: &Ir, ty: &str, v: &Value) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
-    walk_ty(&wire::WireTy::Named(ty.into()), v, "", &mut out, 0);
+    walk_ty(m, &wire::WireTy::Named(ty.into()), v, "", &mut out, 0);
     out
 }
 
-fn walk_ty(ty: &wire::WireTy, v: &Value, path: &str, out: &mut BTreeSet<String>, depth: usize) {
+/// Whether serde would decode `v` as the IR type `ty` (JSON kind, integer
+/// vs float, required keys, tags, untagged arms in order). Unknown keys are
+/// accepted, as serde does without `deny_unknown_fields`.
+fn decodes(m: &Ir, ty: &wire::WireTy, v: &Value, depth: usize) -> bool {
+    use wire::WireTy as T;
+    if depth > 64 {
+        return true;
+    }
+    match ty {
+        T::Prim(p) => match p.as_str() {
+            "String" | "str" => v.is_string(),
+            "char" => v.as_str().is_some_and(|s| s.chars().count() == 1),
+            "bool" => v.is_boolean(),
+            "u8" => v.as_u64().is_some_and(|n| n <= u64::from(u8::MAX)),
+            "u16" => v.as_u64().is_some_and(|n| n <= u64::from(u16::MAX)),
+            "u32" => v.as_u64().is_some_and(|n| n <= u64::from(u32::MAX)),
+            "u64" | "usize" | "u128" => v.is_u64(),
+            "i8" | "i16" | "i32" | "i64" | "isize" | "i128" => v.is_i64(),
+            "f32" | "f64" => v.is_number(),
+            _ => true,
+        },
+        T::Json => true,
+        T::Literal(l) => v.as_str() == Some(l.as_str()),
+        T::Nullable(i) => v.is_null() || decodes(m, i, v, depth + 1),
+        T::Array(i) => v
+            .as_array()
+            .is_some_and(|a| a.iter().all(|x| decodes(m, i, x, depth + 1))),
+        T::Tuple(items) => v.as_array().is_some_and(|a| {
+            a.len() == items.len()
+                && items
+                    .iter()
+                    .zip(a)
+                    .all(|(i, x)| decodes(m, i, x, depth + 1))
+        }),
+        T::Map { value, .. } => v
+            .as_object()
+            .is_some_and(|o| o.values().all(|x| decodes(m, value, x, depth + 1))),
+        T::Named(n) => m
+            .get(n)
+            .is_none_or(|t| body_decodes(m, &t.body, v, depth + 1)),
+    }
+}
+
+fn fields_decode(m: &Ir, fields: &[wire::WireField], v: &Value, depth: usize) -> bool {
+    let Some(o) = v.as_object() else {
+        return false;
+    };
+    fields.iter().all(|f| match o.get(&f.wire) {
+        None => f.presence.omittable || f.presence.nullable,
+        Some(Value::Null) if f.presence.nullable => true,
+        Some(x) => decodes(m, &f.ty, x, depth),
+    })
+}
+
+fn variant_decodes(m: &Ir, b: &wire::VariantBody, v: &Value, untagged: bool, depth: usize) -> bool {
+    match b {
+        wire::VariantBody::Unit => !untagged || v.is_null(),
+        wire::VariantBody::Fields(f) => fields_decode(m, f, v, depth),
+        wire::VariantBody::Value(t) => decodes(m, t, v, depth),
+        wire::VariantBody::Tuple(items) => {
+            decodes(m, &wire::WireTy::Tuple(items.clone()), v, depth)
+        }
+    }
+}
+
+/// The variant of a union `v` is, with its payload: by tag, or (untagged)
+/// the first variant in declaration order that decodes.
+fn matched_variant<'a>(
+    m: &Ir,
+    repr: &wire::UnionRepr,
+    variants: &'a [wire::WireVariant],
+    v: &'a Value,
+    path: &str,
+    depth: usize,
+) -> Option<(&'a wire::WireVariant, &'a Value, String)> {
+    use wire::UnionRepr as R;
+    let named = |tag: &str| {
+        variants
+            .iter()
+            .find(|x| x.wire.as_deref() == Some(tag) || x.aliases.iter().any(|a| a == tag))
+            .or_else(|| variants.iter().find(|x| x.other))
+    };
+    match repr {
+        R::Internal { tag } => v
+            .get(tag)
+            .and_then(Value::as_str)
+            .and_then(named)
+            .map(|x| (x, v, path.to_string())),
+        R::Adjacent { tag, content } => {
+            let x = v.get(tag).and_then(Value::as_str).and_then(named)?;
+            Some((
+                x,
+                v.get(content).unwrap_or(&Value::Null),
+                join_key(path, content),
+            ))
+        }
+        R::External => {
+            if let Some(s) = v.as_str() {
+                return named(s).map(|x| (x, &Value::Null, path.to_string()));
+            }
+            let (k, c) = v
+                .as_object()
+                .filter(|o| o.len() == 1)
+                .and_then(|o| o.iter().next())?;
+            named(k).map(|x| (x, c, join_key(path, k)))
+        }
+        R::Untagged => variants
+            .iter()
+            .find(|x| variant_decodes(m, &x.body, v, true, depth))
+            .map(|x| (x, v, path.to_string())),
+    }
+}
+
+fn body_decodes(m: &Ir, body: &wire::WireBody, v: &Value, depth: usize) -> bool {
+    use wire::WireBody as B;
+    match body {
+        B::Record { fields } => fields_decode(m, fields, v, depth),
+        B::Alias(t) => decodes(m, t, v, depth),
+        B::StringEnum { values, open } => v
+            .as_str()
+            .is_some_and(|s| *open || values.iter().any(|x| x == s)),
+        B::Union { repr, variants } => {
+            let untagged = matches!(repr, wire::UnionRepr::Untagged);
+            matched_variant(m, repr, variants, v, "", depth)
+                .is_some_and(|(x, p, _)| untagged || variant_decodes(m, &x.body, p, false, depth))
+        }
+    }
+}
+
+fn walk_ty(
+    m: &Ir,
+    ty: &wire::WireTy,
+    v: &Value,
+    path: &str,
+    out: &mut BTreeSet<String>,
+    depth: usize,
+) {
     use wire::WireTy as T;
     if depth > 64 {
         return;
@@ -950,10 +1097,10 @@ fn walk_ty(ty: &wire::WireTy, v: &Value, path: &str, out: &mut BTreeSet<String>,
         T::Prim(p) if p == "f32" || p == "f64" => {
             out.insert(path.to_string());
         }
-        T::Nullable(i) => walk_ty(i, v, path, out, depth + 1),
+        T::Nullable(i) => walk_ty(m, i, v, path, out, depth + 1),
         T::Array(i) => {
             for (n, x) in v.as_array().into_iter().flatten().enumerate() {
-                walk_ty(i, x, &format!("{path}[{n}]"), out, depth + 1);
+                walk_ty(m, i, x, &format!("{path}[{n}]"), out, depth + 1);
             }
         }
         T::Tuple(items) => {
@@ -962,17 +1109,17 @@ fn walk_ty(ty: &wire::WireTy, v: &Value, path: &str, out: &mut BTreeSet<String>,
                 .zip(v.as_array().into_iter().flatten())
                 .enumerate()
             {
-                walk_ty(i, x, &format!("{path}[{n}]"), out, depth + 1);
+                walk_ty(m, i, x, &format!("{path}[{n}]"), out, depth + 1);
             }
         }
         T::Map { value, .. } => {
             for (k, x) in v.as_object().into_iter().flatten() {
-                walk_ty(value, x, &join_key(path, k), out, depth + 1);
+                walk_ty(m, value, x, &join_key(path, k), out, depth + 1);
             }
         }
         T::Named(n) => {
-            if let Some(t) = ir().get(n) {
-                walk_body(&t.body, v, path, out, depth + 1);
+            if let Some(t) = m.get(n) {
+                walk_body(m, &t.body, v, path, out, depth + 1);
             }
         }
         T::Prim(_) | T::Json | T::Literal(_) => {}
@@ -980,6 +1127,7 @@ fn walk_ty(ty: &wire::WireTy, v: &Value, path: &str, out: &mut BTreeSet<String>,
 }
 
 fn walk_fields(
+    m: &Ir,
     fields: &[wire::WireField],
     v: &Value,
     path: &str,
@@ -988,12 +1136,13 @@ fn walk_fields(
 ) {
     for f in fields {
         if let Some(x) = v.get(&f.wire) {
-            walk_ty(&f.ty, x, &join_key(path, &f.wire), out, depth);
+            walk_ty(m, &f.ty, x, &join_key(path, &f.wire), out, depth);
         }
     }
 }
 
 fn walk_variant(
+    m: &Ir,
     b: &wire::VariantBody,
     v: &Value,
     path: &str,
@@ -1002,62 +1151,32 @@ fn walk_variant(
 ) {
     match b {
         wire::VariantBody::Unit => {}
-        wire::VariantBody::Fields(fields) => walk_fields(fields, v, path, out, depth),
-        wire::VariantBody::Value(t) => walk_ty(t, v, path, out, depth),
+        wire::VariantBody::Fields(fields) => walk_fields(m, fields, v, path, out, depth),
+        wire::VariantBody::Value(t) => walk_ty(m, t, v, path, out, depth),
         wire::VariantBody::Tuple(items) => {
-            walk_ty(&wire::WireTy::Tuple(items.clone()), v, path, out, depth);
+            walk_ty(m, &wire::WireTy::Tuple(items.clone()), v, path, out, depth);
         }
     }
 }
 
 fn walk_body(
+    m: &Ir,
     body: &wire::WireBody,
     v: &Value,
     path: &str,
     out: &mut BTreeSet<String>,
     depth: usize,
 ) {
-    use wire::{UnionRepr as R, WireBody as B};
+    use wire::WireBody as B;
     match body {
-        B::Record { fields } => walk_fields(fields, v, path, out, depth),
-        B::Alias(t) => walk_ty(t, v, path, out, depth),
+        B::Record { fields } => walk_fields(m, fields, v, path, out, depth),
+        B::Alias(t) => walk_ty(m, t, v, path, out, depth),
         B::StringEnum { .. } => {}
         B::Union { repr, variants } => {
-            let named = |tag: &str| {
-                variants
-                    .iter()
-                    .find(|x| x.wire.as_deref() == Some(tag) || x.aliases.iter().any(|a| a == tag))
-            };
-            match repr {
-                R::Internal { tag } => {
-                    if let Some(x) = v.get(tag).and_then(Value::as_str).and_then(named) {
-                        walk_variant(&x.body, v, path, out, depth);
-                    }
-                }
-                R::Adjacent { tag, content } => {
-                    if let (Some(x), Some(c)) = (
-                        v.get(tag).and_then(Value::as_str).and_then(named),
-                        v.get(content),
-                    ) {
-                        walk_variant(&x.body, c, &join_key(path, content), out, depth);
-                    }
-                }
-                R::External => {
-                    if let Some((k, c)) = v
-                        .as_object()
-                        .filter(|o| o.len() == 1)
-                        .and_then(|o| o.iter().next())
-                        && let Some(x) = named(k)
-                    {
-                        walk_variant(&x.body, c, &join_key(path, k), out, depth);
-                    }
-                }
-                // serde tries each variant; any variant's float path counts.
-                R::Untagged => {
-                    for x in variants {
-                        walk_variant(&x.body, v, path, out, depth);
-                    }
-                }
+            // Only the matched variant: a path that is an integer in one
+            // variant and a float in another follows the value's variant.
+            if let Some((x, payload, p)) = matched_variant(m, repr, variants, v, path, depth) {
+                walk_variant(m, &x.body, payload, &p, out, depth);
             }
         }
     }
@@ -1635,40 +1754,53 @@ fn verdict_and_doc_checks_each_catch_their_mutation() {
 
 /// Untagged decode error parity (reviewer A): for null-bearing inputs the
 /// generated Go must accept exactly when real serde deserialization accepts.
-/// encoding/json alone accepts `null` and `[null]` as zero values.
+/// encoding/json alone accepts `null` and `[null]` as zero values. The types
+/// are every untagged enum in the manifest (go_fixtures_untagged.rs, written
+/// by gen_go_fixtures.py), each with `null`, `[null]` and `{"a": null}`.
 fn null_parity_cases() -> Vec<Fixture> {
-    use aimux_core::decision_model::DecisionInput;
-    use aimux_core::message::UserContent;
-    let di: Back = back::<DecisionInput>;
-    let uc: Back = back::<UserContent>;
-    [
-        // Audit: the only v4 untagged variants that hold JSON values (where
-        // serde does accept a null inside) are DecisionInput's
-        // Vec<Value> / JSON-object payloads (decision_model.rs:33-41).
-        ("null-DecisionInput", "DecisionInput", json!(null), di),
-        (
-            "null-DecisionInput-array",
-            "DecisionInput",
-            json!([null]),
-            di,
-        ),
-        (
-            "null-DecisionInput-object",
-            "DecisionInput",
-            json!({"a": null}),
-            di,
-        ),
-        ("null-UserContent", "UserContent", json!(null), uc),
-        ("null-UserContent-ok", "UserContent", json!("hi"), uc),
-    ]
-    .into_iter()
-    .map(|(label, ty, json, b)| Fixture {
-        label,
-        ty,
-        json,
-        back: Some(b),
-    })
-    .collect()
+    let mut out = Vec::new();
+    for (ty, b) in go_fixtures_untagged::untagged_types() {
+        for (kind, json) in [
+            ("null", json!(null)),
+            ("array", json!([null])),
+            ("object", json!({"a": null})),
+        ] {
+            out.push(Fixture {
+                label: Box::leak(format!("null-{ty}-{kind}").into_boxed_str()),
+                ty,
+                json,
+                back: Some(b),
+            });
+        }
+    }
+    out
+}
+
+/// The untagged-enum list the null-parity cases use is every untagged union
+/// of the IR lowered from the current sources (the committed list is not
+/// stale and misses none).
+#[test]
+fn null_parity_covers_every_untagged_enum() {
+    let listed: BTreeSet<&str> = go_fixtures_untagged::untagged_types()
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect();
+    let ir: BTreeSet<&str> = ir()
+        .values()
+        .filter(|t| {
+            matches!(
+                &t.body,
+                wire::WireBody::Union {
+                    repr: wire::UnionRepr::Untagged,
+                    ..
+                }
+            )
+        })
+        .map(|t| t.name.as_str())
+        .collect();
+    assert_eq!(listed, ir);
+    let cases: BTreeSet<&str> = null_parity_cases().iter().map(|f| f.ty).collect();
+    assert_eq!(cases, ir);
 }
 
 /// `(label, serde accepts, generated Go accepts)` per null-parity case.
@@ -2193,4 +2325,298 @@ fn integers_compare_exactly_floats_by_value() {
         "",
         &floats
     ));
+}
+
+fn syn_field(wire: &str, ty: wire::WireTy) -> wire::WireField {
+    wire::WireField {
+        wire: wire.into(),
+        rust: wire.into(),
+        ty,
+        presence: wire::Presence::default(),
+        aliases: vec![],
+    }
+}
+
+fn syn_variant(name: &str, fields: Vec<wire::WireField>) -> wire::WireVariant {
+    wire::WireVariant {
+        rust: name.into(),
+        wire: Some(name.into()),
+        aliases: vec![],
+        other: false,
+        body: wire::VariantBody::Fields(fields),
+    }
+}
+
+fn syn_ir(types: Vec<(&str, wire::WireBody)>) -> Ir {
+    types
+        .into_iter()
+        .map(|(n, body)| {
+            (
+                n.to_string(),
+                wire::WireType {
+                    name: n.into(),
+                    doc_source: String::new(),
+                    body,
+                },
+            )
+        })
+        .collect()
+}
+
+fn prim(p: &str) -> wire::WireTy {
+    wire::WireTy::Prim(p.into())
+}
+
+/// `json_eq_at` with float paths taken from the synthetic IR `m`.
+fn syn_eq(m: &Ir, ty: &str, truth: &Value, got: &Value) -> bool {
+    json_eq_at(truth, got, "", &float_paths_in(m, ty, truth))
+}
+
+/// A2: float paths inside an array and inside an Option.
+#[test]
+fn float_paths_inside_array_and_option() {
+    let m = syn_ir(vec![(
+        "R",
+        wire::WireBody::Record {
+            fields: vec![
+                syn_field("xs", wire::WireTy::Array(Box::new(prim("f64")))),
+                syn_field("o", wire::WireTy::Nullable(Box::new(prim("f64")))),
+                syn_field("n", prim("u64")),
+            ],
+        },
+    )]);
+    let truth = json!({"xs": [1.0, 2.5], "o": 3.0, "n": 1});
+    let paths = float_paths_in(&m, "R", &truth);
+    assert_eq!(
+        paths,
+        ["o", "xs[0]", "xs[1]"]
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    );
+    assert!(syn_eq(
+        &m,
+        "R",
+        &truth,
+        &json!({"xs": [1, 2.5], "o": 3, "n": 1})
+    ));
+    assert!(!syn_eq(
+        &m,
+        "R",
+        &truth,
+        &json!({"xs": [1.0, 2.5], "o": 3.0, "n": 1.0})
+    ));
+}
+
+/// A2: a tagged union follows its tag; the same field is an integer in one
+/// variant and a float in the other.
+#[test]
+fn float_paths_follow_the_tag() {
+    let m = syn_ir(vec![(
+        "U",
+        wire::WireBody::Union {
+            repr: wire::UnionRepr::Internal { tag: "type".into() },
+            variants: vec![
+                syn_variant("int", vec![syn_field("v", prim("u64"))]),
+                syn_variant("float", vec![syn_field("v", prim("f64"))]),
+            ],
+        },
+    )]);
+    let big = json!({"type": "int", "v": 9_007_199_254_740_993_u64});
+    assert!(!syn_eq(
+        &m,
+        "U",
+        &big,
+        &json!({"type": "int", "v": 9_007_199_254_740_992_u64})
+    ));
+    assert!(syn_eq(
+        &m,
+        "U",
+        &json!({"type": "float", "v": 1.0}),
+        &json!({"type": "float", "v": 1})
+    ));
+    assert!(!syn_eq(
+        &m,
+        "U",
+        &json!({"type": "int", "v": 1}),
+        &json!({"type": "int", "v": 1.0})
+    ));
+}
+
+/// A2: an untagged union follows serde's first decoding variant: `v` is
+/// `u64` in A and `f64` in B.
+#[test]
+fn float_paths_follow_the_first_decoding_untagged_variant() {
+    let int_first = syn_ir(vec![(
+        "U",
+        wire::WireBody::Union {
+            repr: wire::UnionRepr::Untagged,
+            variants: vec![
+                syn_variant("A", vec![syn_field("v", prim("u64"))]),
+                syn_variant("B", vec![syn_field("v", prim("f64"))]),
+            ],
+        },
+    )]);
+    // 2^53+1 decodes as A (integer): exact.
+    assert!(!syn_eq(
+        &int_first,
+        "U",
+        &json!({"v": 9_007_199_254_740_993_u64}),
+        &json!({"v": 9_007_199_254_740_992_u64})
+    ));
+    // 1.0 is not an integer, so it decodes as B (float): by value.
+    assert!(syn_eq(
+        &int_first,
+        "U",
+        &json!({"v": 1.0}),
+        &json!({"v": 1})
+    ));
+    // 1 decodes as both A and B; serde takes A, so 1 vs 1.0 differs.
+    assert!(!syn_eq(
+        &int_first,
+        "U",
+        &json!({"v": 1}),
+        &json!({"v": 1.0})
+    ));
+    let float_first = syn_ir(vec![(
+        "U",
+        wire::WireBody::Union {
+            repr: wire::UnionRepr::Untagged,
+            variants: vec![
+                syn_variant("A", vec![syn_field("v", prim("f64"))]),
+                syn_variant("B", vec![syn_field("v", prim("u64"))]),
+            ],
+        },
+    )]);
+    // 1 decodes as both; serde takes A (float) first, so by value.
+    assert!(syn_eq(
+        &float_first,
+        "U",
+        &json!({"v": 1}),
+        &json!({"v": 1.0})
+    ));
+}
+
+/// `int` (`uint64` / `int64`) Go field types become `float64`.
+fn ints_as_float64(go_int: &'static str) -> impl Fn(String) -> String {
+    move |s: String| {
+        s.lines()
+            .map(|l| {
+                if l.contains("`json:") {
+                    // `int64` is also a suffix of `uint64`.
+                    let (u, i) = if go_int == "uint64" {
+                        ("float64", "int64")
+                    } else {
+                        ("uint64", "float64")
+                    };
+                    l.replace("uint64", "\u{0}")
+                        .replace("int64", i)
+                        .replace('\u{0}', u)
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// Labels of the big-integer fixtures whose generated-Go round trip differs
+/// from serde.
+fn big_int_red(mutate: impl Fn(String) -> String) -> BTreeSet<&'static str> {
+    use aimux_core::trace::store::{TraceFilter, TraceStats};
+    let stats = TraceStats {
+        provider: "p".into(),
+        model: "m".into(),
+        requests: 9_007_199_254_740_993,
+        input_tokens_total: u64::MAX,
+        claimed_cache_read_total: 0,
+        claimed_cache_write_total: 0,
+        reported_hit_rate: None,
+        client_upper_bound_hit_rate: None,
+        verdict_counts: Default::default(),
+        ttft_p50_ms: None,
+        ttft_p95_ms: None,
+        errors: 0,
+    };
+    let filter = TraceFilter {
+        provider: None,
+        model: None,
+        session_id: None,
+        since_unix_ms: Some(-9_007_199_254_740_993),
+    };
+    let samples = vec![
+        Fixture {
+            label: "bigint-u64-TraceStats",
+            ty: "TraceStats",
+            json: serde_json::to_value(&stats).unwrap(),
+            back: Some(back::<TraceStats>),
+        },
+        Fixture {
+            label: "bigint-i64-TraceFilter",
+            ty: "TraceFilter",
+            json: serde_json::to_value(&filter).unwrap(),
+            back: Some(back::<TraceFilter>),
+        },
+    ];
+    assert_eq!(
+        samples[0].json["requests"],
+        json!(9_007_199_254_740_993_u64)
+    );
+    assert_eq!(
+        samples[1].json["sinceUnixMs"],
+        json!(-9_007_199_254_740_993_i64)
+    );
+    let run = run_go("bigint", &samples, mutate);
+    let mut red = BTreeSet::new();
+    for (f, r) in samples.iter().zip(&run.results) {
+        assert_eq!(f.label, r.label);
+        let truth = f.back.unwrap()(&f.json).unwrap();
+        if !r.gen_err.is_empty() || !gen_is(r.gen_out.as_ref(), &truth, f.ty) {
+            red.insert(f.label);
+        }
+    }
+    red
+}
+
+/// B1: a `u64` above 2^53 and an `i64` below -2^53 round-trip exactly
+/// through the generated Go; as `float64` each is red.
+#[test]
+fn big_integers_round_trip_exactly() {
+    assert_eq!(big_int_red(|s| s), BTreeSet::new());
+    assert_eq!(
+        big_int_red(ints_as_float64("uint64")),
+        BTreeSet::from(["bigint-u64-TraceStats"])
+    );
+    assert_eq!(
+        big_int_red(ints_as_float64("int64")),
+        BTreeSet::from(["bigint-i64-TraceFilter"])
+    );
+}
+
+/// B4: the committed fixture files are what gen_go_fixtures.py writes for
+/// the current generated Go.
+#[test]
+fn go_fixture_files_are_current() {
+    let dir = std::env::temp_dir().join(format!("aimux-go-fixtures-check-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let model = wire::from_inputs(&Inputs::from_workspace(&workspace())).unwrap();
+    for o in Go.emit(&model) {
+        std::fs::write(dir.join(&o.path), o.content).unwrap();
+    }
+    let out = std::process::Command::new("python3")
+        .arg(workspace().join("tools/aimux-codegen/scripts/gen_go_fixtures.py"))
+        .arg("--check")
+        .arg(dir.join("types.go"))
+        .current_dir(workspace())
+        .output()
+        .expect("python3");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        out.status.success(),
+        "gen_go_fixtures.py --check: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
