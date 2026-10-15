@@ -1035,6 +1035,17 @@ fn check_decls(m: &Manifest, swift: &Swift, r: &mut Report) {
                     ));
                 }
                 if kind == "untagged" {
+                    // serde tries untagged arms in declaration order, the
+                    // first that decodes wins; Swift must try them in the
+                    // same order.
+                    let norm = |c: &str| c.trim_matches('`').to_ascii_lowercase();
+                    let want: Vec<String> = cases.iter().map(|c| norm(c)).collect();
+                    let got: Vec<String> = got_cases.iter().map(|c| norm(c)).collect();
+                    if want != got {
+                        r.bad.push(format!(
+                            "[U] {name}: untagged arm order {got:?} != serde declaration order {want:?}"
+                        ));
+                    }
                     continue;
                 }
                 let want: BTreeSet<String> = variants
@@ -1834,6 +1845,16 @@ fn mutate(
     format!("{head}{}\n", tail.join("\n"))
 }
 
+/// Swap the first lines containing `a` and `b` after `anchor`.
+fn swap_after(t: &str, anchor: &str, a: &str, b: &str) -> String {
+    let start = t.find(anchor).expect("anchor");
+    let mut lines: Vec<&str> = t[start..].split_inclusive('\n').collect();
+    let i = lines.iter().position(|l| l.contains(a)).expect("a");
+    let j = lines.iter().position(|l| l.contains(b)).expect("b");
+    lines.swap(i, j);
+    format!("{}{}", &t[..start], lines.concat())
+}
+
 fn mutations(text: &str) -> Vec<(&'static str, String)> {
     let t = text;
     vec![
@@ -1978,6 +1999,15 @@ fn mutations(text: &str) -> Vec<(&'static str, String)> {
                 "\npublic struct ",
                 |l| l.contains(".decodeDefaulted(RequestInfo.self"),
                 |l| l.replace("decodeDefaulted(", "decodeIfPresent("),
+            ),
+        ),
+        (
+            "B3-untagged-arm-order",
+            swap_after(
+                t,
+                "public indirect enum FilePartData:",
+                "if let v = try? c.decode(String.self)",
+                "if let v = try? c.decode(SharedProviderReference.self)",
             ),
         ),
         (
