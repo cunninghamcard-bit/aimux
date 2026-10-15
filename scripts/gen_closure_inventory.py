@@ -111,7 +111,13 @@ def render() -> str:
     resolved = per_file(rs, FROM_RESOLVED)
     closures = per_file([p for p in rs if "/tests/" not in p], CLOSURE_FIELD)
     lengths = {p: read(p).count("\n") for p in rs}
-    big = sorted(((n, p) for p, n in lengths.items() if n > 1000), reverse=True)
+    # The generator's own sources are not closure items; recording their
+    # line counts would make every edit to tools/aimux-codegen re-stale this
+    # report.
+    big = sorted(
+        ((n, p) for p, n in lengths.items() if n > 1000 and not p.startswith(TS_SCAN_EXCLUDED_PREFIX)),
+        reverse=True,
+    )
     big_src = [(n, p) for n, p in big if "/tests/" not in p]
     types = [(p, read(p).count("\n")) for p in HANDWRITTEN_TYPES if (ROOT / p).exists()]
 

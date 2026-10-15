@@ -10,8 +10,8 @@ except the file-size table (split scope is D10).
 |---|---|
 | FFI `aimux_*_new` (name ends in `_new`) | 29 |
 | FFI `aimux_*_new*` (incl. `_new_with_base` etc.) | 51 |
-| .rs files > 1000 lines (all tracked) | 41 |
-| .rs files > 1000 lines (excluding `*/tests/*`) | 29 |
+| .rs files > 1000 lines (all tracked) | 40 |
+| .rs files > 1000 lines (excluding `*/tests/*`) | 28 |
 | ts-rs `#[derive(TS)]` sites | 219 |
 | `from_resolved` occurrences | 0 |
 | closure-typed `Box/Arc<dyn Fn*>` (non-test) | 27 |
@@ -171,7 +171,6 @@ except the file-size table (split scope is D10).
 | aimux-providers/src/open_responses.rs | 1459 | src |
 | aimux-providers/tests/conformance_test.rs | 1428 | test |
 | bindings/python/src/lib.rs | 1358 | src |
-| tools/aimux-codegen/src/extract.rs | 1333 | src |
 | aimux-ffi/tests/exports_smoke_test.rs | 1310 | test |
 | aimux-providers/src/xai/responses/mod.rs | 1309 | src |
 | aimux-core/src/video_model.rs | 1249 | src |
