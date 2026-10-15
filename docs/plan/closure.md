@@ -10,11 +10,11 @@ except the file-size table (split scope is D10).
 |---|---|
 | FFI `aimux_*_new` (name ends in `_new`) | 29 |
 | FFI `aimux_*_new*` (incl. `_new_with_base` etc.) | 51 |
-| .rs files > 1000 lines (all tracked) | 36 |
-| .rs files > 1000 lines (excluding `*/tests/*`) | 24 |
-| ts-rs `#[derive(TS)]` sites | 201 |
+| .rs files > 1000 lines (all tracked) | 41 |
+| .rs files > 1000 lines (excluding `*/tests/*`) | 29 |
+| ts-rs `#[derive(TS)]` sites | 219 |
 | `from_resolved` occurrences | 0 |
-| closure-typed `Box/Arc<dyn Fn*>` (non-test) | 3 |
+| closure-typed `Box/Arc<dyn Fn*>` (non-test) | 27 |
 | hand-written binding type files | 6 |
 
 ## FFI constructors `aimux_*_new`
@@ -75,48 +75,49 @@ except the file-size table (split scope is D10).
 
 | file | lines |
 |---|---|
-| bindings/kotlin/src/main/kotlin/ai/arcships/aimux/Types.kt | 1248 |
-| bindings/java/src/main/java/ai/arcships/aimux/Types.java | 5354 |
-| bindings/swift/Sources/Aimux/Types.swift | 1734 |
-| bindings/flutter/lib/types.dart | 2251 |
-| bindings/python/python/aimux/wrapper.py | 1214 |
-| bindings/go/types.go | 687 |
+| bindings/kotlin/src/main/kotlin/ai/arcships/aimux/Types.kt | 1585 |
+| bindings/java/src/main/java/ai/arcships/aimux/Types.java | 5661 |
+| bindings/swift/Sources/Aimux/Types.swift | 2093 |
+| bindings/flutter/lib/types.dart | 2595 |
+| bindings/python/python/aimux/wrapper.py | 1432 |
+| bindings/go/types.go | 821 |
 
 ## ts-rs derives
 
 | file | `derive(TS)` |
 |---|---|
-| aimux-core/src/content.rs | 1 |
-| aimux-core/src/decision_model.rs | 14 |
+| aimux-core/src/content.rs | 9 |
+| aimux-core/src/decision_model.rs | 12 |
 | aimux-core/src/embedding_model.rs | 4 |
-| aimux-core/src/error.rs | 5 |
-| aimux-core/src/evaluation_model.rs | 9 |
+| aimux-core/src/error.rs | 6 |
 | aimux-core/src/files_model.rs | 3 |
-| aimux-core/src/generate.rs | 3 |
+| aimux-core/src/generate.rs | 4 |
 | aimux-core/src/image_model.rs | 7 |
 | aimux-core/src/language_model_message.rs | 14 |
 | aimux-core/src/message.rs | 4 |
 | aimux-core/src/model_catalogue.rs | 12 |
-| aimux-core/src/model_id.rs | 1 |
 | aimux-core/src/openai_output.rs | 13 |
 | aimux-core/src/options.rs | 3 |
+| aimux-core/src/output.rs | 1 |
 | aimux-core/src/parse_tool_call.rs | 1 |
 | aimux-core/src/recording.rs | 10 |
 | aimux-core/src/reranking_model.rs | 5 |
-| aimux-core/src/result.rs | 11 |
+| aimux-core/src/result.rs | 17 |
 | aimux-core/src/search_model.rs | 4 |
 | aimux-core/src/session.rs | 3 |
 | aimux-core/src/shared.rs | 8 |
 | aimux-core/src/skills_model.rs | 3 |
 | aimux-core/src/speech_model.rs | 5 |
+| aimux-core/src/step_result.rs | 6 |
 | aimux-core/src/stream_part.rs | 2 |
-| aimux-core/src/tool.rs | 8 |
+| aimux-core/src/timestamp.rs | 1 |
+| aimux-core/src/tool.rs | 10 |
 | aimux-core/src/trace/fingerprint.rs | 1 |
 | aimux-core/src/trace/record.rs | 3 |
 | aimux-core/src/trace/store.rs | 6 |
 | aimux-core/src/trace/verdict.rs | 5 |
 | aimux-core/src/transcription_model.rs | 9 |
-| aimux-core/src/types.rs | 8 |
+| aimux-core/src/types.rs | 12 |
 | aimux-core/src/video_model.rs | 9 |
 | tools/aimux-web/src/wire.rs | 7 |
 
@@ -129,46 +130,62 @@ except the file-size table (split scope is D10).
 
 | file | `Box/Arc<dyn Fn*>` |
 |---|---|
-| aimux-core/src/parse_tool_call.rs | 1 |
 | aimux-provider-utils/src/resolvable.rs | 2 |
+| aimux-provider-utils/src/streaming_tool_call_tracker.rs | 1 |
+| aimux-providers/src/anthropic/mod.rs | 2 |
+| aimux-providers/src/anthropic/model.rs | 2 |
+| aimux-providers/src/anthropic/stream.rs | 3 |
+| aimux-providers/src/cohere/mod.rs | 2 |
+| aimux-providers/src/cohere/model.rs | 2 |
+| aimux-providers/src/google/mod.rs | 2 |
+| aimux-providers/src/google/model.rs | 3 |
+| aimux-providers/src/mistral/mod.rs | 2 |
+| aimux-providers/src/mistral/model.rs | 3 |
+| aimux-providers/src/openai_compatible/config.rs | 2 |
+| aimux-providers/src/shared/mod.rs | 1 |
 
 ## .rs files over 1000 lines
 
 | file | lines | kind |
 |---|---|---|
-| aimux-ffi/src/lib.rs | 4729 | src |
-| aimux-providers/src/anthropic/convert.rs | 3207 | src |
-| aimux-core/src/recording.rs | 3067 | src |
-| aimux-providers/tests/deepseek_chat_test.rs | 2562 | test |
-| aimux-providers/tests/groq_test.rs | 2342 | test |
-| aimux-providers/src/openai/responses/convert.rs | 2274 | src |
-| aimux-providers/tests/open_responses_test.rs | 2235 | test |
-| aimux-providers/tests/huggingface_responses_test.rs | 1959 | test |
-| aimux-providers/src/google/convert.rs | 1893 | src |
-| aimux-core/src/replay.rs | 1830 | src |
-| aimux-providers/src/anthropic/stream.rs | 1785 | src |
+| aimux-ffi/src/lib.rs | 4784 | src |
+| aimux-core/src/recording.rs | 3506 | src |
+| aimux-providers/src/anthropic/convert.rs | 3160 | src |
+| aimux-providers/tests/deepseek_chat_test.rs | 2585 | test |
+| aimux-core/src/generate.rs | 2462 | src |
+| aimux-providers/src/openai/responses/convert.rs | 2411 | src |
+| aimux-providers/tests/groq_test.rs | 2390 | test |
+| aimux-providers/tests/open_responses_test.rs | 2268 | test |
+| aimux-core/src/openai_output.rs | 2152 | src |
+| aimux-core/src/replay.rs | 1983 | src |
+| aimux-providers/tests/huggingface_responses_test.rs | 1973 | test |
+| aimux-providers/src/google/convert.rs | 1897 | src |
+| aimux-providers/src/anthropic/stream.rs | 1865 | src |
+| aimux-core/src/language_model_message.rs | 1775 | src |
 | aimux-providers/src/openai/responses/responses_convert.rs | 1742 | src |
-| aimux-providers/src/bedrock/convert.rs | 1699 | src |
-| bindings/node/src/lib.rs | 1694 | src |
-| aimux-providers/tests/data_loss_regression_test.rs | 1631 | test |
-| aimux-core/src/generate.rs | 1490 | src |
-| aimux-providers/src/open_responses.rs | 1424 | src |
-| aimux-providers/tests/conformance_test.rs | 1400 | test |
-| bindings/python/src/lib.rs | 1340 | src |
-| aimux-providers/src/xai/responses/mod.rs | 1277 | src |
-| aimux-ffi/tests/exports_smoke_test.rs | 1269 | test |
-| aimux-providers/src/openai/convert.rs | 1262 | src |
-| aimux-providers/src/vertex/model.rs | 1227 | src |
+| bindings/node/src/lib.rs | 1729 | src |
+| aimux-providers/src/bedrock/convert.rs | 1702 | src |
+| aimux-providers/tests/data_loss_regression_test.rs | 1693 | test |
+| .agents/native-rust/probe/zz_diff_probe.rs | 1664 | src |
+| aimux-core/src/generate/tests.rs | 1485 | src |
+| aimux-providers/src/open_responses.rs | 1459 | src |
+| aimux-providers/tests/conformance_test.rs | 1428 | test |
+| bindings/python/src/lib.rs | 1358 | src |
+| aimux-ffi/tests/exports_smoke_test.rs | 1310 | test |
+| aimux-providers/src/xai/responses/mod.rs | 1309 | src |
+| tools/aimux-codegen/src/extract.rs | 1262 | src |
+| aimux-core/src/video_model.rs | 1249 | src |
+| aimux-providers/src/vertex/model.rs | 1237 | src |
+| aimux-providers/src/openai/convert.rs | 1220 | src |
+| aimux-provider-utils/tests/streaming_tool_call_tracker_test.rs | 1218 | test |
 | aimux-providers/tests/bedrock_remaining_test.rs | 1215 | test |
-| aimux-providers/tests/e2e_test.rs | 1185 | test |
-| aimux-providers/src/elevenlabs.rs | 1184 | src |
-| aimux-providers/src/huggingface/responses.rs | 1172 | src |
-| aimux-providers/tests/bedrock_convert_test.rs | 1170 | test |
+| aimux-providers/src/elevenlabs.rs | 1215 | src |
+| aimux-providers/src/huggingface/responses.rs | 1196 | src |
+| aimux-providers/tests/bedrock_convert_test.rs | 1182 | test |
+| aimux-providers/tests/e2e_test.rs | 1169 | test |
 | aimux-providers/tests/openai_compatible_test.rs | 1152 | test |
-| tools/aimux-codegen/src/extract.rs | 1134 | src |
-| aimux-provider-utils/tests/streaming_tool_call_tracker_test.rs | 1105 | test |
 | aimux-providers/src/vertex/auth.rs | 1090 | src |
-| aimux-core/src/openai_output.rs | 1065 | src |
-| aimux-providers/src/google/model.rs | 1045 | src |
+| aimux-core/src/parse_tool_call.rs | 1090 | src |
+| aimux-providers/src/google/model.rs | 1058 | src |
 | bindings/node/src/multimodal.rs | 1017 | src |
 | aimux-providers/src/xai/responses/convert.rs | 1013 | src |

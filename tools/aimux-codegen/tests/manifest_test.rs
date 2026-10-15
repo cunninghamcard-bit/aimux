@@ -91,6 +91,10 @@ fn coverage_report_equals_the_closure_dto_list() {
     }
 }
 
+/// The `ai` pin as v4 `fixtures/aisdk/VERSIONS.json` writes it
+/// (`{ "version", "integrity" }` per package).
+const AI_PIN: &str = "\"ai\": {\n    \"version\": \"7.0.127\"";
+
 #[test]
 fn manifest_records_versions_json_verbatim() {
     let manifest: serde_json::Value = serde_json::from_str(
@@ -100,7 +104,7 @@ fn manifest_records_versions_json_verbatim() {
     let versions: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&inputs().versions).unwrap()).unwrap();
     assert_eq!(manifest["sdk"], versions);
-    assert_eq!(versions.as_object().unwrap().len(), 7);
+    assert_eq!(versions.as_object().unwrap().len(), 18);
     assert_eq!(manifest["generator"]["name"], "aimux-codegen");
     assert!(
         manifest["inputHash"]
@@ -173,11 +177,11 @@ fn extra_manifest_type_is_named() {
 fn versions_change_makes_manifest_stale() {
     let dir = tmp("versions");
     let text = std::fs::read_to_string(&inputs().versions).unwrap();
-    assert!(text.contains("\"ai\": \"7.0.127\""));
+    assert!(text.contains(AI_PIN));
     let versions = dir.join("VERSIONS.json");
     std::fs::write(
         &versions,
-        text.replace("\"ai\": \"7.0.127\"", "\"ai\": \"7.0.999\""),
+        text.replace(AI_PIN, "\"ai\": {\n    \"version\": \"7.0.999\""),
     )
     .unwrap();
     let mut i = inputs();
@@ -189,7 +193,8 @@ fn versions_change_makes_manifest_stale() {
         "{problems:?}"
     );
     let fresh = manifest::generate(&i).unwrap();
-    assert!(fresh[0].content.contains("\"ai\": \"7.0.999\""));
+    let fresh: serde_json::Value = serde_json::from_str(&fresh[0].content).unwrap();
+    assert_eq!(fresh["sdk"]["ai"]["version"], "7.0.999");
 
     let out = Command::new(env!("CARGO_BIN_EXE_aimux-codegen"))
         .args(["--check", "--versions"])
@@ -412,10 +417,10 @@ fn serde_attribute_mutations_change_the_modelled_field() {
         ),
         (
             "untagged",
-            "transcription_model.rs",
+            "decision_model.rs",
             "#[serde(untagged)]",
             "",
-            |m| find_type(m, "AudioInput")["shape"]["representation"]["style"].clone(),
+            |m| find_type(m, "DecisionInput")["shape"]["representation"]["style"].clone(),
             serde_json::json!("untagged"),
             serde_json::json!("external"),
         ),
@@ -431,12 +436,9 @@ fn serde_attribute_mutations_change_the_modelled_field() {
         (
             "field rename",
             "decision_model.rs",
-            "#[serde(rename = \"true\",",
-            "#[serde(rename = \"yes\",",
-            |m| {
-                find_field(find_type(m, "DecisionBooleanCriteria"), "true_description")["wire"]
-                    .clone()
-            },
+            "rename = \"true\",",
+            "rename = \"yes\",",
+            |m| find_field(find_type(m, "DecisionBooleanCriteria"), "true_")["wire"].clone(),
             serde_json::json!("true"),
             serde_json::json!("yes"),
         ),
@@ -501,7 +503,7 @@ fn closure_dto_list_is_reproducible_from_source() {
         String::from_utf8_lossy(&out.stderr)
     );
     let list = std::fs::read_to_string(&inputs().list).unwrap();
-    assert!(list.contains("\n[exported] 193\n"));
+    assert!(list.contains("\n[exported] 210\n"));
     let tool = std::fs::read_to_string(workspace().join("aimux-core/src/tool.rs")).unwrap();
     assert!(
         tool.contains("#[ts(\n    export,"),
@@ -512,7 +514,7 @@ fn closure_dto_list_is_reproducible_from_source() {
     );
 }
 
-/// `BooleanCriteria.true/false` (evaluation_model.rs:62-73) keep three wire
+/// `DecisionBooleanCriteria.true/false` (v4 decision_model.rs:88-100) keep three wire
 /// states: absent key, explicit null, value. The manifest says so with
 /// `triState` and the `presence` codec instead of `Option<Option<T>>`.
 #[test]
@@ -525,15 +527,20 @@ fn boolean_criteria_manifest_entry_is_tri_state() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|t| t["name"] == "BooleanCriteria")
+        .find(|t| t["name"] == "DecisionBooleanCriteria")
         .unwrap();
-    let fields = t["shape"]["fields"].as_array().unwrap();
+    let fields: Vec<_> = t["shape"]["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["wire"] == "true" || f["wire"] == "false")
+        .collect();
     assert_eq!(fields.len(), 2);
     for (f, wire) in fields.iter().zip(["true", "false"]) {
         assert_eq!(f["wire"], wire);
         assert_eq!(
             f["type"],
-            serde_json::json!({ "triState": { "ref": { "name": "EvaluationInput", "args": [] } } })
+            serde_json::json!({ "triState": { "ref": { "name": "DecisionInput", "args": [] } } })
         );
         assert!(!f["type"].to_string().contains("\"option\""), "{f}");
         assert_eq!(f["codec"]["name"], "presence");
@@ -552,7 +559,7 @@ fn boolean_criteria_manifest_entry_is_tri_state() {
         .iter()
         .find(|f| f["wire"] == "schema")
         .unwrap();
-    assert_eq!(schema["codec"]["name"], "currentRecordingSchema");
+    assert_eq!(schema["codec"]["name"], "knownRecordingSchema");
     assert_eq!(schema["type"], serde_json::json!({ "prim": "u32" }));
 }
 
@@ -572,5 +579,58 @@ fn unregistered_serde_with_field_fails_generation() {
             == "aimux-core/src/extra_dto.rs:5: ExtraDto.a uses serde `deserialize_with=custom` but has no `#[ts(type)]` and no FIELD_CODECS registration"),
         "{errs:?}"
     );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// v4 TypeScript-only tagged wrappers (`TypedToolCall`, tool.rs:198) are
+/// modelled from their `#[ts]` field attributes: a literal `type` tag plus
+/// the flattened DTO. Dropping `#[ts(flatten)]` makes the wrapper
+/// unmodellable again and generation fails at the type's file:line.
+#[test]
+fn ts_only_tagged_wrapper_is_modelled_and_guarded() {
+    let m = manifest_json(&inputs());
+    let t = find_type(&m, "TypedToolCall");
+    let tag = find_field(t, "tag");
+    assert_eq!(tag["wire"], "type");
+    assert!(tag["type"].to_string().contains("tool-call"), "{tag}");
+    let call = find_field(t, "call");
+    assert_eq!(call["flatten"], true);
+    assert_eq!(call["type"]["ref"]["name"], "ToolCall");
+
+    let (dir, i) = scratch_src("ts_only");
+    let path = i.src_root.join("tool.rs");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let from = "    #[ts(flatten)]\n    call: ToolCall,";
+    assert!(text.contains(from));
+    std::fs::write(&path, text.replacen(from, "    call: ToolCall,", 1)).unwrap();
+    let errs = errors(&i);
+    assert!(
+        errs.iter().any(|e| e.starts_with("aimux-core/src/tool.rs:")
+            && e.contains("TypedToolCall has hand-written serde")),
+        "{errs:?}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// `#[serde(transparent)]` (v4 `NamespacedKind`, types.rs:354) is a newtype
+/// on the wire; on a struct with two fields it is rejected.
+#[test]
+fn serde_transparent_is_a_newtype_and_needs_one_field() {
+    let m = manifest_json(&inputs());
+    assert!(find_type(&m, "NamespacedKind")["tsOverride"].is_string());
+
+    let (dir, i) = scratch_src("transparent");
+    std::fs::write(
+        i.src_root.join("extra_dto.rs"),
+        "#[derive(Serialize, Deserialize, TS)]\n#[serde(transparent)]\n#[ts(export)]\npub struct Wrap {\n    pub a: u32,\n}\n#[derive(Serialize, Deserialize, TS)]\n#[serde(transparent)]\n#[ts(export)]\npub struct Two {\n    pub a: u32,\n    pub b: u32,\n}\n",
+    )
+    .unwrap();
+    let errs = errors(&i);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("extra_dto.rs:10: Two `transparent` needs exactly one field")),
+        "{errs:?}"
+    );
+    assert!(!errs.iter().any(|e| e.contains("Wrap ")), "{errs:?}");
     let _ = std::fs::remove_dir_all(dir);
 }

@@ -75,35 +75,162 @@ pub struct FieldCodec {
     pub tri_state: bool,
 }
 
-/// Field codec registrations (unit 2.1).
+/// Field codec registrations (unit 2.1, re-registered for the v4 types).
 pub const FIELD_CODECS: &[FieldCodec] = &[
-    // aimux-core/src/recording.rs:73
+    // aimux-core/src/recording.rs:95 (v4: schemas 1 and 2 are read)
     FieldCodec {
         owner: "Recording",
         field: "schema",
-        serde: "deserialize_with=deserialize_current_schema",
-        name: "currentRecordingSchema",
-        wire: "u32; decode accepts only RECORDING_SCHEMA and rejects any other value",
+        serde: "deserialize_with=deserialize_known_schema",
+        name: "knownRecordingSchema",
+        wire: "u32; decode accepts only the known recording schemas (1, 2) and rejects any other value",
         tri_state: false,
     },
-    // aimux-core/src/evaluation_model.rs:62-73
+    // aimux-core/src/recording.rs:189
     FieldCodec {
-        owner: "BooleanCriteria",
-        field: "true_",
-        serde: "deserialize_with=present",
-        name: "presence",
-        wire: "absent | null | value: an absent key and an explicit null are distinct",
-        tri_state: true,
+        owner: "InputRecord",
+        field: "prompt",
+        serde: "deserialize_with=deserialize_prompt",
+        name: "readablePrompt",
+        wire: "LanguageModelPrompt; a prompt this version cannot read decodes as empty",
+        tri_state: false,
     },
+    // aimux-core/src/tool.rs:219
     FieldCodec {
-        owner: "BooleanCriteria",
-        field: "false_",
-        serde: "deserialize_with=present",
-        name: "presence",
-        wire: "absent | null | value: an absent key and an explicit null are distinct",
-        tri_state: true,
+        owner: "ToolResult",
+        field: "result",
+        serde: "deserialize_with=non_null_json",
+        name: "nonNullJson",
+        wire: "any JSON value except null (NonNullable<JSONValue>); null is rejected",
+        tri_state: false,
     },
+    // aimux-core/src/parse_tool_call.rs:468
+    FieldCodec {
+        owner: "ToolCallRepairReply",
+        field: "tool_call",
+        serde: "deserialize_with=crate::wire::typed::deserialize",
+        name: "typeTagged",
+        wire: "the inner object, optionally carrying its `type` tag (crate::wire::typed)",
+        tri_state: false,
+    },
+    // aimux-core/src/decision_model.rs:88-100
+    presence(
+        "DecisionBooleanCriteria",
+        "true_",
+        "deserialize_with=present",
+        true,
+    ),
+    presence(
+        "DecisionBooleanCriteria",
+        "false_",
+        "deserialize_with=present",
+        true,
+    ),
+    // aimux-core/src/error.rs:76
+    presence(
+        "ApiCallError",
+        "data",
+        "deserialize_with=crate::wire::present",
+        false,
+    ),
+    // aimux-core/src/embedding_model.rs:129
+    presence(
+        "EmbeddingResponse",
+        "body",
+        "deserialize_with=crate::wire::present",
+        false,
+    ),
+    // aimux-core/src/reranking_model.rs:159
+    presence(
+        "RerankingResponse",
+        "body",
+        "deserialize_with=crate::wire::present",
+        false,
+    ),
+    // aimux-core/src/search_model.rs:181
+    presence(
+        "SearchResponse",
+        "body",
+        "deserialize_with=crate::wire::present",
+        false,
+    ),
+    // aimux-core/src/shared.rs:422
+    presence(
+        "ResponseInfo",
+        "body",
+        "deserialize_with=crate::wire::present",
+        false,
+    ),
+    // aimux-core/src/shared.rs:439
+    presence(
+        "RequestInfo",
+        "body",
+        "deserialize_with=crate::wire::present",
+        false,
+    ),
+    // aimux-core/src/speech_model.rs:161
+    presence(
+        "SpeechRequest",
+        "body",
+        "deserialize_with=crate::wire::present",
+        false,
+    ),
+    // aimux-core/src/speech_model.rs:188
+    presence(
+        "SpeechResponse",
+        "body",
+        "deserialize_with=crate::wire::present",
+        false,
+    ),
+    // aimux-core/src/step_result.rs:205
+    presence(
+        "StepResponse",
+        "body",
+        "deserialize_with=crate::wire::present",
+        false,
+    ),
+    // aimux-core/src/transcription_model.rs:246
+    presence(
+        "TranscriptionResponse",
+        "body",
+        "deserialize_with=crate::wire::present",
+        false,
+    ),
+    // aimux-core/src/transcription_model.rs:384
+    presence(
+        "TranscriptionStreamPart",
+        "body",
+        "deserialize_with=crate::wire::present",
+        false,
+    ),
+    // aimux-core/src/content.rs:187
+    presence(
+        "AssistantContentPart",
+        "input_schema_input",
+        "deserialize_with=crate::wire::present",
+        false,
+    ),
 ];
+
+/// A `present` registration (`aimux-core/src/wire.rs:91`): an absent key
+/// and an explicit `null` decode differently. With `tri_state` the field is
+/// `Option<Option<T>>`; otherwise it is `Option<Value>` and `null` is
+/// `Some(Value::Null)`.
+const fn presence(
+    owner: &'static str,
+    field: &'static str,
+    serde: &'static str,
+    tri_state: bool,
+) -> FieldCodec {
+    FieldCodec {
+        owner,
+        field,
+        serde,
+        name: "presence",
+        wire: "absent | null | value: an absent key and an explicit null are distinct",
+        tri_state,
+    }
+}
 
 /// One exported type.
 #[derive(Debug, Clone, Serialize)]
@@ -506,6 +633,11 @@ struct Container {
     ts_rename: Option<String>,
     ts_override: Option<String>,
     concrete: BTreeMap<String, String>,
+    /// `#[serde(transparent)]`: the wire is the single field's wire.
+    transparent: bool,
+    /// `derive(TS)` without serde derives or a container `#[ts(type|as)]`:
+    /// the TypeScript-only shape is read from `#[ts(..)]` field attributes.
+    ts_only: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -522,7 +654,7 @@ fn consider(
         return;
     }
     let line = ident.span().start().line;
-    let c = match container(attrs) {
+    let mut c = match container(attrs) {
         Ok(c) => c,
         Err(e) => {
             errors.push(format!("{rel}:{line}: {e}"));
@@ -534,7 +666,8 @@ fn consider(
     } else if let Some(wire) = &c.ts_override {
         Ok(Shape::HandWritten { wire: wire.clone() })
     } else {
-        Err("has hand-written serde and no `#[ts(type|as)]` codec".to_string())
+        c.ts_only = true;
+        shape(&c)
     };
     let shape = match shape {
         Ok(s) => s,
@@ -626,6 +759,7 @@ fn container(attrs: &[Attribute]) -> Result<Container, String> {
                     "tag" => c.tag = Some(lit_str(&m)?),
                     "content" => c.content = Some(lit_str(&m)?),
                     "untagged" => c.untagged = true,
+                    "transparent" => c.transparent = true,
                     "deny_unknown_fields" => c.deny_unknown_fields = true,
                     "from" | "into" | "try_from" => {
                         let v = lit_str(&m)?;
@@ -684,6 +818,8 @@ struct Member {
     with: Option<String>,
     ts_type: Option<String>,
     ts_optional: bool,
+    ts_rename: Option<String>,
+    ts_flatten: bool,
 }
 
 fn member(attrs: &[Attribute]) -> Result<Member, String> {
@@ -729,6 +865,8 @@ fn member(attrs: &[Attribute]) -> Result<Member, String> {
                     .unwrap_or_default();
                 match key.as_str() {
                     "type" | "as" => m.ts_type = Some(lit_str(&n)?),
+                    "rename" => m.ts_rename = Some(lit_str(&n)?),
+                    "flatten" => m.ts_flatten = true,
                     "optional" => {
                         m.ts_optional = true;
                         skip_rest(&n)?;
@@ -851,7 +989,19 @@ fn fields_of(owner: &str, fields: &Fields, rename_all: Option<&str>) -> Result<S
 }
 
 fn struct_shape(owner: &str, fields: &Fields, c: &Container) -> Result<Shape, String> {
+    if c.ts_only {
+        return ts_only_struct(fields);
+    }
     let mut shape = fields_of(owner, fields, c.rename_all.as_deref())?;
+    if c.transparent {
+        return match shape {
+            Shape::Newtype { .. } => Ok(shape),
+            Shape::Struct { mut fields, .. } if fields.len() == 1 => Ok(Shape::Newtype {
+                inner: fields.remove(0).ty,
+            }),
+            _ => Err("`transparent` needs exactly one field".into()),
+        };
+    }
     if let Shape::Struct {
         deny_unknown_fields,
         ..
@@ -862,7 +1012,57 @@ fn struct_shape(owner: &str, fields: &Fields, c: &Container) -> Result<Shape, St
     Ok(shape)
 }
 
+/// A TypeScript-only struct (v4 `TypedToolCall`, `TaggedToolResult`,
+/// `TypedSource`: `aimux-core/src/tool.rs:198`, `result.rs:163,325`): serde
+/// lives on the type it flattens, plus a `type` tag written by
+/// `crate::wire::typed`. Every field must carry `#[ts(rename)]` +
+/// `#[ts(type)]` (a literal tag) or `#[ts(flatten)]`; anything else is
+/// rejected as before (hand-written serde without a codec).
+fn ts_only_struct(fields: &Fields) -> Result<Shape, String> {
+    const MSG: &str = "has hand-written serde and no `#[ts(type|as)]` codec";
+    let Fields::Named(n) = fields else {
+        return Err(MSG.into());
+    };
+    let mut out = Vec::new();
+    for f in &n.named {
+        let m = member(&f.attrs)?;
+        let rust = f
+            .ident
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        let (wire, ty, flatten) = match (&m.ts_rename, &m.ts_type, m.ts_flatten) {
+            (Some(wire), Some(_), false) => {
+                (wire.clone(), type_ref(&f.ty, m.ts_type.as_deref()), false)
+            }
+            (None, None, true) => (rust.clone(), type_ref(&f.ty, None), true),
+            _ => return Err(MSG.into()),
+        };
+        out.push(FieldDef {
+            wire,
+            rust,
+            ty,
+            omit_when_empty: false,
+            default: false,
+            flatten,
+            aliases: Vec::new(),
+            serde_with: None,
+            codec: None,
+        });
+    }
+    if out.is_empty() {
+        return Err(MSG.into());
+    }
+    Ok(Shape::Struct {
+        fields: out,
+        deny_unknown_fields: false,
+    })
+}
+
 fn enum_shape(owner: &str, e: &syn::ItemEnum, c: &Container) -> Result<Shape, String> {
+    if c.ts_only {
+        return Err("has hand-written serde and no `#[ts(type|as)]` codec".into());
+    }
     let representation = match (&c.tag, &c.content, c.untagged) {
         (_, _, true) => Representation::Untagged,
         (Some(tag), Some(content), false) => Representation::Adjacent {

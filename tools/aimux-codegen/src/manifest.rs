@@ -51,7 +51,7 @@ impl Inputs {
 struct Manifest<'a> {
     schema_revision: u32,
     generator: Generator,
-    sdk: BTreeMap<String, String>,
+    sdk: BTreeMap<String, serde_json::Value>,
     input_hash: String,
     types: &'a [TypeDef],
     auxiliary_types: &'a [TypeDef],
@@ -78,7 +78,8 @@ pub fn generate(inputs: &Inputs) -> Result<Vec<Output>, Vec<String>> {
     let types = &model.types;
     let versions_text = std::fs::read_to_string(&inputs.versions)
         .map_err(|e| vec![format!("{}: {e}", inputs.versions.display())])?;
-    let sdk: BTreeMap<String, String> = serde_json::from_str(&versions_text)
+    // v4 pins `{ version, integrity }` per package; recorded verbatim.
+    let sdk: BTreeMap<String, serde_json::Value> = serde_json::from_str(&versions_text)
         .map_err(|e| vec![format!("{}: {e}", inputs.versions.display())])?;
     let coverage = coverage_lines(types);
     let list_text = std::fs::read_to_string(&inputs.list)
