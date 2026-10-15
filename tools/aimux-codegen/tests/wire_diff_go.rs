@@ -2799,6 +2799,18 @@ fn registry_mutations_are_caught() {
             .any(|l| l.contains("HttpExchange") && l.contains("default_finalized")),
         "{red:?}"
     );
+    // Nil default map written as null again (VideoCallOptions'
+    // MarshalJSON nil fix removed): the field-absent fixture goes red.
+    let nil_map = |s: String| {
+        let fix = "\tif p.ProviderOptions == nil {\n\t\tp.ProviderOptions = SharedProviderOptions{}\n\t}\n";
+        s.replace(fix, "")
+    };
+    let red = registry_red("registry-nilmap", nil_map);
+    assert!(
+        red.iter()
+            .any(|l| l.starts_with("registry-VideoCallOptions-absent")),
+        "{red:?}"
+    );
     // A bogus path in REGISTRY (via a synthetic model) fails check.
     let m = wire::from_inputs(&Inputs::from_workspace(&workspace())).unwrap();
     assert_eq!(aimux_codegen::emit::registry::check(&m), Ok(()));
@@ -2877,22 +2889,18 @@ fn registry_fixtures() -> Vec<(String, String, Value)> {
     aimux_codegen::emit::registry::uses(&model)
         .into_iter()
         .map(|(e, owner, f)| {
-            // Every other non-Option field is written, so only this key's
-            // absence is under test (an absent plain `#[serde(default)]`
-            // map is a separate Go difference: nil writes null).
+            // The owner's minimal value (required keys only) without this
+            // key: every other `#[serde(default)]` field is absent too, so
+            // e.g. VideoCallOptions.providerOptions (a default map) is
+            // covered here as well.
             let wire::WireBody::Record { fields } =
                 &model.types.iter().find(|t| t.name == owner).unwrap().body
             else {
                 panic!("{owner}: registry owner is not a record")
             };
-            let mut o = serde_json::Map::new();
-            for g in fields
-                .iter()
-                .filter(|g| !g.presence.nullable && g.wire != f.wire)
-            {
-                o.insert(g.wire.clone(), minimal(&model, &g.ty));
-            }
-            let j = Value::Object(o);
+            let mut o = minimal_record(&model, fields);
+            o.as_object_mut().unwrap().remove(&f.wire);
+            let j = o;
             (
                 format!("registry-{}-absent:{}", owner, e.path),
                 owner.to_string(),

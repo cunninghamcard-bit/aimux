@@ -46,6 +46,14 @@ impl Emitter for Go {
             out: String::new(),
             literals: std::cell::RefCell::default(),
             skips: BTreeMap::new(),
+            aliases: model
+                .types
+                .iter()
+                .filter_map(|t| match &t.body {
+                    WireBody::Alias(a) => Some((t.name.clone(), a.clone())),
+                    _ => None,
+                })
+                .collect(),
         };
         g.out.push_str(HEADER);
         for t in &model.types {
@@ -314,6 +322,8 @@ struct Gen {
     /// String-enum type → the wire value a custom `skip_serializing_if`
     /// leaves out ([`WireField::skip_fn`], [`registry`]).
     skips: BTreeMap<String, String>,
+    /// Alias name → aliased type (to see a map / vec behind a name).
+    aliases: BTreeMap<String, WireTy>,
 }
 
 /// Go type name of a fixed-string field.
@@ -470,19 +480,55 @@ impl Gen {
         }
     }
 
+    /// Whether `t` (through aliases) is a map or a vec: Go's zero value is
+    /// nil, which encoding/json writes as `null`.
+    fn is_collection(&self, t: &WireTy) -> bool {
+        let mut t = t;
+        for _ in 0..32 {
+            match t {
+                WireTy::Array(_) | WireTy::Map { .. } => return true,
+                WireTy::Named(n) => match self.aliases.get(n) {
+                    Some(a) => t = a,
+                    None => return false,
+                },
+                _ => return false,
+            }
+        }
+        false
+    }
+
     fn record(&mut self, name: &str, fields: &[WireField]) {
-        if fields.iter().any(|f| f.default_fn.is_some()) {
+        if fields.iter().any(|f| {
+            f.default_fn.is_some()
+                || (f.presence.omittable
+                    && !f.presence.skip_if_empty
+                    && !f.presence.nullable
+                    && !f.presence.tri_state
+                    && self.is_collection(&f.ty))
+        }) {
             let _ = writeln!(
                 self.out,
-                "//\n// {name} implements UnmarshalJSON (to preset its #[serde(default = \"fn\")]\n// values). Embedding it in another struct promotes that method and\n// swallows the outer struct's fields: do not embed it."
+                "//\n// {name} implements UnmarshalJSON (to preset its #[serde(default = \"fn\")]\n// values) or MarshalJSON (to write nil default maps / slices as serde).\n// Embedding it in another struct promotes that method and swallows the\n// outer struct's fields: do not embed it."
             );
         }
         let _ = writeln!(self.out, "type {name} struct {{");
         let mut used = BTreeSet::new();
         let mut rows = Vec::new();
         let mut defaults = Vec::new();
+        // `#[serde(default)]` map / vec fields that are always written:
+        // serde writes `{}` / `[]` (and rejects null); a nil Go value must
+        // not encode as null.
+        let mut empties = Vec::new();
         for f in fields {
             let ident = uniq(&mut used, pascal(&f.rust));
+            if f.presence.omittable
+                && !f.presence.skip_if_empty
+                && !f.presence.nullable
+                && !f.presence.tri_state
+                && self.is_collection(&f.ty)
+            {
+                empties.push((ident.clone(), self.go_ty(&f.ty)));
+            }
             if let Some(e) = f
                 .default_fn
                 .as_deref()
@@ -549,6 +595,16 @@ impl Gen {
             "\nfunc ({name}) wireRequired() []string {{\n\treturn []string{{{}}}\n}}",
             required.join(", ")
         );
+        if !empties.is_empty() {
+            let fix: String = empties
+                .iter()
+                .map(|(i, t)| format!("\tif p.{i} == nil {{\n\t\tp.{i} = {t}{{}}\n\t}}\n"))
+                .collect();
+            let _ = write!(
+                self.out,
+                "\n// MarshalJSON writes a nil #[serde(default)] map / slice as {{}} / [], as serde.\nfunc (x {name}) MarshalJSON() ([]byte, error) {{\n\ttype plain {name}\n\tp := plain(x)\n{fix}\treturn json.Marshal(p)\n}}\n"
+            );
+        }
         if !defaults.is_empty() {
             let _ = write!(
                 self.out,
