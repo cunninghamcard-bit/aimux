@@ -10,6 +10,7 @@ use crate::Output;
 use crate::wire::WireModel;
 
 pub mod go;
+pub mod registry;
 
 /// One target language.
 pub trait Emitter {
@@ -26,6 +27,12 @@ pub trait Emitter {
     fn check(&self, _model: &WireModel) -> Result<(), Vec<String>> {
         Ok(())
     }
+}
+
+/// Every emitter, for `--check` (each one's [`Emitter::check`]).
+#[must_use]
+pub fn all() -> Vec<&'static dyn Emitter> {
+    vec![&go::Go]
 }
 
 /// `<workspace>/target/codegen-out`.

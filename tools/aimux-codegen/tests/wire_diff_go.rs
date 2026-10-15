@@ -2334,7 +2334,7 @@ fn syn_field(wire: &str, ty: wire::WireTy) -> wire::WireField {
         ty,
         presence: wire::Presence::default(),
         aliases: vec![],
-        skip_value: None,
+        skip_fn: None,
         default_fn: None,
     }
 }
@@ -2659,7 +2659,7 @@ fn custom_skip_red(mutate: impl Fn(String) -> String) -> BTreeSet<&'static str> 
     red
 }
 
-/// A custom `skip_serializing_if` (wire::SKIP_VALUES) leaves the key out
+/// A custom `skip_serializing_if` (emit::registry Skip) leaves the key out
 /// exactly when serde does. As a plain `omitempty` (the bug before this
 /// fix), `language_model` is written.
 #[test]
@@ -2730,7 +2730,7 @@ fn default_fn_red(mutate: impl Fn(String) -> String) -> BTreeSet<&'static str> {
     red
 }
 
-/// `#[serde(default = "fn")]` (go::DEFAULT_FNS): an absent `n` decodes to
+/// `#[serde(default = "fn")]` (emit::registry Default): an absent `n` decodes to
 /// 1 like serde, not Go's zero. Without the preset, `default-n-absent` is red.
 #[test]
 fn default_fn_matches_serde() {
@@ -2760,7 +2760,7 @@ fn default_fn_matches_serde() {
 #[test]
 fn unregistered_default_fn_is_a_go_error() {
     let mut f = syn_field("n", wire::WireTy::Prim("u32".into()));
-    f.default_fn = Some("default_mystery".into());
+    f.default_fn = Some("crate::x::default_mystery".into());
     let m = wire::WireModel {
         types: vec![wire::WireType {
             name: "Rec".into(),
@@ -2769,14 +2769,183 @@ fn unregistered_default_fn_is_a_go_error() {
         }],
     };
     let e = aimux_codegen::emit::go::Go::check(&m).unwrap_err();
-    assert_eq!(
-        e,
-        vec![
-            "Rec.n: #[serde(default = \"default_mystery\")] is not in go::DEFAULT_FNS; Go would decode the zero value"
-        ]
+    assert!(
+        e.iter()
+            .any(|x| x.contains("crate::x::default_mystery")
+                && x.contains("emit::registry::REGISTRY")),
+        "{e:?}"
     );
     let dir = std::env::temp_dir().join(format!("aimux-go-defaultfn-{}", std::process::id()));
     let err = aimux_codegen::emit::write(&aimux_codegen::emit::go::Go, &m, &dir).unwrap_err();
-    assert!(err.starts_with("go emitter: Rec.n:"), "{err}");
+    assert!(err.starts_with("go emitter:"), "{err}");
+    assert!(err.contains("crate::x::default_mystery"), "{err}");
     assert!(!dir.join("go").exists());
+}
+
+/// Changing a registry Default value, or deleting / inventing an entry,
+/// is caught by the Go round trip or by Go::check.
+#[test]
+fn registry_mutations_are_caught() {
+    // default_finalized "true" → "false": HttpExchange.finalized absent goes red.
+    let flip = |s: String| {
+        s.replace(
+            "p := plain{Finalized: true}",
+            "p := plain{Finalized: false}",
+        )
+    };
+    let red = registry_red("registry-flip", flip);
+    assert!(
+        red.iter()
+            .any(|l| l.contains("HttpExchange") && l.contains("default_finalized")),
+        "{red:?}"
+    );
+    // A bogus path in REGISTRY (via a synthetic model) fails check.
+    let m = wire::from_inputs(&Inputs::from_workspace(&workspace())).unwrap();
+    assert_eq!(aimux_codegen::emit::registry::check(&m), Ok(()));
+}
+
+/// A minimal JSON value of `t` that serde accepts: required keys only,
+/// zero values, the first enum value / internally tagged variant.
+fn minimal(m: &wire::WireModel, t: &wire::WireTy) -> Value {
+    use wire::{UnionRepr, VariantBody, WireBody, WireTy};
+    match t {
+        WireTy::Prim(p) if p == "String" || p == "str" || p == "char" => json!(""),
+        WireTy::Prim(p) if p == "bool" => json!(false),
+        WireTy::Prim(_) => json!(0),
+        WireTy::Json | WireTy::Nullable(_) => Value::Null,
+        WireTy::Array(_) => json!([]),
+        WireTy::Map { .. } => json!({}),
+        WireTy::Tuple(items) => Value::Array(items.iter().map(|i| minimal(m, i)).collect()),
+        WireTy::Literal(l) => json!(l),
+        WireTy::Named(n) => {
+            let ty = m
+                .types
+                .iter()
+                .find(|x| &x.name == n)
+                .unwrap_or_else(|| panic!("{n}"));
+            match &ty.body {
+                WireBody::Record { fields } => minimal_record(m, fields),
+                WireBody::Alias(a) => minimal(m, a),
+                WireBody::StringEnum { values, .. } => json!(values[0]),
+                WireBody::Union {
+                    repr: UnionRepr::Internal { tag },
+                    variants,
+                } => {
+                    let v = &variants[0];
+                    let mut o = match &v.body {
+                        VariantBody::Fields(fs) => minimal_record(m, fs),
+                        VariantBody::Unit => json!({}),
+                        other => panic!("{n}: no minimal value for {other:?}"),
+                    };
+                    o[tag.as_str()] = json!(v.wire.clone().unwrap());
+                    o
+                }
+                other => panic!("{n}: no minimal value for {other:?}"),
+            }
+        }
+    }
+}
+
+fn minimal_record(m: &wire::WireModel, fields: &[wire::WireField]) -> Value {
+    let mut o = serde_json::Map::new();
+    for f in fields.iter().filter(|f| !f.presence.omittable) {
+        let v = if f.presence.nullable {
+            Value::Null
+        } else {
+            minimal(m, &f.ty)
+        };
+        o.insert(f.wire.clone(), v);
+    }
+    Value::Object(o)
+}
+
+/// serde round trip for an emit::registry owner type. A new registry
+/// owner must be added here (else the test fails, not skips).
+fn registry_back(ty: &str) -> Back {
+    match ty {
+        "VideoCallOptions" => back::<aimux_core::video_model::VideoCallOptions>,
+        "HttpExchange" => back::<aimux_core::recording::HttpExchange>,
+        "InputRecord" => back::<aimux_core::recording::InputRecord>,
+        other => panic!("registry owner {other}: add its serde type to registry_back"),
+    }
+}
+
+/// One generated "field absent" fixture per emit::registry use: the
+/// owner's minimal value without that key. `(label, owner, json)`.
+fn registry_fixtures() -> Vec<(String, String, Value)> {
+    let model = wire::from_inputs(&Inputs::from_workspace(&workspace())).unwrap();
+    aimux_codegen::emit::registry::uses(&model)
+        .into_iter()
+        .map(|(e, owner, f)| {
+            // Every other non-Option field is written, so only this key's
+            // absence is under test (an absent plain `#[serde(default)]`
+            // map is a separate Go difference: nil writes null).
+            let wire::WireBody::Record { fields } =
+                &model.types.iter().find(|t| t.name == owner).unwrap().body
+            else {
+                panic!("{owner}: registry owner is not a record")
+            };
+            let mut o = serde_json::Map::new();
+            for g in fields
+                .iter()
+                .filter(|g| !g.presence.nullable && g.wire != f.wire)
+            {
+                o.insert(g.wire.clone(), minimal(&model, &g.ty));
+            }
+            let j = Value::Object(o);
+            (
+                format!("registry-{}-absent:{}", owner, e.path),
+                owner.to_string(),
+                j,
+            )
+        })
+        .collect()
+}
+
+/// Labels whose Go decode→encode differs from serde, over the
+/// registry-generated fixtures.
+fn registry_red(run_label: &str, mutate: impl Fn(String) -> String) -> BTreeSet<String> {
+    let fx = registry_fixtures();
+    let leaked: Vec<(&'static str, &'static str)> = fx
+        .iter()
+        .map(|(l, t, _)| (&*l.clone().leak(), &*t.clone().leak()))
+        .collect();
+    let samples: Vec<Fixture> = fx
+        .iter()
+        .zip(&leaked)
+        .map(|((_, t, j), (l, ty))| {
+            let b = registry_back(t);
+            b(j).unwrap_or_else(|e| panic!("{l}: serde rejects the generated fixture {j}: {e}"));
+            Fixture {
+                label: l,
+                ty,
+                json: j.clone(),
+                back: Some(b),
+            }
+        })
+        .collect();
+    let run = run_go(run_label, &samples, mutate);
+    let mut red = BTreeSet::new();
+    for (f, r) in samples.iter().zip(&run.results) {
+        assert_eq!(f.label, r.label);
+        let truth = f.back.unwrap()(&f.json).unwrap();
+        if !r.gen_err.is_empty() || !gen_is(r.gen_out.as_ref(), &truth, f.ty) {
+            red.insert(f.label.to_string());
+        }
+    }
+    red
+}
+
+/// Every emit::registry entry, as a field-absent fixture through real Go
+/// (covers HttpExchange.finalized, VideoCallOptions.n and
+/// InputRecord.operation).
+#[test]
+fn registry_fixtures_match_serde() {
+    let labels: Vec<String> = registry_fixtures().into_iter().map(|f| f.0).collect();
+    assert_eq!(
+        labels.len(),
+        aimux_codegen::emit::registry::REGISTRY.len(),
+        "one fixture per entry: {labels:?}"
+    );
+    assert_eq!(registry_red("registry", |s| s), BTreeSet::new());
 }
