@@ -1,0 +1,59 @@
+{
+  "$schema": "./package-descriptor.schema.json",
+  "package_id": "anthropic",
+  "factory": { "name": "create_anthropic", "sdk_name": "createAnthropic", "default_factory": "anthropic" },
+  "settings_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "base_url": { "type": "string", "description": "Default ANTHROPIC_BASE_URL or https://api.anthropic.com/v1." },
+      "api_key": { "type": "string" },
+      "auth_token": { "type": "string" },
+      "headers": { "type": "object", "additionalProperties": { "type": ["string", "null"] } },
+      "name": { "type": "string" }
+    }
+  },
+  "credential_fields": [
+    { "field": "api_key", "default_env": "ANTHROPIC_API_KEY", "sent_as": "x-api-key", "empty_string": "used_as_given", "exclusive_with": ["auth_token"] },
+    { "field": "auth_token", "default_env": null, "sent_as": "authorization: Bearer", "empty_string": "used_as_given", "exclusive_with": ["api_key"] }
+  ],
+  "runtime_handle_fields": [
+    { "field": "fetch", "kind": "fetch" },
+    { "field": "generate_id", "kind": "id_generator" }
+  ],
+  "methods": {
+    "list": [
+      { "name": "messages", "kind": "language", "provider_suffix": null },
+      { "name": "chat", "kind": "language", "provider_suffix": null, "alias_of": "messages" },
+      { "name": "files", "kind": "files", "provider_suffix": "files" },
+      { "name": "skills", "kind": "skills", "provider_suffix": "skills" }
+    ],
+    "default_method": "messages"
+  },
+  "name_semantics": { "setting": "name", "default": "anthropic.messages", "required": false, "note": "The messages model's provider() is the name itself; its first dot segment is an extra providerOptions key." },
+  "provider_string_rules": {
+    "template": "{name}",
+    "examples": { "messages": "anthropic.messages", "chat": "anthropic.messages" }
+  },
+  "provider_options_rules": { "namespaces": ["anthropic", "{name_first_segment}"], "unknown_fields": "dropped" },
+  "tools": [
+    "anthropic.advisor_20260301", "anthropic.bash_20241022", "anthropic.bash_20250124",
+    "anthropic.code_execution_20250522", "anthropic.code_execution_20250825", "anthropic.code_execution_20260120",
+    "anthropic.computer_20241022", "anthropic.computer_20250124", "anthropic.computer_20251124", "anthropic.computer_toolset_20260801",
+    "anthropic.memory_20250818",
+    "anthropic.text_editor_20241022", "anthropic.text_editor_20250124", "anthropic.text_editor_20250429", "anthropic.text_editor_20250728",
+    "anthropic.tool_search_bm25_20251119", "anthropic.tool_search_regex_20251119",
+    "anthropic.web_fetch_20250910", "anthropic.web_fetch_20260209", "anthropic.web_fetch_20260318",
+    "anthropic.web_search_20250305", "anthropic.web_search_20260209", "anthropic.web_search_20260318"
+  ],
+  "extensions": { "discovery": true, "named": ["files", "skills"] },
+  "auth": { "modes": ["api_key_header", "bearer"], "offline_auth_recipe": "replay_fetch with a recorded exchange; no key or env is read during replay" },
+  "catalogue_mapping": { "catalogue_provider_ids": ["anthropic"] },
+  "audit_metadata": { "family": "anthropic", "protocol": "anthropic-messages" },
+  "supported_features": ["streaming", "tools", "reasoning", "images", "files", "cache_control"],
+  "source_verification": {
+    "sdk_package": "@ai-sdk/anthropic",
+    "sdk_version": "4.0.71",
+    "aimux_source": ["aimux-providers/src/anthropic/mod.rs:110", "aimux-providers/src/anthropic/mod.rs:164", "aimux-providers/src/anthropic/mod.rs:255-295"]
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "$schema": "./package-descriptor.schema.json",
+  "package_id": "openai-compatible",
+  "factory": { "name": "create_openai_compatible", "sdk_name": "createOpenAICompatible", "default_factory": null },
+  "settings_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["name", "base_url"],
+    "properties": {
+      "name": { "type": "string" },
+      "base_url": { "type": "string" },
+      "api_key": { "type": "string" },
+      "headers": { "type": "object", "additionalProperties": { "type": ["string", "null"] } },
+      "query_params": { "type": "object", "additionalProperties": { "type": "string" } },
+      "include_usage": { "type": "boolean" },
+      "supports_structured_outputs": { "type": "boolean" },
+      "supported_urls": { "type": "object" },
+      "convert_usage": { "enum": ["openai_compatible", "alibaba", "moonshotai"], "description": "Data in place of the SDK's convertUsage closure." }
+    }
+  },
+  "credential_fields": [
+    { "field": "api_key", "default_env": null, "sent_as": "authorization: Bearer", "empty_string": "no_credential" }
+  ],
+  "runtime_handle_fields": [
+    { "field": "fetch", "kind": "fetch" }
+  ],
+  "methods": {
+    "list": [
+      { "name": "chat", "kind": "language", "provider_suffix": "chat" },
+      { "name": "completion", "kind": "language", "provider_suffix": "completion" },
+      { "name": "embedding", "kind": "embedding", "provider_suffix": "embedding" },
+      { "name": "image", "kind": "image", "provider_suffix": "image" }
+    ],
+    "default_method": "chat"
+  },
+  "name_semantics": { "setting": "name", "default": null, "required": true, "note": "Also the providerOptions namespace and metadata key." },
+  "provider_string_rules": {
+    "template": "{name}.{method_suffix}",
+    "examples": { "chat": "local.chat", "completion": "local.completion" }
+  },
+  "provider_options_rules": { "namespaces": ["openaiCompatible", "{name}", "{name_camel_case}"], "unknown_fields": "passed_through_to_body" },
+  "tools": [],
+  "extensions": { "discovery": true, "named": [] },
+  "auth": { "modes": ["bearer", "none"], "offline_auth_recipe": "no key: no Authorization header (auth = none); replay_fetch for recorded exchanges" },
+  "catalogue_mapping": { "catalogue_provider_ids": [] },
+  "audit_metadata": { "family": "openai-compatible", "protocol": "openai-chat" },
+  "supported_features": ["streaming", "tools", "structured_outputs"],
+  "source_verification": {
+    "sdk_package": "@ai-sdk/openai-compatible",
+    "sdk_version": "3.0.62",
+    "aimux_source": ["aimux-providers/src/openai_compatible/mod.rs:60", "aimux-providers/src/openai_compatible/mod.rs:120", "aimux-providers/src/openai_compatible/mod.rs:208-245"]
+  }
+}

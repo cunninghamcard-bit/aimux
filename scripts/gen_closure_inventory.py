@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+"""Generate docs/plan/closure.md, the consumer-closure inventory (PHASES 1.5).
+
+Lists everything the atomic switch must replace (#200:1509, RFC-0039 §0.2):
+the FFI `aimux_*_new` constructors, hand-written binding type files, ts-rs
+derives, `from_resolved`, closure-typed fields (`Box/Arc<dyn Fn…>`) and .rs
+files over 1000 lines. Every count is computed from tracked files
+(`git ls-files`), so the report is reproducible from a commit.
+
+Usage:
+    python3 scripts/gen_closure_inventory.py           # write docs/plan/closure.md
+    python3 scripts/gen_closure_inventory.py --check   # exit 1 if it is stale
+"""
+
+from __future__ import annotations
+
+import re
+import subprocess
+import sys
+from collections import Counter
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+OUT = ROOT / "docs/plan/closure.md"
+DTO_OUT = ROOT / "docs/plan/closure-dtos.txt"
+
+# Unit 2.1 acceptance list: every `#[ts(export)]` type, with a category. The
+# category is assigned per source file (planner Q2); the table is mirrored in
+# tools/aimux-codegen/src/extract.rs and the two are compared by the
+# coverage report, so a disagreement turns red.
+DTO_EXCLUDED = ["tools/aimux-web/src/wire.rs"]
+# The generator itself quotes `#[derive(.., TS)]` / `#[ts(export)]` in docs
+# and test fixtures; those are text, not types.
+TS_SCAN_EXCLUDED_PREFIX = "tools/aimux-codegen/"
+CATEGORY_BY_FILE = {
+    "aimux-core/src/error.rs": "error",
+    "aimux-core/src/recording.rs": "recording",
+    "aimux-core/src/trace/fingerprint.rs": "recording",
+    "aimux-core/src/trace/record.rs": "recording",
+    "aimux-core/src/trace/store.rs": "recording",
+    "aimux-core/src/trace/verdict.rs": "recording",
+    "aimux-core/src/tool.rs": "tool",
+    "aimux-core/src/parse_tool_call.rs": "tool",
+    "aimux-core/src/content.rs": "multimodal",
+    "aimux-core/src/embedding_model.rs": "multimodal",
+    "aimux-core/src/files_model.rs": "multimodal",
+    "aimux-core/src/image_model.rs": "multimodal",
+    "aimux-core/src/speech_model.rs": "multimodal",
+    "aimux-core/src/transcription_model.rs": "multimodal",
+    "aimux-core/src/video_model.rs": "multimodal",
+    "aimux-core/src/model_catalogue.rs": "provider",
+    "aimux-core/src/message.rs": "user",
+    "aimux-core/src/language_model_message.rs": "user",
+    "aimux-core/src/options.rs": "user",
+}
+DEFAULT_CATEGORY = "core"
+# `#[ts(export` also when the attribute is split over lines (`#[ts(\n export,`).
+TS_EXPORT = re.compile(r"#\[ts\(\s*export\b")
+ITEM_ANY = re.compile(r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?(struct|enum)\s+(\w+)")
+
+HANDWRITTEN_TYPES = [
+    "bindings/kotlin/src/main/kotlin/ai/arcships/aimux/Types.kt",
+    "bindings/java/src/main/java/ai/arcships/aimux/Types.java",
+    "bindings/swift/Sources/Aimux/Types.swift",
+    "bindings/flutter/lib/types.dart",
+    "bindings/python/python/aimux/wrapper.py",
+    "bindings/go/types.go",
+]
+
+FFI_NEW_EXACT = re.compile(r'extern\s+"C"\s+fn\s+(aimux_\w*_new)\s*\(')
+FFI_NEW_PREFIX = re.compile(r'extern\s+"C"\s+fn\s+(aimux_\w*_new\w*)\s*\(')
+TS_DERIVE = re.compile(r"#\[derive\([^\]]*\bTS\b[^\]]*\)\]")
+FROM_RESOLVED = re.compile(r"\bfrom_resolved\b")
+CLOSURE_FIELD = re.compile(r"\b(?:Box|Arc)<\s*dyn\s+(?:Fn|FnMut|FnOnce)\b")
+
+
+def tracked(pattern: str) -> list[str]:
+    out = subprocess.run(
+        ["git", "ls-files", "-z", "--", pattern],
+        cwd=ROOT, check=True, capture_output=True, text=True,
+    ).stdout
+    return sorted(p for p in out.split("\0") if p)
+
+
+def read(path: str) -> str:
+    return (ROOT / path).read_text(encoding="utf-8", errors="replace")
+
+
+def per_file(paths: list[str], regex: re.Pattern[str]) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for path in paths:
+        n = len(regex.findall(read(path)))
+        if n:
+            counts[path] = n
+    return counts
+
+
+def table(rows: list[tuple], header: tuple) -> list[str]:
+    lines = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
+    lines += ["| " + " | ".join(str(c) for c in row) + " |" for row in rows]
+    return lines
+
+
+def render() -> str:
+    rs = tracked("*.rs")
+    ffi_src = [p for p in rs if p.startswith("aimux-ffi/src/")]
+    ffi_text = "\n".join(read(p) for p in ffi_src)
+    exact = sorted(set(FFI_NEW_EXACT.findall(ffi_text)))
+    prefixed = sorted(set(FFI_NEW_PREFIX.findall(ffi_text)))
+    ts = per_file([p for p in rs if not p.startswith(TS_SCAN_EXCLUDED_PREFIX)], TS_DERIVE)
+    resolved = per_file(rs, FROM_RESOLVED)
+    closures = per_file([p for p in rs if "/tests/" not in p], CLOSURE_FIELD)
+    lengths = {p: read(p).count("\n") for p in rs}
+    # The generator's own sources are not closure items; recording their
+    # line counts would make every edit to tools/aimux-codegen re-stale this
+    # report.
+    big = sorted(
+        ((n, p) for p, n in lengths.items() if n > 1000 and not p.startswith(TS_SCAN_EXCLUDED_PREFIX)),
+        reverse=True,
+    )
+    big_src = [(n, p) for n, p in big if "/tests/" not in p]
+    types = [(p, read(p).count("\n")) for p in HANDWRITTEN_TYPES if (ROOT / p).exists()]
+
+    md = [
+        "# Consumer-closure inventory (PHASES 1.5)",
+        "",
+        "Generated by `scripts/gen_closure_inventory.py`; do not edit by hand.",
+        "Counts cover tracked files only. Phase-3 acceptance: every list below reaches zero",
+        "except the file-size table (split scope is D10).",
+        "",
+        "## Summary",
+        "",
+        *table(
+            [
+                ("FFI `aimux_*_new` (name ends in `_new`)", len(exact)),
+                ("FFI `aimux_*_new*` (incl. `_new_with_base` etc.)", len(prefixed)),
+                (".rs files > 1000 lines (all tracked)", len(big)),
+                (".rs files > 1000 lines (excluding `*/tests/*`)", len(big_src)),
+                ("ts-rs `#[derive(TS)]` sites", sum(ts.values())),
+                ("`from_resolved` occurrences", sum(resolved.values())),
+                ("closure-typed `Box/Arc<dyn Fn*>` (non-test)", sum(closures.values())),
+                ("hand-written binding type files", len(types)),
+            ],
+            ("item", "count"),
+        ),
+        "",
+        "## FFI constructors `aimux_*_new`",
+        "",
+        *[f"- `{name}`" + ("" if name in exact else " (suffixed)") for name in prefixed],
+        "",
+        "## Hand-written binding types",
+        "",
+        *table(types, ("file", "lines")),
+        "",
+        "## ts-rs derives",
+        "",
+        *table(sorted(ts.items()), ("file", "`derive(TS)`")),
+        "",
+        "## `from_resolved`",
+        "",
+        *table(sorted(resolved.items()), ("file", "occurrences")),
+        "",
+        "## Closure-typed fields and parameters (non-test)",
+        "",
+        *table(sorted(closures.items()), ("file", "`Box/Arc<dyn Fn*>`")),
+        "",
+        "## .rs files over 1000 lines",
+        "",
+        *table([(p, n, "test" if "/tests/" in p else "src") for n, p in big], ("file", "lines", "kind")),
+        "",
+    ]
+    return "\n".join(md)
+
+
+def ts_items(path: str) -> list[tuple[str, bool]]:
+    """(type name, exported) for every `derive(TS)` struct/enum in `path`.
+
+    From each `derive(..TS..)` the next struct/enum item is the type; a
+    `#[ts(export` between the derive and the item (or in the attribute lines
+    directly above the derive) makes it exported.
+    """
+    text = read(path)
+    out = []
+    for m in TS_DERIVE.finditer(text):
+        rest = text[m.end():]
+        item = ITEM_ANY.search(rest)
+        if not item:
+            continue
+        before = text[:m.start()].split("\n")
+        attrs = []
+        for line in reversed(before[:-1] if before[-1].strip() == "" else before):
+            t = line.strip()
+            if not (t.startswith("#[") or t.startswith("///")):
+                break
+            attrs.append(t)
+        span = rest[: item.start()] + " ".join(attrs)
+        out.append((item.group(2), TS_EXPORT.search(span) is not None))
+    return out
+
+
+def render_dtos() -> str:
+    exported, unexported, excluded = [], [], []
+    for path in tracked("*.rs"):
+        if "/tests/" in path or path.startswith(TS_SCAN_EXCLUDED_PREFIX) or not TS_DERIVE.search(read(path)):
+            continue
+        for name, exp in ts_items(path):
+            if path in DTO_EXCLUDED:
+                excluded.append((name, path))
+            elif exp:
+                exported.append((name, CATEGORY_BY_FILE.get(path, DEFAULT_CATEGORY), path))
+            else:
+                unexported.append((name, path))
+    exported.sort()
+    unexported.sort()
+    excluded.sort()
+    lines = [
+        "# Unit 2.1 acceptance list (PHASES 2.1): every `#[ts(export)]` type.",
+        "# Generated by scripts/gen_closure_inventory.py; do not edit by hand.",
+        "# Format: <name> <category> <source file>. The [exported] section must equal",
+        "# the manifest coverage report (tools/aimux-codegen/generated/coverage.txt).",
+        "",
+        f"[exported] {len(exported)}",
+        *[f"{n} {c} {p}" for n, c, p in exported],
+        "",
+        f"[derive-ts-without-export] {len(unexported)}",
+        *[f"{n} {p}" for n, p in unexported],
+        "",
+        f"[excluded] {len(excluded)} (web-tool wire, not a binding DTO)",
+        *[f"{n} {p}" for n, p in excluded],
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def main() -> int:
+    stale = False
+    for out, text in ((OUT, render()), (DTO_OUT, render_dtos())):
+        if "--check" in sys.argv[1:]:
+            if not out.exists() or out.read_text(encoding="utf-8") != text:
+                print(f"STALE: {out.relative_to(ROOT)} — run scripts/gen_closure_inventory.py")
+                stale = True
+            else:
+                print(f"{out.relative_to(ROOT)} up to date")
+            continue
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text, encoding="utf-8")
+        print(f"wrote {out.relative_to(ROOT)}")
+    return 1 if stale else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

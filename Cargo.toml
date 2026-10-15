@@ -6,6 +6,7 @@ members = [
     "aimux-providers",
     "aimux-stream",
     "tools/aimux-cli",
+    "tools/aimux-codegen",
     "tools/aimux-replay",
     "tools/aimux-web",
 ]
