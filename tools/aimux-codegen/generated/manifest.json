@@ -98,7 +98,14 @@
           }
         }
       },
-      "tsOverride": "AiMuxErrorWire",
+      "tsOverride": {
+        "type": {
+          "ref": {
+            "name": "AiMuxErrorWire",
+            "args": []
+          }
+        }
+      },
       "shape": {
         "kind": "enum",
         "representation": {
@@ -760,7 +767,9 @@
           "prim": "String"
         }
       },
-      "tsOverride": "`${number}:${number}`",
+      "tsOverride": {
+        "ts": "`${number}:${number}`"
+      },
       "shape": {
         "kind": "struct",
         "fields": [
@@ -1390,30 +1399,42 @@
       "name": "AudioChunk",
       "category": "multimodal",
       "source": "aimux-core/src/transcription_model.rs",
-      "tsOverride": "string",
+      "tsOverride": {
+        "ts": "string"
+      },
       "shape": {
         "kind": "handWritten",
-        "wire": "string"
+        "wire": {
+          "ts": "string"
+        }
       }
     },
     {
       "name": "AudioData",
       "category": "multimodal",
       "source": "aimux-core/src/speech_model.rs",
-      "tsOverride": "string",
+      "tsOverride": {
+        "ts": "string"
+      },
       "shape": {
         "kind": "handWritten",
-        "wire": "string"
+        "wire": {
+          "ts": "string"
+        }
       }
     },
     {
       "name": "AudioInput",
       "category": "multimodal",
       "source": "aimux-core/src/transcription_model.rs",
-      "tsOverride": "string",
+      "tsOverride": {
+        "ts": "string"
+      },
       "shape": {
         "kind": "handWritten",
-        "wire": "string"
+        "wire": {
+          "ts": "string"
+        }
       }
     },
     {
@@ -1618,7 +1639,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -2883,7 +2906,21 @@
             "type": {
               "codec": {
                 "rust": "DecisionQuestions",
-                "wire": "std::collections::HashMap<String, DecisionQuestion>"
+                "wire": {
+                  "type": {
+                    "map": {
+                      "key": {
+                        "prim": "String"
+                      },
+                      "value": {
+                        "ref": {
+                          "name": "DecisionQuestion",
+                          "args": []
+                        }
+                      }
+                    }
+                  }
+                }
               }
             },
             "omittedWhen": null,
@@ -2981,7 +3018,21 @@
             "type": {
               "codec": {
                 "rust": "IndexMap<String,DecisionAnswer>",
-                "wire": "std::collections::HashMap<String, DecisionAnswer>"
+                "wire": {
+                  "type": {
+                    "map": {
+                      "key": {
+                        "prim": "String"
+                      },
+                      "value": {
+                        "ref": {
+                          "name": "DecisionAnswer",
+                          "args": []
+                        }
+                      }
+                    }
+                  }
+                }
               }
             },
             "omittedWhen": null,
@@ -3172,7 +3223,20 @@
                   "type": {
                     "codec": {
                       "rust": "Option<IndexMap<String,f64>>",
-                      "wire": "Option<std::collections::HashMap<String, f64>>"
+                      "wire": {
+                        "type": {
+                          "option": {
+                            "map": {
+                              "key": {
+                                "prim": "String"
+                              },
+                              "value": {
+                                "prim": "f64"
+                              }
+                            }
+                          }
+                        }
+                      }
                     }
                   },
                   "omitWhenEmpty": true,
@@ -3210,7 +3274,20 @@
                   "type": {
                     "codec": {
                       "rust": "Option<IndexMap<String,f64>>",
-                      "wire": "Option<std::collections::HashMap<String, f64>>"
+                      "wire": {
+                        "type": {
+                          "option": {
+                            "map": {
+                              "key": {
+                                "prim": "String"
+                              },
+                              "value": {
+                                "prim": "f64"
+                              }
+                            }
+                          }
+                        }
+                      }
                     }
                   },
                   "omitWhenEmpty": true,
@@ -3335,7 +3412,21 @@
             "type": {
               "codec": {
                 "rust": "DecisionQuestions",
-                "wire": "std::collections::HashMap<String, DecisionQuestion>"
+                "wire": {
+                  "type": {
+                    "map": {
+                      "key": {
+                        "prim": "String"
+                      },
+                      "value": {
+                        "ref": {
+                          "name": "DecisionQuestion",
+                          "args": []
+                        }
+                      }
+                    }
+                  }
+                }
               }
             },
             "omittedWhen": null,
@@ -3466,7 +3557,23 @@
                   "type": {
                     "codec": {
                       "rust": "IndexMap<String,Option<DecisionInput>>",
-                      "wire": "std::collections::HashMap<String, Option<DecisionInput>>"
+                      "wire": {
+                        "type": {
+                          "map": {
+                            "key": {
+                              "prim": "String"
+                            },
+                            "value": {
+                              "option": {
+                                "ref": {
+                                  "name": "DecisionInput",
+                                  "args": []
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
                     }
                   },
                   "omittedWhen": null,
@@ -3614,7 +3721,21 @@
             "type": {
               "codec": {
                 "rust": "IndexMap<String,DecisionAnswer>",
-                "wire": "std::collections::HashMap<String, DecisionAnswer>"
+                "wire": {
+                  "type": {
+                    "map": {
+                      "key": {
+                        "prim": "String"
+                      },
+                      "value": {
+                        "ref": {
+                          "name": "DecisionAnswer",
+                          "args": []
+                        }
+                      }
+                    }
+                  }
+                }
               }
             },
             "omittedWhen": null,
@@ -4076,10 +4197,14 @@
       "name": "FileBytes",
       "category": "core",
       "source": "aimux-core/src/shared.rs",
-      "tsOverride": "string",
+      "tsOverride": {
+        "ts": "string"
+      },
       "shape": {
         "kind": "handWritten",
-        "wire": "string"
+        "wire": {
+          "ts": "string"
+        }
       }
     },
     {
@@ -5300,7 +5425,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -5590,7 +5717,16 @@
             "type": {
               "codec": {
                 "rust": "Vec<&'a Source>",
-                "wire": "Vec<crate::result::TypedSource>"
+                "wire": {
+                  "type": {
+                    "array": {
+                      "ref": {
+                        "name": "TypedSource",
+                        "args": []
+                      }
+                    }
+                  }
+                }
               }
             },
             "serdeWith": "with=crate::wire::typed_vec",
@@ -5606,7 +5742,16 @@
             "type": {
               "codec": {
                 "rust": "Vec<&'a ToolCall>",
-                "wire": "Vec<crate::tool::TypedToolCall>"
+                "wire": {
+                  "type": {
+                    "array": {
+                      "ref": {
+                        "name": "TypedToolCall",
+                        "args": []
+                      }
+                    }
+                  }
+                }
               }
             },
             "serdeWith": "with=crate::wire::typed_vec",
@@ -5622,7 +5767,16 @@
             "type": {
               "codec": {
                 "rust": "Vec<&'a TypedToolResult>",
-                "wire": "Vec<crate::result::TaggedToolResult>"
+                "wire": {
+                  "type": {
+                    "array": {
+                      "ref": {
+                        "name": "TaggedToolResult",
+                        "args": []
+                      }
+                    }
+                  }
+                }
               }
             },
             "serdeWith": "with=crate::wire::typed_vec",
@@ -6264,7 +6418,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -6462,20 +6618,28 @@
       "name": "ImageFileData",
       "category": "multimodal",
       "source": "aimux-core/src/image_model.rs",
-      "tsOverride": "string",
+      "tsOverride": {
+        "ts": "string"
+      },
       "shape": {
         "kind": "handWritten",
-        "wire": "string"
+        "wire": {
+          "ts": "string"
+        }
       }
     },
     {
       "name": "ImageOutputs",
       "category": "multimodal",
       "source": "aimux-core/src/image_model.rs",
-      "tsOverride": "Array<string>",
+      "tsOverride": {
+        "ts": "Array<string>"
+      },
       "shape": {
         "kind": "handWritten",
-        "wire": "Array<string>"
+        "wire": {
+          "ts": "Array<string>"
+        }
       }
     },
     {
@@ -7260,7 +7424,9 @@
             "type": {
               "codec": {
                 "rust": "Option<serde_json::Map<String,Value>>",
-                "wire": "Record<string, unknown>"
+                "wire": {
+                  "ts": "Record<string, unknown>"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -7549,7 +7715,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -7566,7 +7734,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -7583,7 +7753,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -8126,7 +8298,9 @@
       "name": "NamespacedKind",
       "category": "core",
       "source": "aimux-core/src/types.rs",
-      "tsOverride": "`${string}.${string}`",
+      "tsOverride": {
+        "ts": "`${string}.${string}`"
+      },
       "shape": {
         "kind": "newtype",
         "inner": {
@@ -9674,7 +9848,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -10757,7 +10933,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -10884,7 +11062,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -11621,7 +11801,9 @@
           "prim": "String"
         }
       },
-      "tsOverride": "`${number}x${number}`",
+      "tsOverride": {
+        "ts": "`${number}x${number}`"
+      },
       "shape": {
         "kind": "struct",
         "fields": [
@@ -13580,7 +13762,9 @@
             "type": {
               "codec": {
                 "rust": "()",
-                "wire": "\"tool-result\""
+                "wire": {
+                  "literal": "tool-result"
+                }
               }
             },
             "omittedWhen": null,
@@ -14568,7 +14752,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -14585,7 +14771,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -14602,7 +14790,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -14619,7 +14809,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -14646,7 +14838,9 @@
             "type": {
               "codec": {
                 "rust": "u64",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "aliases": [
@@ -14664,7 +14858,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -14746,7 +14942,14 @@
             "type": {
               "codec": {
                 "rust": "crate::tool::ToolCall",
-                "wire": "crate::tool::TypedToolCall"
+                "wire": {
+                  "type": {
+                    "ref": {
+                      "name": "TypedToolCall",
+                      "args": []
+                    }
+                  }
+                }
               }
             },
             "serdeWith": "with=crate::wire::typed",
@@ -14832,7 +15035,14 @@
             "type": {
               "codec": {
                 "rust": "crate::tool::ToolCall",
-                "wire": "crate::tool::TypedToolCall"
+                "wire": {
+                  "type": {
+                    "ref": {
+                      "name": "TypedToolCall",
+                      "args": []
+                    }
+                  }
+                }
               }
             },
             "serdeWith": "with=crate::wire::typed",
@@ -15242,10 +15452,14 @@
       "name": "ToolChoice",
       "category": "tool",
       "source": "aimux-core/src/tool.rs",
-      "tsOverride": "\"auto\" | \"none\" | \"required\" | { type: \"tool\"; toolName: string }",
+      "tsOverride": {
+        "ts": "\"auto\" | \"none\" | \"required\" | { type: \"tool\"; toolName: string }"
+      },
       "shape": {
         "kind": "handWritten",
-        "wire": "\"auto\" | \"none\" | \"required\" | { type: \"tool\"; toolName: string }"
+        "wire": {
+          "ts": "\"auto\" | \"none\" | \"required\" | { type: \"tool\"; toolName: string }"
+        }
       }
     },
     {
@@ -17063,7 +17277,9 @@
             "type": {
               "codec": {
                 "rust": "i64",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omittedWhen": null,
@@ -17094,7 +17310,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -18324,7 +18542,9 @@
             "type": {
               "codec": {
                 "rust": "()",
-                "wire": "\"source\""
+                "wire": {
+                  "literal": "source"
+                }
               }
             },
             "omittedWhen": null,
@@ -18365,7 +18585,9 @@
             "type": {
               "codec": {
                 "rust": "()",
-                "wire": "\"tool-call\""
+                "wire": {
+                  "literal": "tool-call"
+                }
               }
             },
             "omittedWhen": null,
@@ -19081,7 +19303,9 @@
             "type": {
               "codec": {
                 "rust": "Option<serde_json::Map<String,Value>>",
-                "wire": "Record<string, unknown>"
+                "wire": {
+                  "ts": "Record<string, unknown>"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -19330,7 +19554,9 @@
                   "type": {
                     "codec": {
                       "rust": "Vec<u8>",
-                      "wire": "string"
+                      "wire": {
+                        "ts": "string"
+                      }
                     }
                   },
                   "serdeWith": "with=crate::wire::base64_bytes",
@@ -19779,7 +20005,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -20048,7 +20276,9 @@
                   "type": {
                     "codec": {
                       "rust": "Vec<u8>",
-                      "wire": "string"
+                      "wire": {
+                        "ts": "string"
+                      }
                     }
                   },
                   "serdeWith": "with=crate::wire::base64_bytes",
@@ -20167,10 +20397,14 @@
       "name": "VideoFileData",
       "category": "multimodal",
       "source": "aimux-core/src/video_model.rs",
-      "tsOverride": "string",
+      "tsOverride": {
+        "ts": "string"
+      },
       "shape": {
         "kind": "handWritten",
-        "wire": "string"
+        "wire": {
+          "ts": "string"
+        }
       }
     },
     {
@@ -20253,7 +20487,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -20270,7 +20506,9 @@
             "type": {
               "codec": {
                 "rust": "Option<u64>",
-                "wire": "number"
+                "wire": {
+                  "ts": "number"
+                }
               }
             },
             "omitWhenEmpty": true,
@@ -21191,10 +21429,14 @@
       "name": "Timestamp",
       "category": "core",
       "source": "aimux-core/src/timestamp.rs",
-      "tsOverride": "string",
+      "tsOverride": {
+        "ts": "string"
+      },
       "shape": {
         "kind": "handWritten",
-        "wire": "string"
+        "wire": {
+          "ts": "string"
+        }
       }
     }
   ],

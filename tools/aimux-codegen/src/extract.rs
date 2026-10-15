@@ -251,7 +251,7 @@ pub struct TypeDef {
     pub proxy: BTreeMap<String, TypeRef>,
     /// `#[ts(as|type = ..)]` on the container.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub ts_override: Option<String>,
+    pub ts_override: Option<CodecWire>,
     pub shape: Shape,
 }
 
@@ -276,7 +276,7 @@ pub enum Shape {
     /// serde is implemented by hand (no `derive(Serialize/Deserialize)`):
     /// the wire is the declared `#[ts(type|as)]` codec only.
     HandWritten {
-        wire: String,
+        wire: CodecWire,
     },
     /// Discriminated or untagged union.
     #[serde(rename_all = "camelCase")]
@@ -466,6 +466,49 @@ pub struct FieldCodecRef {
     pub wire: String,
 }
 
+/// The wire form a `#[ts(as|type = ..)]` override declares.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CodecWire {
+    /// `#[ts(as = "<Rust type>")]`: the wire is that Rust type, resolved
+    /// like any field type (its references are checked).
+    Type(Box<TypeRef>),
+    /// `#[ts(type = "\"lit\"")]`: a single string literal.
+    Literal(String),
+    /// `#[ts(type = "..")]` with any other TypeScript text, kept verbatim.
+    Ts(String),
+}
+
+/// A `#[ts(as|type = ..)]` attribute before resolution.
+#[derive(Debug, Clone)]
+enum TsOverride {
+    As(String),
+    Type(String),
+}
+
+impl TsOverride {
+    fn parse(key: &str, text: String) -> Self {
+        if key == "as" {
+            Self::As(text)
+        } else {
+            Self::Type(text)
+        }
+    }
+
+    /// An `as` text that is not a Rust type is an error.
+    fn wire(&self) -> Result<CodecWire, String> {
+        match self {
+            Self::As(path) => syn::parse_str::<Type>(path)
+                .map(|t| CodecWire::Type(Box::new(type_ref(&t))))
+                .map_err(|e| format!("`#[ts(as = {path:?})]` is not a Rust type: {e}")),
+            Self::Type(text) => Ok(match serde_json::from_str::<String>(text) {
+                Ok(lit) if text.starts_with('"') => CodecWire::Literal(lit),
+                _ => CodecWire::Ts(text.clone()),
+            }),
+        }
+    }
+}
+
 /// A field type.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -487,7 +530,7 @@ pub enum TypeRef {
     /// Explicit codec: Rust type text plus its declared wire form.
     Codec {
         rust: String,
-        wire: String,
+        wire: CodecWire,
     },
     /// Three wire states: key absent, explicit `null`, or a value of the
     /// inner type (Rust `Option<Option<T>>` with a presence codec).
@@ -656,6 +699,9 @@ fn refs_in_shape(shape: &Shape, out: &mut BTreeSet<String>) {
         Shape::Struct { fields, .. } => fields.iter().for_each(|f| refs_in(&f.ty, out)),
         Shape::Newtype { inner } => refs_in(inner, out),
         Shape::Tuple { items } => items.iter().for_each(|t| refs_in(t, out)),
+        Shape::HandWritten {
+            wire: CodecWire::Type(inner),
+        } => refs_in(inner, out),
         Shape::Unit | Shape::HandWritten { .. } => {}
         Shape::Enum { variants, .. } => variants.iter().for_each(|v| refs_in_shape(&v.shape, out)),
     }
@@ -673,6 +719,10 @@ fn refs_in(t: &TypeRef, out: &mut BTreeSet<String>) {
             out.insert(name.clone());
             args.iter().for_each(|i| refs_in(i, out));
         }
+        TypeRef::Codec {
+            wire: CodecWire::Type(inner),
+            ..
+        } => refs_in(inner, out),
         _ => {}
     }
 }
@@ -720,7 +770,7 @@ fn walk_items(
                     (
                         AliasDef {
                             source: rel.to_string(),
-                            ty: type_ref(&t.ty, None),
+                            ty: type_ref(&t.ty),
                         },
                         t.ident.span().start().line,
                     ),
@@ -753,7 +803,7 @@ struct Container {
     proxy: BTreeMap<String, String>,
     ts_export: bool,
     ts_rename: Option<String>,
-    ts_override: Option<String>,
+    ts_override: Option<TsOverride>,
     concrete: BTreeMap<String, String>,
     /// `#[serde(transparent)]`: the wire is the single field's wire.
     transparent: bool,
@@ -785,8 +835,8 @@ fn consider(
     };
     let shape = if derives(attrs, "Serialize") || derives(attrs, "Deserialize") {
         shape(&c)
-    } else if let Some(wire) = &c.ts_override {
-        Ok(Shape::HandWritten { wire: wire.clone() })
+    } else if let Some(o) = &c.ts_override {
+        o.wire().map(|wire| Shape::HandWritten { wire })
     } else {
         c.ts_only = true;
         shape(&c)
@@ -811,7 +861,7 @@ fn consider(
         .iter()
         .map(|(k, v)| {
             let ty: Type = syn::parse_str(v).unwrap_or_else(|_| syn::parse_quote!(Unparsed));
-            (k.clone(), type_ref(&ty, None))
+            (k.clone(), type_ref(&ty))
         })
         .collect();
     found.push(Found {
@@ -826,7 +876,13 @@ fn consider(
                 .collect(),
             concrete: c.concrete.clone(),
             proxy,
-            ts_override: c.ts_override.clone(),
+            ts_override: match c.ts_override.as_ref().map(TsOverride::wire).transpose() {
+                Ok(w) => w,
+                Err(e) => {
+                    errors.push(format!("{rel}:{line}: {ident} {e}"));
+                    return;
+                }
+            },
             shape,
         },
         line,
@@ -906,7 +962,7 @@ fn container(attrs: &[Attribute]) -> Result<Container, String> {
                 match key.as_str() {
                     "export" => c.ts_export = true,
                     "rename" => c.ts_rename = Some(lit_str(&m)?),
-                    "as" | "type" => c.ts_override = Some(lit_str(&m)?),
+                    "as" | "type" => c.ts_override = Some(TsOverride::parse(&key, lit_str(&m)?)),
                     "concrete" => {
                         let g: proc_macro2::Group = m.input.parse()?;
                         let text = g.stream().to_string();
@@ -940,7 +996,7 @@ struct Member {
     flatten: bool,
     other: bool,
     with: Option<String>,
-    ts_type: Option<String>,
+    ts_type: Option<TsOverride>,
     ts_optional: bool,
     ts_rename: Option<String>,
     ts_flatten: bool,
@@ -988,7 +1044,7 @@ fn member(attrs: &[Attribute]) -> Result<Member, String> {
                     .map(ToString::to_string)
                     .unwrap_or_default();
                 match key.as_str() {
-                    "type" | "as" => m.ts_type = Some(lit_str(&n)?),
+                    "type" | "as" => m.ts_type = Some(TsOverride::parse(&key, lit_str(&n)?)),
                     "rename" => m.ts_rename = Some(lit_str(&n)?),
                     "flatten" => m.ts_flatten = true,
                     "optional" => {
@@ -1044,7 +1100,7 @@ fn fields_of(owner: &str, fields: &Fields, rename_all: Option<&str>) -> Result<S
             for (i, f) in u.unnamed.iter().enumerate() {
                 let m = member(&f.attrs)?;
                 field_codec(owner, &i.to_string(), &m, f.ty.span().start().line)?;
-                items.push(type_ref(&f.ty, m.ts_type.as_deref()));
+                items.push(overridden(&f.ty, m.ts_type.as_ref())?);
             }
             if items.len() == 1 {
                 Ok(Shape::Newtype {
@@ -1073,9 +1129,10 @@ fn fields_of(owner: &str, fields: &Fields, rename_all: Option<&str>) -> Result<S
                     .unwrap_or_else(|| rename(&rust, rename_all, false));
                 let line = f.ident.as_ref().map_or(0, |i| i.span().start().line);
                 let codec = field_codec(owner, &rust, &m, line)?;
-                let null = null_handling(owner, &rust, &type_ref(&f.ty, None), &m, codec)
+                let null = null_handling(owner, &rust, &type_ref(&f.ty), &m, codec)
                     .map_err(|e| at_line(line, &e))?;
-                let mut ty = type_ref(&f.ty, m.ts_type.as_deref());
+                let mut ty =
+                    overridden(&f.ty, m.ts_type.as_ref()).map_err(|e| at_line(line, &e))?;
                 if codec.is_some_and(|c| c.tri_state) {
                     let bad = || {
                         at_line(
@@ -1161,12 +1218,12 @@ fn ts_only_struct(fields: &Fields) -> Result<Shape, String> {
             .unwrap_or_default();
         let (wire, ty, flatten) = match (&m.ts_rename, &m.ts_type, m.ts_flatten) {
             (Some(wire), Some(_), false) => {
-                (wire.clone(), type_ref(&f.ty, m.ts_type.as_deref()), false)
+                (wire.clone(), overridden(&f.ty, m.ts_type.as_ref())?, false)
             }
-            (None, None, true) => (rust.clone(), type_ref(&f.ty, None), true),
+            (None, None, true) => (rust.clone(), type_ref(&f.ty), true),
             _ => return Err(MSG.into()),
         };
-        let null = null_handling("", &rust, &type_ref(&f.ty, None), &m, None)?;
+        let null = null_handling("", &rust, &type_ref(&f.ty), &m, None)?;
         out.push(FieldDef {
             wire,
             rust,
@@ -1360,19 +1417,24 @@ pub fn rust_text(ty: &Type) -> String {
     out
 }
 
-fn type_ref(ty: &Type, ts_override: Option<&str>) -> TypeRef {
-    let text = rust_text(ty);
-    if let Some(wire) = ts_override {
-        return TypeRef::Codec {
-            rust: text,
-            wire: wire.to_string(),
-        };
+/// A field type with its `#[ts(as|type)]` override applied.
+fn overridden(ty: &Type, o: Option<&TsOverride>) -> Result<TypeRef, String> {
+    match o {
+        None => Ok(type_ref(ty)),
+        Some(o) => Ok(TypeRef::Codec {
+            rust: rust_text(ty),
+            wire: o.wire()?,
+        }),
     }
+}
+
+fn type_ref(ty: &Type) -> TypeRef {
+    let text = rust_text(ty);
     match ty {
-        Type::Reference(r) => type_ref(&r.elem, None),
-        Type::Tuple(t) => TypeRef::Tuple(t.elems.iter().map(|e| type_ref(e, None)).collect()),
-        Type::Slice(s) => TypeRef::Array(Box::new(type_ref(&s.elem, None))),
-        Type::Array(a) => TypeRef::Array(Box::new(type_ref(&a.elem, None))),
+        Type::Reference(r) => type_ref(&r.elem),
+        Type::Tuple(t) => TypeRef::Tuple(t.elems.iter().map(type_ref).collect()),
+        Type::Slice(s) => TypeRef::Array(Box::new(type_ref(&s.elem))),
+        Type::Array(a) => TypeRef::Array(Box::new(type_ref(&a.elem))),
         Type::Path(p) if p.qself.is_none() => {
             let Some(seg) = p.path.segments.last() else {
                 return TypeRef::Ref {
@@ -1400,22 +1462,22 @@ fn type_ref(ty: &Type, ts_override: Option<&str>) -> TypeRef {
                 }
                 ("JsonValue", []) => TypeRef::Json,
                 ("Map", [k, v]) => TypeRef::Map {
-                    key: Box::new(type_ref(k, None)),
-                    value: Box::new(type_ref(v, None)),
+                    key: Box::new(type_ref(k)),
+                    value: Box::new(type_ref(v)),
                 },
-                ("Option", [t]) => TypeRef::Option(Box::new(type_ref(t, None))),
+                ("Option", [t]) => TypeRef::Option(Box::new(type_ref(t))),
                 ("Vec" | "VecDeque" | "BTreeSet" | "HashSet" | "IndexSet", [t]) => {
-                    TypeRef::Array(Box::new(type_ref(t, None)))
+                    TypeRef::Array(Box::new(type_ref(t)))
                 }
                 ("HashMap" | "BTreeMap" | "IndexMap", [k, v]) => TypeRef::Map {
-                    key: Box::new(type_ref(k, None)),
-                    value: Box::new(type_ref(v, None)),
+                    key: Box::new(type_ref(k)),
+                    value: Box::new(type_ref(v)),
                 },
-                ("Box" | "Arc" | "Rc" | "Cow", [t]) => type_ref(t, None),
-                ("Cow", [_, t]) => type_ref(t, None),
+                ("Box" | "Arc" | "Rc" | "Cow", [t]) => type_ref(t),
+                ("Cow", [_, t]) => type_ref(t),
                 _ => TypeRef::Ref {
                     name: last_ident(&p.path),
-                    args: a.iter().map(|t| type_ref(t, None)).collect(),
+                    args: a.iter().map(|t| type_ref(t)).collect(),
                 },
             }
         }
@@ -1446,6 +1508,9 @@ impl Resolve<'_> {
             }
             Shape::Newtype { inner } => self.check(inner),
             Shape::Tuple { items } => items.iter().for_each(|t| self.check(t)),
+            Shape::HandWritten {
+                wire: CodecWire::Type(inner),
+            } => self.check(inner),
             Shape::Unit | Shape::HandWritten { .. } => {}
             Shape::Enum { variants, .. } => {
                 for v in variants {
@@ -1457,6 +1522,10 @@ impl Resolve<'_> {
 
     fn check(&mut self, t: &TypeRef) {
         match t {
+            TypeRef::Codec {
+                wire: CodecWire::Type(inner),
+                ..
+            } => self.check(inner),
             TypeRef::Prim(_) | TypeRef::Json | TypeRef::Codec { .. } | TypeRef::Generic(_) => {}
             TypeRef::Option(i) | TypeRef::Array(i) | TypeRef::TriState(i) => self.check(i),
             TypeRef::Map { key, value } => {
