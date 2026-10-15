@@ -4268,7 +4268,7 @@ public struct HttpExchange: Codable, Equatable, Sendable {
         response = try c.decodeIfPresent(ResponseRecord.self, forKey: .response)
         timing = try c.decode(TimingRecord.self, forKey: .timing)
         error = try c.decodeIfPresent(String.self, forKey: .error)
-        finalized = try c.decodeDefault(Bool.self, forKey: .finalized, false)
+        finalized = try c.decodeDefault(Bool.self, forKey: .finalized, true)
     }
 
     public func encode(to e: Encoder) throws {
@@ -4620,11 +4620,11 @@ public struct InputAudioFormat: Codable, Equatable, Sendable {
 
 /// InputRecord mirrors aimux-core/src/recording.rs.
 public struct InputRecord: Codable, Equatable, Sendable {
-    public var operation: Defaulted<RecordingOperation>
+    public var operation: RecordingOperation
     public var prompt: LanguageModelPrompt
     public var options: JSONValue
 
-    public init(operation: Defaulted<RecordingOperation>, prompt: LanguageModelPrompt, options: JSONValue) {
+    public init(operation: RecordingOperation, prompt: LanguageModelPrompt, options: JSONValue) {
         self.operation = operation
         self.prompt = prompt
         self.options = options
@@ -4638,14 +4638,14 @@ public struct InputRecord: Codable, Equatable, Sendable {
 
     public init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
-        operation = try c.decodeDefaulted(RecordingOperation.self, forKey: .operation)
+        operation = try c.decodeDefault(RecordingOperation.self, forKey: .operation, .languageModel)
         prompt = try c.decode(LanguageModelPrompt.self, forKey: .prompt)
         options = try c.decode(JSONValue.self, forKey: .options)
     }
 
     public func encode(to e: Encoder) throws {
         var c = e.container(keyedBy: CodingKeys.self)
-        try c.encodeDefaulted(operation, forKey: .operation)
+        if operation != .languageModel { try c.encode(operation, forKey: .operation) }
         try c.encode(prompt, forKey: .prompt)
         try c.encode(options, forKey: .options)
     }
@@ -12857,7 +12857,7 @@ public struct VideoCallOptions: Codable, Equatable, Sendable {
     public init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
         prompt = try c.decodeIfPresent(String.self, forKey: .prompt)
-        n = try c.decodeDefault(UInt32.self, forKey: .n, 0)
+        n = try c.decodeDefault(UInt32.self, forKey: .n, 1)
         aspectRatio = try c.decodeIfPresent(AspectRatio.self, forKey: .aspectRatio)
         resolution = try c.decodeIfPresent(Size.self, forKey: .resolution)
         duration = try c.decodeIfPresent(UInt32.self, forKey: .duration)

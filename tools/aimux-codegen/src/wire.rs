@@ -103,6 +103,8 @@ pub struct WireField {
     /// the key out when the value is this wire value (and `default`
     /// restores it when absent).
     pub skip_value: Option<String>,
+    /// `#[serde(default = "path")]`: the function's last path segment.
+    pub default_fn: Option<String>,
 }
 
 /// Custom `skip_serializing_if` predicates, by the last path segment (as
@@ -179,6 +181,7 @@ fn tagged(body: &WireBody, tag: &str) -> Option<WireBody> {
         },
         aliases: vec![],
         skip_value: None,
+        default_fn: None,
     };
     let with = |fields: &[WireField]| {
         std::iter::once(lit.clone())
@@ -575,6 +578,7 @@ impl<'a> Ctx<'a> {
                 presence,
                 aliases: f.aliases.clone(),
                 skip_value: None,
+                default_fn: None,
             };
         }
         let ty = if let TypeRef::Codec {
@@ -599,6 +603,10 @@ impl<'a> Ctx<'a> {
             presence,
             aliases: f.aliases.clone(),
             skip_value: None,
+            default_fn: f
+                .default_fn
+                .as_deref()
+                .map(|p| p.rsplit("::").next().unwrap_or(p).to_string()),
         }
     }
 
@@ -703,6 +711,7 @@ mod tests {
             ty,
             omit_when_empty: false,
             default: false,
+            default_fn: None,
             flatten: false,
             aliases: vec![],
             serde_with: None,

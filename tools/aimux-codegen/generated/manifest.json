@@ -6366,6 +6366,7 @@
               "prim": "bool"
             },
             "default": true,
+            "defaultFn": "default_finalized",
             "omittedWhen": null,
             "null": {
               "input": "rejected",
@@ -20025,6 +20026,7 @@
               "prim": "u32"
             },
             "default": true,
+            "defaultFn": "default_video_n",
             "omittedWhen": null,
             "null": {
               "input": "rejected",

@@ -2335,6 +2335,7 @@ fn syn_field(wire: &str, ty: wire::WireTy) -> wire::WireField {
         presence: wire::Presence::default(),
         aliases: vec![],
         skip_value: None,
+        default_fn: None,
     }
 }
 

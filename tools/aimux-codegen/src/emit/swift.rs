@@ -77,6 +77,20 @@ impl Emitter for Swift {
     }
 }
 
+/// `#[serde(default = "path")]` functions, by last path segment, with the
+/// Swift value each returns. Any other function is an emitter error
+/// ([`Swift::check`]): the Swift default would otherwise be guessed.
+pub const DEFAULT_FNS: &[(&str, &str)] = &[
+    // aimux-core/src/video_model.rs:220 `fn default_video_n() -> u32 { 1 }`.
+    ("default_video_n", "1"),
+    // aimux-core/src/recording.rs:346 `fn default_finalized() -> bool { true }`.
+    ("default_finalized", "true"),
+    // aimux-core/src/moa.rs:60 `fn default_moa_provider() -> String { "moa".into() }`.
+    ("default_moa_provider", "\"moa\""),
+    // aimux-core/src/moa.rs:64 `fn default_strip_reference_tools() -> bool { true }`.
+    ("default_strip_reference_tools", "true"),
+];
+
 /// Directory under `generated/` holding the committed Swift output.
 pub const COMMITTED: &str = "swift";
 
@@ -92,7 +106,31 @@ pub fn committed_outputs(inputs: &crate::manifest::Inputs) -> Result<Vec<Output>
     Ok(Swift.emit(&model))
 }
 
-/// Write the committed Swift under `<out_dir>/swift/`.
+/// Files under `dir` that no output names (a stale or stray file is
+/// reported by `--check` and removed by the plain run).
+fn extra_files(dir: &std::path::Path, outputs: &[Output]) -> Vec<PathBuf> {
+    let want: BTreeSet<PathBuf> = outputs.iter().map(|o| dir.join(&o.path)).collect();
+    let mut stack = vec![dir.to_path_buf()];
+    let mut extra = Vec::new();
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if !want.contains(&p) {
+                extra.push(p);
+            }
+        }
+    }
+    extra.sort();
+    extra
+}
+
+/// Write the committed Swift under `<out_dir>/swift/`, removing files that
+/// are no longer generated.
 ///
 /// # Errors
 ///
@@ -101,12 +139,16 @@ pub fn write_committed(
     inputs: &crate::manifest::Inputs,
     out_dir: &std::path::Path,
 ) -> Result<(), Vec<String>> {
-    for o in committed_outputs(inputs)? {
+    let outputs = committed_outputs(inputs)?;
+    for o in &outputs {
         let path = out_dir.join(COMMITTED).join(&o.path);
         if let Some(d) = path.parent() {
             std::fs::create_dir_all(d).map_err(|e| vec![format!("{}: {e}", d.display())])?;
         }
-        std::fs::write(&path, o.content).map_err(|e| vec![format!("{}: {e}", path.display())])?;
+        std::fs::write(&path, &o.content).map_err(|e| vec![format!("{}: {e}", path.display())])?;
+    }
+    for extra in extra_files(&out_dir.join(COMMITTED), &outputs) {
+        std::fs::remove_file(&extra).map_err(|e| vec![format!("{}: {e}", extra.display())])?;
     }
     Ok(())
 }
@@ -121,13 +163,20 @@ pub fn check_committed(
     out_dir: &std::path::Path,
 ) -> Result<(), Vec<String>> {
     let mut problems = Vec::new();
-    for o in committed_outputs(inputs)? {
+    let outputs = committed_outputs(inputs)?;
+    for o in &outputs {
         let path = out_dir.join(COMMITTED).join(&o.path);
         match std::fs::read_to_string(&path) {
             Ok(t) if t == o.content => {}
             Ok(_) => problems.push(format!("{} is out of date", path.display())),
             Err(e) => problems.push(format!("{}: {e}", path.display())),
         }
+    }
+    for extra in extra_files(&out_dir.join(COMMITTED), &outputs) {
+        problems.push(format!(
+            "{} is not generated (extra file in generated/{COMMITTED})",
+            extra.display()
+        ));
     }
     if problems.is_empty() {
         Ok(())
@@ -147,6 +196,26 @@ impl Swift {
     /// (Swift structs cannot), one message each.
     pub fn check(model: &WireModel) -> Result<(), Vec<String>> {
         let mut errs = Vec::new();
+        let g = Gen::new(model);
+        for t in &model.types {
+            let mut lists: Vec<(String, &[WireField])> = Vec::new();
+            match &t.body {
+                WireBody::Record { fields } => lists.push((t.name.clone(), fields)),
+                WireBody::Union { variants, .. } => {
+                    for v in variants {
+                        if let VariantBody::Fields(fs) = &v.body {
+                            lists.push((format!("{}::{}", t.name, v.rust), fs));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            for (owner, fields) in lists {
+                for f in fields {
+                    errs.extend(g.skip_problem(&owner, f));
+                }
+            }
+        }
         let mut edges: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
         let records: BTreeSet<&str> = model
             .types
@@ -457,6 +526,41 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// A `skip_serializing_if` the Swift encoder cannot write: a custom
+    /// predicate value that is not a case of the field's string enum, or an
+    /// emptiness skip on a type with no Swift emptiness test (an
+    /// unregistered custom predicate would land here).
+    fn skip_problem(&self, owner: &str, f: &WireField) -> Option<String> {
+        if let Some(d) = &f.default_fn
+            && !DEFAULT_FNS.iter().any(|(k, _)| k == d)
+        {
+            return Some(format!(
+                "{owner}.{}: #[serde(default = \"{d}\")] is not in swift::DEFAULT_FNS; the Swift default would be guessed",
+                f.wire
+            ));
+        }
+        if let Some(v) = &f.skip_value {
+            let ok = matches!(self.resolve(&f.ty), WireTy::Named(n)
+                if matches!(self.bodies.get(n.as_str()), Some(WireBody::StringEnum { values, .. }) if values.contains(v)));
+            return (!ok).then(|| {
+                format!(
+                    "{owner}.{}: custom skip_serializing_if value {v:?} is not a case of the field's string enum",
+                    f.wire
+                )
+            });
+        }
+        let p = f.presence;
+        let testable = p.nullable
+            || matches!(f.ty, WireTy::Nullable(_) | WireTy::Literal(_))
+            || self.nonempty(&f.ty, "x").is_some();
+        (p.skip_if_empty && !testable).then(|| {
+            format!(
+                "{owner}.{}: skip_serializing_if on a type with no Swift emptiness test (unregistered custom predicate); the Swift emitter refuses it",
+                f.wire
+            )
+        })
+    }
+
     fn ty(&mut self, t: &WireType) {
         let _ = write!(self.out, "\n/// {} mirrors {}.\n", t.name, t.doc_source);
         match &t.body {
@@ -546,12 +650,39 @@ impl<'a> Gen<'a> {
                     inner.clone(),
                     format!(
                         "try {dc}.decodeIfPresent({}.self, forKey: {dk})",
-                        inner.trim_end_matches('?')
+                        // One layer: the field's own `Option`.
+                        inner.strip_suffix('?').unwrap_or(&inner)
                     ),
                     if p.skip_if_empty {
                         format!("try c.encodeIfPresent({id}, forKey: {key})")
                     } else {
                         format!("try c.encodeNullable({id}, forKey: {key})")
+                    },
+                )
+            } else if let Some(v) = &f.skip_value {
+                // A registered custom `skip_serializing_if`
+                // (wire::SKIP_VALUES): `default` reads the skipped value
+                // back when absent; written unless it is that value.
+                let case = format!(".{}", ident(v));
+                (
+                    inner.clone(),
+                    format!("try {dc}.decodeDefault({inner}.self, forKey: {dk}, {case})"),
+                    format!("if {id} != {case} {{ try c.encode({id}, forKey: {key}) }}"),
+                )
+            } else if let Some(d) = f
+                .default_fn
+                .as_deref()
+                .and_then(|n| DEFAULT_FNS.iter().find(|(k, _)| *k == n))
+            {
+                let def = d.1;
+                (
+                    inner.clone(),
+                    format!("try {dc}.decodeDefault({inner}.self, forKey: {dk}, {def})"),
+                    match (p.skip_if_empty, self.nonempty(&f.ty, id)) {
+                        (true, Some(cond)) => {
+                            format!("if {cond} {{ try c.encode({id}, forKey: {key}) }}")
+                        }
+                        _ => format!("try c.encode({id}, forKey: {key})"),
                     },
                 )
             } else if p.omittable || p.skip_if_empty {
