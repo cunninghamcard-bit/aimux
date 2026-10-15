@@ -35,6 +35,10 @@ impl Emitter for Go {
         "go"
     }
 
+    fn check(&self, model: &WireModel) -> Result<(), Vec<String>> {
+        Go::check(model)
+    }
+
     fn emit(&self, model: &WireModel) -> Vec<Output> {
         let names: BTreeSet<String> = model.types.iter().map(|t| t.name.clone()).collect();
         let mut g = Gen {
@@ -63,6 +67,61 @@ impl Emitter for Go {
                 content: g.out,
             },
         ]
+    }
+}
+
+/// `#[serde(default = "path")]` functions, by last path segment, with the
+/// Go value each returns (the same table as `swift::DEFAULT_FNS`). Any other
+/// function is a generation error ([`Go::check`]): Go would decode the zero
+/// value where serde calls the function.
+pub const DEFAULT_FNS: &[(&str, &str)] = &[
+    // aimux-core/src/video_model.rs:220 `fn default_video_n() -> u32 { 1 }`.
+    ("default_video_n", "1"),
+    // aimux-core/src/recording.rs:346 `fn default_finalized() -> bool { true }`.
+    ("default_finalized", "true"),
+    // aimux-core/src/moa.rs:60 `fn default_moa_provider() -> String { "moa".into() }`.
+    ("default_moa_provider", "\"moa\""),
+    // aimux-core/src/moa.rs:64 `fn default_strip_reference_tools() -> bool { true }`.
+    ("default_strip_reference_tools", "true"),
+];
+
+impl Go {
+    /// Every `default = "fn"` field has a registered Go value, on a field
+    /// Go can preset (not nullable, not tri-state).
+    ///
+    /// # Errors
+    ///
+    /// One message per unregistered or unpresettable default fn.
+    pub fn check(model: &WireModel) -> Result<(), Vec<String>> {
+        let mut errs = Vec::new();
+        for t in &model.types {
+            let fields: Vec<&WireField> = match &t.body {
+                WireBody::Record { fields } => fields.iter().collect(),
+                WireBody::Union { variants, .. } => variants
+                    .iter()
+                    .flat_map(|v| match &v.body {
+                        VariantBody::Fields(f) => f.iter().collect(),
+                        _ => vec![],
+                    })
+                    .collect(),
+                _ => vec![],
+            };
+            for f in fields {
+                let Some(d) = &f.default_fn else { continue };
+                if !DEFAULT_FNS.iter().any(|(k, _)| k == d) {
+                    errs.push(format!(
+                        "{}.{}: #[serde(default = \"{d}\")] is not in go::DEFAULT_FNS; Go would decode the zero value",
+                        t.name, f.wire
+                    ));
+                } else if f.presence.nullable || f.presence.tri_state {
+                    errs.push(format!(
+                        "{}.{}: default fn on a nullable field; the Go emitter cannot preset it",
+                        t.name, f.wire
+                    ));
+                }
+            }
+        }
+        if errs.is_empty() { Ok(()) } else { Err(errs) }
     }
 }
 
@@ -211,6 +270,16 @@ func rejectNull(b []byte, t reflect.Type) error {
 		}
 	}
 	return nil
+}
+
+// decodeWithDefaults decodes into p, already holding the
+// `#[serde(default = "fn")]` values, so an absent key keeps them as serde
+// does. p's type has no UnmarshalJSON, so rejectNull checks its fields.
+func decodeWithDefaults[T any](b []byte, p *T) error {
+	if err := rejectNull(b, reflect.TypeOf(p).Elem()); err != nil {
+		return err
+	}
+	return json.Unmarshal(b, p)
 }
 
 func isNull(b []byte) bool { return string(bytes.TrimSpace(b)) == "null" }
@@ -426,8 +495,14 @@ impl Gen {
         let _ = writeln!(self.out, "type {name} struct {{");
         let mut used = BTreeSet::new();
         let mut rows = Vec::new();
+        let mut defaults = Vec::new();
         for f in fields {
             let ident = uniq(&mut used, pascal(&f.rust));
+            if let Some(d) = &f.default_fn
+                && let Some((_, v)) = DEFAULT_FNS.iter().find(|(k, _)| k == d)
+            {
+                defaults.push(format!("{ident}: {v}"));
+            }
             let inner = self.go_ty(&f.ty);
             let (ty, opt) = if f.presence.tri_state {
                 (format!("TriState[{inner}]"), ",omitzero")
@@ -481,6 +556,13 @@ impl Gen {
             "\nfunc ({name}) wireRequired() []string {{\n\treturn []string{{{}}}\n}}",
             required.join(", ")
         );
+        if !defaults.is_empty() {
+            let _ = write!(
+                self.out,
+                "\n// UnmarshalJSON presets the #[serde(default = \"fn\")] values.\nfunc (x *{name}) UnmarshalJSON(b []byte) error {{\n\ttype plain {name}\n\tp := plain{{{}}}\n\tif err := decodeWithDefaults(b, &p); err != nil {{\n\t\treturn err\n\t}}\n\t*x = {name}(p)\n\treturn nil\n}}\n",
+                defaults.join(", ")
+            );
+        }
     }
 
     fn string_enum(&mut self, name: &str, values: &[String], open: bool) {
