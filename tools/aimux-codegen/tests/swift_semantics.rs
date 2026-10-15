@@ -1436,6 +1436,46 @@ fn same(ty: &str, truth: &Value, got: &Value) -> bool {
     float_paths::json_eq_at(truth, got, "", &floats)
 }
 
+fn model_spec_non_default() -> Value {
+    use aimux_core::model_catalogue::{
+        CatalogueSource, Modality, ModelCapabilities, ModelLimits, ModelModalities, ModelSpec,
+        ModelType,
+    };
+    serde_json::to_value(ModelSpec {
+        r#type: ModelType::Embedding,
+        limits: ModelLimits {
+            context: Some(1000),
+            ..ModelLimits::default()
+        },
+        modalities: ModelModalities {
+            input: vec![Modality::Image],
+            output: vec![],
+        },
+        capabilities: ModelCapabilities {
+            tool_call: true,
+            ..ModelCapabilities::default()
+        },
+        source: CatalogueSource::Manual,
+        ..ModelSpec::default()
+    })
+    .unwrap()
+}
+
+/// Each ModelSpec Defaulted field: absent, serde writes a value different
+/// from the fixture's, so the `defaulted-ModelSpec/-x` perturbation is a
+/// real difference, not one that happens to round-trip.
+#[test]
+fn model_spec_defaulted_fields_absent_give_a_different_value() {
+    let full = model_spec_non_default();
+    for k in ["type", "limits", "modalities", "capabilities", "source"] {
+        let mut v = full.clone();
+        v.as_object_mut().unwrap().remove(k);
+        let out = back::<aimux_core::model_catalogue::ModelSpec>(&v).unwrap();
+        assert!(out.get(k).is_some(), "{k}: serde writes the default");
+        assert_ne!(out[k], full[k], "{k}: absent gives the same value");
+    }
+}
+
 type Fx = (&'static str, &'static str, Value, Option<Back>);
 
 fn all_fixtures() -> Vec<Fx> {
@@ -1469,6 +1509,15 @@ fn all_fixtures() -> Vec<Fx> {
         "TypedToolResult",
         json!({"type": "tool-result", "toolCallId": "c", "toolName": "t", "output": {"k": 1}}),
         Some(back_tagged::<aimux_core::result::TypedToolResult>),
+    ));
+    // ModelSpec's five `#[serde(default)]` fields Swift spells Defaulted<T>
+    // (aimux-core/src/model_catalogue.rs:244-259), each set to a
+    // non-default value, so dropping one (`/-type` …) changes serde's output.
+    v.push((
+        "defaulted-ModelSpec",
+        "ModelSpec",
+        model_spec_non_default(),
+        Some(back::<aimux_core::model_catalogue::ModelSpec>),
     ));
     // One generated field-absent fixture per emit::registry entry (the
     // same ones the Go round trip runs).
@@ -1599,6 +1648,7 @@ const KNOWN_DIFFS: &[(&str, &str, &str, &[&str])] = &[
             "cov-Usage/outputTokens=wrong",
             "cov-VideoCallOptions/poll=wrong",
             "cov-VideoCallOptions/timeout=wrong",
+            "defaulted-ModelSpec/limits=wrong",
             "empty-GenerateObjectResult/request=wrong",
             "empty-GenerateObjectResult/usage=wrong",
             "empty-LanguageModelUsage/inputTokenDetails=wrong",
@@ -1681,11 +1731,22 @@ const KNOWN_DIFFS: &[(&str, &str, &str, &[&str])] = &[
             "cov-LanguageModelUsage/-inputTokenDetails",
             "cov-LanguageModelUsage/-outputTokenDetails",
             "cov-StepResult/-request",
+            "defaulted-ModelSpec/-capabilities",
+            "defaulted-ModelSpec/-limits",
+            "defaulted-ModelSpec/-modalities",
+            "defaulted-ModelSpec/-source",
+            "defaulted-ModelSpec/-type",
             "empty-GenerateObjectResult/-request",
             "empty-LanguageModelUsage/-inputTokenDetails",
             "empty-LanguageModelUsage/-outputTokenDetails",
             "empty-StepResult/-request",
         ],
+    ),
+    (
+        "other",
+        "an unknown value of a `#[serde(other)]` enum: serde re-writes it as the `Other` variant name; the Swift open enum keeps the string (ModelType, aimux-core/src/model_catalogue.rs:75-76)",
+        "vs Swift",
+        &["defaulted-ModelSpec/type=wrong"],
     ),
     (
         "base64",
@@ -1709,12 +1770,46 @@ const KNOWN_DIFFS: &[(&str, &str, &str, &[&str])] = &[
         ],
     ),
 ];
+/// The exact `[S]` message each known difference has
+/// (tests/swift_known_diffs.json, label → message). A registered label that
+/// now fails with any other message is not known: it stays red.
+/// `AIMUX_BLESS_KNOWN=1` rewrites the file from the current run.
+fn known_messages() -> BTreeMap<String, String> {
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/swift_known_diffs.json");
+    std::fs::read_to_string(p)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
 fn report(text: &str) -> Report {
+    report_with(text, &known_messages())
+}
+
+fn report_with(text: &str, expected: &BTreeMap<String, String>) -> Report {
     let m = manifest(text);
     let swift = parse(text);
     let mut r = Report::default();
     check_decls(&m, &swift, &mut r);
     sim_check(&m, &swift, &mut r);
+    if std::env::var_os("AIMUX_BLESS_KNOWN").is_some() {
+        let labels: BTreeSet<&str> = KNOWN_DIFFS
+            .iter()
+            .flat_map(|k| k.3.iter().copied())
+            .collect();
+        let msgs: BTreeMap<String, String> = r
+            .bad
+            .iter()
+            .filter_map(|b| b.strip_prefix("[S] ")?.split_once(": "))
+            .filter(|(l, _)| labels.contains(l))
+            .map(|(l, m)| (l.to_string(), m.to_string()))
+            .collect();
+        std::fs::write(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/swift_known_diffs.json"),
+            serde_json::to_string_pretty(&msgs).unwrap() + "\n",
+        )
+        .unwrap();
+    }
     let mut hit: BTreeSet<&str> = BTreeSet::new();
     r.bad.retain(|b| {
         let Some(rest) = b.strip_prefix("[S] ") else {
@@ -1726,6 +1821,7 @@ fn report(text: &str) -> Report {
         for (cat, _, part, labels) in KNOWN_DIFFS {
             if let Some(l) = labels.iter().find(|l| **l == label)
                 && msg.contains(part)
+                && expected.get(label).is_some_and(|m| m == msg)
             {
                 hit.insert(l);
                 *r.known.entry(cat).or_default() += 1;
@@ -1780,15 +1876,40 @@ fn generated_swift_matches_manifest_and_serde() {
 /// Filled in from the first green run; any change in coverage is a diff.
 const EXPECTED_KNOWN: &[(&str, usize)] = &[
     ("base64", 1),
-    ("defaulted", 8),
+    ("defaulted", 13),
     ("lenient", 8),
     ("nullalias", 16),
-    ("seq", 32),
+    ("other", 1),
+    ("seq", 33),
     ("validated", 31),
 ];
 
+/// A known label failing with a different message than the registered one
+/// (here: the same field, `cov-Usage/inputTokens=wrong`, with another
+/// error) is not a known difference.
+#[test]
+fn known_difference_with_a_different_message_is_red() {
+    let text = committed_types();
+    let mut expected = known_messages();
+    let l = "cov-Usage/inputTokens=wrong";
+    let m = expected.get_mut(l).expect("registered");
+    assert!(m.starts_with("serde accepts, Swift rejects"), "{m}");
+    *m = "serde accepts, Swift rejects (InputTokenDetails: some other error)".into();
+    let r = report_with(&text, &expected);
+    assert!(
+        r.bad.iter().any(|b| b.starts_with(&format!("[S] {l}: "))),
+        "{:#?}",
+        r.bad
+    );
+    assert!(
+        r.bad
+            .iter()
+            .any(|b| b.contains(&format!("stale known difference seq: {l}")))
+    );
+}
+
 const EXPECTED_COUNTS: (usize, usize, usize, usize, usize, usize, usize) =
-    (309, 1083, 17, 45, 249, 26, 2190);
+    (309, 1083, 17, 45, 250, 26, 2205);
 
 /// Every `Defaulted<T>` field (a `#[serde(default)]` field whose Rust
 /// `Default` the Swift side cannot spell) rejects `null` like serde, and is
