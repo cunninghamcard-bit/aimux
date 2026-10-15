@@ -65,7 +65,7 @@ fn field(wire: &str, t: WireTy, presence: Presence) -> WireField {
         ty: t,
         presence,
         aliases: vec![],
-        skip_value: None,
+        skip_fn: None,
         default_fn: None,
     }
 }
@@ -629,17 +629,20 @@ fn unregistered_default_fn_is_an_error() {
             ..Presence::default()
         },
     );
-    f.default_fn = Some("default_mystery".into());
+    f.default_fn = Some("crate::x::default_mystery".into());
     let e = Swift::check(&one_field(f.clone(), &[])).unwrap_err();
-    assert_eq!(e.len(), 1, "{e:?}");
     assert!(
-        e[0].starts_with("Rec.n: ") && e[0].contains("default_mystery"),
+        e.iter().any(|x| x.contains("crate::x::default_mystery")),
         "{e:?}"
     );
-    // A registered one passes and is the decoded default.
-    f.default_fn = Some("default_video_n".into());
+    // A registered one emits the decoded default (unused entries still error).
+    f.default_fn = Some("crate::video_model::default_video_n".into());
     let m = one_field(f, &[]);
-    assert_eq!(Swift::check(&m), Ok(()));
+    let e = Swift::check(&m).unwrap_err();
+    assert!(
+        e.iter().all(|x| x.contains("not found in the manifest")),
+        "{e:?}"
+    );
     let b = block(&file(&m, "Types.swift"), "Rec");
     assert!(
         b.contains("n = try c.decodeDefault(UInt32.self, forKey: .n, 1)"),
@@ -657,9 +660,11 @@ fn unregistered_custom_skip_is_an_error() {
     // skip_serializing_if on a named enum with no registered skip value.
     let f = field("op", WireTy::Named("Op".into()), omit);
     let e = Swift::check(&one_field(f, &["a", "b"])).unwrap_err();
-    assert_eq!(e.len(), 1, "{e:?}");
-    assert!(e[0].contains("unregistered custom predicate"), "{e:?}");
-    // A skip value that is not a case of the enum.
+    assert!(
+        e.iter().any(|x| x.contains("unregistered custom predicate")),
+        "{e:?}"
+    );
+    // A skip path that is not in the registry.
     let mut f = field(
         "op",
         WireTy::Named("Op".into()),
@@ -668,17 +673,24 @@ fn unregistered_custom_skip_is_an_error() {
             ..Presence::default()
         },
     );
-    f.skip_value = Some("zz".into());
+    f.skip_fn = Some("crate::x::bogus_skip".into());
     let e = Swift::check(&one_field(f.clone(), &["a", "b"])).unwrap_err();
-    assert_eq!(e.len(), 1, "{e:?}");
-    assert!(e[0].starts_with("Rec.op: ") && e[0].contains("zz"), "{e:?}");
-    // A real case: skipped exactly when equal.
-    f.skip_value = Some("a".into());
-    let m = one_field(f, &["a", "b"]);
-    assert_eq!(Swift::check(&m), Ok(()));
+    assert!(
+        e.iter().any(|x| x.contains("crate::x::bogus_skip")),
+        "{e:?}"
+    );
+    // A real registry path whose value is a case of the enum: skipped exactly when equal.
+    f.skip_fn = Some("crate::recording::RecordingOperation::is_language_model".into());
+    let m = one_field(f, &["language_model", "decision"]);
+    // All other registry entries are unused on this synthetic model.
+    let e = Swift::check(&m).unwrap_err();
+    assert!(
+        e.iter().all(|x| x.contains("not found in the manifest")),
+        "{e:?}"
+    );
     let b = block(&file(&m, "Types.swift"), "Rec");
     assert!(
-        b.contains("if op != .a { try c.encode(op, forKey: .op) }"),
+        b.contains("if op != .languageModel { try c.encode(op, forKey: .op) }"),
         "{b}"
     );
 }

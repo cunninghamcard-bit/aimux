@@ -49,6 +49,18 @@ fn main() -> ExitCode {
         if let Err(p) = aimux_codegen::emit::swift::check_committed(&inputs, &out) {
             problems.extend(p);
         }
+        // Every emitter's refusals (incl. the shared emit::registry).
+        match aimux_codegen::wire::from_inputs(&inputs) {
+            Err(p) => problems.extend(p),
+            Ok(model) => {
+                for e in aimux_codegen::emit::all() {
+                    if let Err(p) = e.check(&model) {
+                        problems
+                            .extend(p.into_iter().map(|x| format!("{} emitter: {x}", e.lang())));
+                    }
+                }
+            }
+        }
     } else {
         // Manifest first: a coverage or extraction failure writes nothing.
         match manifest::generate(&inputs) {

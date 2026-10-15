@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use super::Emitter;
+use super::{Emitter, registry};
 use crate::Output;
 use crate::wire::{UnionRepr, VariantBody, WireBody, WireField, WireModel, WireTy, WireType};
 
@@ -70,30 +70,15 @@ impl Emitter for Go {
     }
 }
 
-/// `#[serde(default = "path")]` functions, by last path segment, with the
-/// Go value each returns (the same table as `swift::DEFAULT_FNS`). Any other
-/// function is a generation error ([`Go::check`]): Go would decode the zero
-/// value where serde calls the function.
-pub const DEFAULT_FNS: &[(&str, &str)] = &[
-    // aimux-core/src/video_model.rs:220 `fn default_video_n() -> u32 { 1 }`.
-    ("default_video_n", "1"),
-    // aimux-core/src/recording.rs:346 `fn default_finalized() -> bool { true }`.
-    ("default_finalized", "true"),
-    // aimux-core/src/moa.rs:60 `fn default_moa_provider() -> String { "moa".into() }`.
-    ("default_moa_provider", "\"moa\""),
-    // aimux-core/src/moa.rs:64 `fn default_strip_reference_tools() -> bool { true }`.
-    ("default_strip_reference_tools", "true"),
-];
-
 impl Go {
-    /// Every `default = "fn"` field has a registered Go value, on a field
-    /// Go can preset (not nullable, not tri-state).
+    /// The shared [`registry::check`], and every `default = "fn"` field is
+    /// one Go can preset (not nullable, not tri-state).
     ///
     /// # Errors
     ///
-    /// One message per unregistered or unpresettable default fn.
+    /// One message per unregistered function or unpresettable field.
     pub fn check(model: &WireModel) -> Result<(), Vec<String>> {
-        let mut errs = Vec::new();
+        let mut errs = registry::check(model).err().unwrap_or_default();
         for t in &model.types {
             let fields: Vec<&WireField> = match &t.body {
                 WireBody::Record { fields } => fields.iter().collect(),
@@ -107,13 +92,7 @@ impl Go {
                 _ => vec![],
             };
             for f in fields {
-                let Some(d) = &f.default_fn else { continue };
-                if !DEFAULT_FNS.iter().any(|(k, _)| k == d) {
-                    errs.push(format!(
-                        "{}.{}: #[serde(default = \"{d}\")] is not in go::DEFAULT_FNS; Go would decode the zero value",
-                        t.name, f.wire
-                    ));
-                } else if f.presence.nullable || f.presence.tri_state {
+                if f.default_fn.is_some() && (f.presence.nullable || f.presence.tri_state) {
                     errs.push(format!(
                         "{}.{}: default fn on a nullable field; the Go emitter cannot preset it",
                         t.name, f.wire
@@ -333,7 +312,7 @@ struct Gen {
     /// Fixed string values used as field types ([`WireTy::Literal`]).
     literals: std::cell::RefCell<BTreeSet<String>>,
     /// String-enum type → the wire value a custom `skip_serializing_if`
-    /// leaves out ([`WireField::skip_value`]).
+    /// leaves out ([`WireField::skip_fn`], [`registry`]).
     skips: BTreeMap<String, String>,
 }
 
@@ -492,16 +471,25 @@ impl Gen {
     }
 
     fn record(&mut self, name: &str, fields: &[WireField]) {
+        if fields.iter().any(|f| f.default_fn.is_some()) {
+            let _ = writeln!(
+                self.out,
+                "//\n// {name} implements UnmarshalJSON (to preset its #[serde(default = \"fn\")]\n// values). Embedding it in another struct promotes that method and\n// swallows the outer struct's fields: do not embed it."
+            );
+        }
         let _ = writeln!(self.out, "type {name} struct {{");
         let mut used = BTreeSet::new();
         let mut rows = Vec::new();
         let mut defaults = Vec::new();
         for f in fields {
             let ident = uniq(&mut used, pascal(&f.rust));
-            if let Some(d) = &f.default_fn
-                && let Some((_, v)) = DEFAULT_FNS.iter().find(|(k, _)| k == d)
+            if let Some(e) = f
+                .default_fn
+                .as_deref()
+                .and_then(|p| registry::lookup(registry::Kind::Default, p))
             {
-                defaults.push(format!("{ident}: {v}"));
+                // JSON numbers, booleans and strings are Go literals too.
+                defaults.push(format!("{ident}: {}", e.value));
             }
             let inner = self.go_ty(&f.ty);
             let (ty, opt) = if f.presence.tri_state {
@@ -525,7 +513,12 @@ impl Gen {
                     },
                 )
             };
-            let opt = match (&f.skip_value, &f.ty) {
+            let skip = f
+                .skip_fn
+                .as_deref()
+                .and_then(|p| registry::lookup(registry::Kind::Skip, p))
+                .and_then(registry::skip_string);
+            let opt = match (&skip, &f.ty) {
                 (Some(v), WireTy::Named(n)) => {
                     // `omitzero` calls the type's IsZero (skip_methods).
                     let prev = self.skips.insert(n.clone(), v.clone());

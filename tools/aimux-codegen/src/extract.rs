@@ -397,18 +397,86 @@ pub struct NullHandling {
     pub output: &'static str,
 }
 
-/// `skip_serializing_if` predicates the manifest understands, by the last
-/// path segment. Any other predicate fails generation: the manifest does
-/// not guess when a key is left out.
+/// Standard `skip_serializing_if` predicates, by the last path segment.
+/// Any other predicate must be registered by full path in
+/// [`crate::emit::registry::REGISTRY`] ([`qualify`]); else generation
+/// fails: the manifest does not guess when a key is left out.
 pub const SKIP_PREDICATES: &[&str] = &[
     // `Option::is_none`: `None` is left out.
     "is_none",
     // `Vec::is_empty` / `str::is_empty` / maps: an empty value is left out.
     "is_empty",
-    // aimux-core/src/recording.rs:184 `RecordingOperation::is_language_model`:
-    // the default operation is left out.
-    "is_language_model",
 ];
+
+/// Whether `p` is a standard predicate ([`SKIP_PREDICATES`]).
+fn standard_predicate(p: &str) -> bool {
+    SKIP_PREDICATES.contains(&p.rsplit("::").next().unwrap_or(p))
+}
+
+/// `crate::<module>` of a source file such as `aimux-core/src/trace/record.rs`.
+fn module_of(source: &str) -> String {
+    let rel = source.split_once("/src/").map_or(source, |(_, r)| r);
+    let rel = rel.strip_suffix(".rs").unwrap_or(rel);
+    let mut parts: Vec<&str> = rel.split('/').collect();
+    if matches!(parts.last(), Some(&"mod" | &"lib")) {
+        parts.pop();
+    }
+    std::iter::once("crate")
+        .chain(parts)
+        .collect::<Vec<_>>()
+        .join("::")
+}
+
+/// A path written in `source` as a full `crate::` path (a bare or
+/// type-relative path resolves in the file's own module).
+fn full_path(source: &str, written: &str) -> String {
+    if written.starts_with("crate::") {
+        written.to_string()
+    } else {
+        format!("{}::{written}", module_of(source))
+    }
+}
+
+/// Rewrite custom `skip_serializing_if` predicates and `default = "fn"`
+/// functions to full paths, each of which must be in the emit registry.
+fn qualify(def: &mut TypeDef, errors: &mut Vec<String>) {
+    use crate::emit::registry::{Kind, lookup};
+    let source = def.source.clone();
+    let name = def.name.clone();
+    let mut fix = |f: &mut FieldDef| {
+        if let Some(p) = f.omitted_when.as_mut()
+            && !standard_predicate(p)
+        {
+            *p = full_path(&source, p);
+            if lookup(Kind::Skip, p).is_none() {
+                errors.push(format!(
+                    "{source}:{}: {name}.{}: skip_serializing_if `{p}` is not in emit::registry::REGISTRY",
+                    f.line, f.rust
+                ));
+            }
+        }
+        if let Some(p) = f.default_fn.as_mut() {
+            *p = full_path(&source, p);
+            if lookup(Kind::Default, p).is_none() {
+                errors.push(format!(
+                    "{source}:{}: {name}.{}: default = `{p}` is not in emit::registry::REGISTRY",
+                    f.line, f.rust
+                ));
+            }
+        }
+    };
+    match &mut def.shape {
+        Shape::Struct { fields, .. } => fields.iter_mut().for_each(&mut fix),
+        Shape::Enum { variants, .. } => {
+            for v in variants {
+                if let Shape::Struct { fields, .. } = &mut v.shape {
+                    fields.iter_mut().for_each(&mut fix);
+                }
+            }
+        }
+        _ => {}
+    }
+}
 
 /// [`NullHandling`] for a field whose Rust type (without `#[ts]` override)
 /// is `rust`.
@@ -430,14 +498,7 @@ fn null_handling(
         .skip_serializing_if_fn
         .as_deref()
         .map(|p| p.rsplit("::").next().unwrap_or(p));
-    if let Some(p) = predicate
-        && !SKIP_PREDICATES.contains(&p)
-    {
-        return Err(format!(
-            "{owner}.{field}: unregistered skip_serializing_if predicate `{}`",
-            m.skip_serializing_if_fn.as_deref().unwrap_or_default()
-        ));
-    }
+    // A custom predicate is checked by full path in `qualify`.
     let skip_none = predicate == Some("is_none");
     if matches!(rust, TypeRef::Option(_)) && predicate.is_some() && !skip_none {
         return Err(format!(
@@ -650,6 +711,7 @@ pub fn extract(src_root: &Path, rel_prefix: &str) -> Result<Model, Vec<String>> 
     }
     for f in &mut found {
         f.def.type_tag = tags.get(&f.def.name).cloned();
+        qualify(&mut f.def, &mut errors);
     }
     let exported: BTreeSet<String> = found
         .iter()

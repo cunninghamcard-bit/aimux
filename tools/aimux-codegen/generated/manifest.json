@@ -6366,7 +6366,7 @@
               "prim": "bool"
             },
             "default": true,
-            "defaultFn": "default_finalized",
+            "defaultFn": "crate::recording::default_finalized",
             "omittedWhen": null,
             "null": {
               "input": "rejected",
@@ -7026,7 +7026,7 @@
             },
             "omitWhenEmpty": true,
             "default": true,
-            "omittedWhen": "RecordingOperation::is_language_model",
+            "omittedWhen": "crate::recording::RecordingOperation::is_language_model",
             "null": {
               "input": "byType",
               "output": "byType"
@@ -20026,7 +20026,7 @@
               "prim": "u32"
             },
             "default": true,
-            "defaultFn": "default_video_n",
+            "defaultFn": "crate::video_model::default_video_n",
             "omittedWhen": null,
             "null": {
               "input": "rejected",

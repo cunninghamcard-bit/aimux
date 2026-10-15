@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use super::Emitter;
+use super::{Emitter, registry};
 use super::go::pascal;
 use crate::Output;
 use crate::wire::{
@@ -76,20 +76,6 @@ impl Emitter for Swift {
         ]
     }
 }
-
-/// `#[serde(default = "path")]` functions, by last path segment, with the
-/// Swift value each returns. Any other function is an emitter error
-/// ([`Swift::check`]): the Swift default would otherwise be guessed.
-pub const DEFAULT_FNS: &[(&str, &str)] = &[
-    // aimux-core/src/video_model.rs:220 `fn default_video_n() -> u32 { 1 }`.
-    ("default_video_n", "1"),
-    // aimux-core/src/recording.rs:346 `fn default_finalized() -> bool { true }`.
-    ("default_finalized", "true"),
-    // aimux-core/src/moa.rs:60 `fn default_moa_provider() -> String { "moa".into() }`.
-    ("default_moa_provider", "\"moa\""),
-    // aimux-core/src/moa.rs:64 `fn default_strip_reference_tools() -> bool { true }`.
-    ("default_strip_reference_tools", "true"),
-];
 
 /// Directory under `generated/` holding the committed Swift output.
 pub const COMMITTED: &str = "swift";
@@ -195,7 +181,7 @@ impl Swift {
     /// and every cycle of records holding each other by value or `Optional`
     /// (Swift structs cannot), one message each.
     pub fn check(model: &WireModel) -> Result<(), Vec<String>> {
-        let mut errs = Vec::new();
+        let mut errs = registry::check(model).err().unwrap_or_default();
         let g = Gen::new(model);
         for t in &model.types {
             let mut lists: Vec<(String, &[WireField])> = Vec::new();
@@ -532,19 +518,20 @@ impl<'a> Gen<'a> {
     /// unregistered custom predicate would land here).
     fn skip_problem(&self, owner: &str, f: &WireField) -> Option<String> {
         if let Some(d) = &f.default_fn
-            && !DEFAULT_FNS.iter().any(|(k, _)| k == d)
+            && registry::lookup(registry::Kind::Default, d).is_none()
         {
             return Some(format!(
-                "{owner}.{}: #[serde(default = \"{d}\")] is not in swift::DEFAULT_FNS; the Swift default would be guessed",
+                "{owner}.{}: #[serde(default = \"{d}\")] is not in emit::registry::REGISTRY; the Swift default would be guessed",
                 f.wire
             ));
         }
-        if let Some(v) = &f.skip_value {
-            let ok = matches!(self.resolve(&f.ty), WireTy::Named(n)
-                if matches!(self.bodies.get(n.as_str()), Some(WireBody::StringEnum { values, .. }) if values.contains(v)));
+        if let Some(p) = &f.skip_fn {
+            let v = registry::lookup(registry::Kind::Skip, p).and_then(registry::skip_string);
+            let ok = matches!((&v, self.resolve(&f.ty)), (Some(v), WireTy::Named(n))
+                if matches!(self.bodies.get(n.as_str()), Some(WireBody::StringEnum { values, .. }) if values.contains(&v)));
             return (!ok).then(|| {
                 format!(
-                    "{owner}.{}: custom skip_serializing_if value {v:?} is not a case of the field's string enum",
+                    "{owner}.{}: custom skip_serializing_if `{p}` is not a case of the field's string enum",
                     f.wire
                 )
             });
@@ -659,22 +646,27 @@ impl<'a> Gen<'a> {
                         format!("try c.encodeNullable({id}, forKey: {key})")
                     },
                 )
-            } else if let Some(v) = &f.skip_value {
+            } else if let Some(v) = f
+                .skip_fn
+                .as_deref()
+                .and_then(|p| registry::lookup(registry::Kind::Skip, p))
+                .and_then(registry::skip_string)
+            {
                 // A registered custom `skip_serializing_if`
-                // (wire::SKIP_VALUES): `default` reads the skipped value
+                // (emit::registry Skip): `default` reads the skipped value
                 // back when absent; written unless it is that value.
-                let case = format!(".{}", ident(v));
+                let case = format!(".{}", ident(&v));
                 (
                     inner.clone(),
                     format!("try {dc}.decodeDefault({inner}.self, forKey: {dk}, {case})"),
                     format!("if {id} != {case} {{ try c.encode({id}, forKey: {key}) }}"),
                 )
-            } else if let Some(d) = f
+            } else if let Some(e) = f
                 .default_fn
                 .as_deref()
-                .and_then(|n| DEFAULT_FNS.iter().find(|(k, _)| *k == n))
+                .and_then(|p| registry::lookup(registry::Kind::Default, p))
             {
-                let def = d.1;
+                let def = e.value;
                 (
                     inner.clone(),
                     format!("try {dc}.decodeDefault({inner}.self, forKey: {dk}, {def})"),

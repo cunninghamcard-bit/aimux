@@ -99,23 +99,13 @@ pub struct WireField {
     pub ty: WireTy,
     pub presence: Presence,
     pub aliases: Vec<String>,
-    /// A custom `skip_serializing_if` from [`SKIP_VALUES`]: serde leaves
-    /// the key out when the value is this wire value (and `default`
-    /// restores it when absent).
-    pub skip_value: Option<String>,
-    /// `#[serde(default = "path")]`: the function's last path segment.
+    /// A custom `skip_serializing_if` (not `is_none` / `is_empty`), full
+    /// path; its value is in [`crate::emit::registry`].
+    pub skip_fn: Option<String>,
+    /// `#[serde(default = "path")]`, full path; its value is in
+    /// [`crate::emit::registry`].
     pub default_fn: Option<String>,
 }
-
-/// Custom `skip_serializing_if` predicates, by the last path segment (as
-/// the manifest's `SKIP_PREDICATES`), with the wire value each one skips.
-/// A field skipped by any other predicate (not `is_none` / `is_empty`) is a
-/// lowering error: an emitter cannot write the check.
-pub const SKIP_VALUES: &[(&str, &str)] = &[
-    // aimux-core/src/recording.rs:78 `RecordingOperation::is_language_model`:
-    // `*self == Self::LanguageModel`, wire `"language_model"`.
-    ("is_language_model", "language_model"),
-];
 
 /// Field presence. `omittable`: the key may be absent (`skip_serializing_if`
 /// or `default`). `nullable`: the value may be `null` (`Option`).
@@ -180,7 +170,7 @@ fn tagged(body: &WireBody, tag: &str) -> Option<WireBody> {
             ..Presence::default()
         },
         aliases: vec![],
-        skip_value: None,
+        skip_fn: None,
         default_fn: None,
     };
     let with = |fields: &[WireField]| {
@@ -471,9 +461,10 @@ impl<'a> Ctx<'a> {
     /// `None` (`skip_serializing_if`): the Go `TriState[T]` + `omitzero`
     /// (emit/go.rs) writes the absent state by omitting the key, which is
     /// only the Rust output when serde skips it too.
-    /// A custom `skip_serializing_if` (not `is_none` / `is_empty`) is
-    /// looked up in [`SKIP_VALUES`]; an unregistered one is an error.
-    fn check_skip(&mut self, owner: &TypeDef, f: &FieldDef, w: &mut WireField) {
+    /// A custom `skip_serializing_if` (not `is_none` / `is_empty`) is kept
+    /// by full path; [`crate::emit::registry::check`] errors on an
+    /// unregistered one.
+    fn check_skip(&mut self, _owner: &TypeDef, f: &FieldDef, w: &mut WireField) {
         let Some(pred) = f.omitted_when.as_deref() else {
             return;
         };
@@ -481,16 +472,8 @@ impl<'a> Ctx<'a> {
         if last == "is_none" || last == "is_empty" {
             return;
         }
-        match SKIP_VALUES.iter().find(|(p, _)| *p == last) {
-            Some((_, v)) => {
-                w.skip_value = Some((*v).to_string());
-                w.presence.skip_if_empty = false;
-            }
-            None => self.errors.push(format!(
-                "{}:{}: {}.{}: custom skip_serializing_if `{pred}` is not in wire::SKIP_VALUES; no emitter can write it",
-                owner.source, f.line, owner.name, f.rust
-            )),
-        }
+        w.skip_fn = Some(pred.to_string());
+        w.presence.skip_if_empty = false;
     }
 
     fn check_tri_state(&mut self, owner: &TypeDef, f: &FieldDef, w: &WireField) {
@@ -577,7 +560,7 @@ impl<'a> Ctx<'a> {
                 ty: WireTy::Literal(lit.clone()),
                 presence,
                 aliases: f.aliases.clone(),
-                skip_value: None,
+                skip_fn: None,
                 default_fn: None,
             };
         }
@@ -602,11 +585,8 @@ impl<'a> Ctx<'a> {
             ty,
             presence,
             aliases: f.aliases.clone(),
-            skip_value: None,
-            default_fn: f
-                .default_fn
-                .as_deref()
-                .map(|p| p.rsplit("::").next().unwrap_or(p).to_string()),
+            skip_fn: None,
+            default_fn: f.default_fn.clone(),
         }
     }
 
@@ -915,7 +895,7 @@ mod tests {
     /// A tri-state field without `skip_serializing_if` cannot round-trip
     /// through `TriState[T]` + `omitzero` (emit/go.rs): generation error.
     #[test]
-    fn custom_skip_predicates_come_from_skip_values() {
+    fn custom_skip_predicates_are_checked_against_the_registry() {
         let mut f = field("op", "op", TypeRef::Prim("String".into()));
         f.default = true;
         f.omit_when_empty = true;
@@ -925,20 +905,30 @@ mod tests {
             auxiliary_types: vec![],
             aliases: BTreeMap::new(),
         };
-        f.omitted_when = Some("Op::is_unknown_thing".into());
-        assert_eq!(
-            lower(&model(f.clone())).unwrap_err(),
-            [
-                "x.rs:7: R.op: custom skip_serializing_if `Op::is_unknown_thing` is not in wire::SKIP_VALUES; no emitter can write it"
-            ]
-        );
-        f.omitted_when = Some("RecordingOperation::is_language_model".into());
-        let m = lower(&model(f)).unwrap();
+        // Lowering keeps the full path; the registry decides.
+        f.omitted_when = Some("crate::x::Op::is_unknown_thing".into());
+        let m = lower(&model(f.clone())).unwrap();
         let WireBody::Record { fields } = &get(&m, "R").body else {
             panic!()
         };
-        assert_eq!(fields[0].skip_value.as_deref(), Some("language_model"));
+        assert_eq!(
+            fields[0].skip_fn.as_deref(),
+            Some("crate::x::Op::is_unknown_thing")
+        );
         assert!(fields[0].presence.omittable && !fields[0].presence.skip_if_empty);
+        let e = crate::emit::registry::check(&m).unwrap_err();
+        assert!(e.contains(&"R.op: #[serde(skip_serializing_if = \"crate::x::Op::is_unknown_thing\")] is not in emit::registry::REGISTRY; no emitter can write it".to_string()), "{e:?}");
+        // The registered path: only the other entries are unused.
+        f.omitted_when = Some("crate::recording::RecordingOperation::is_language_model".into());
+        let m = lower(&model(f)).unwrap();
+        let e = crate::emit::registry::check(&m).unwrap_err();
+        assert_eq!(
+            e,
+            [
+                "emit::registry crate::video_model::default_video_n: not found in the manifest (no field names it)",
+                "emit::registry crate::recording::default_finalized: not found in the manifest (no field names it)",
+            ]
+        );
     }
 
     #[test]

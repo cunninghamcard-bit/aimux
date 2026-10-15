@@ -935,12 +935,13 @@ fn deserialize_with_field_null_is_codec() {
     assert_eq!(a["null"]["output"], "whenNone", "{a}");
 }
 
-/// `skip_serializing_if` predicates are matched by last path segment
-/// (`is_none`, `is_empty`, ..); any other predicate, or an `Option` field
-/// skipped by something other than `is_none`, fails generation with
-/// file:line instead of defaulting to `whenNone`.
+/// Standard `skip_serializing_if` predicates (`is_none`, `is_empty`) are
+/// matched by last path segment; any other predicate and any
+/// `default = "fn"` must be in emit::registry by full path, else
+/// generation fails with file:line. An `Option` field skipped by something
+/// other than `is_none` fails too, instead of defaulting to `whenNone`.
 #[test]
-fn skip_predicates_are_registered_by_last_segment() {
+fn skip_predicates_and_default_fns_are_registered() {
     let ok = extract_one(
         "#[derive(Serialize, Deserialize, TS)]\n#[ts(export)]\npub struct S {\n    #[serde(skip_serializing_if = \"crate::util::is_empty\")]\n    pub a: Vec<u32>,\n    #[serde(skip_serializing_if = \"std::option::Option::is_none\")]\n    pub b: Option<u32>,\n}\n",
     )
@@ -957,7 +958,17 @@ fn skip_predicates_are_registered_by_last_segment() {
     .unwrap_err();
     assert!(
         errs.iter().any(
-            |e| e == "x/sample.rs:5: S.a: unregistered skip_serializing_if predicate `is_zero`"
+            |e| e == "x/sample.rs:5: S.a: skip_serializing_if `crate::x::sample::is_zero` is not in emit::registry::REGISTRY"
+        ),
+        "{errs:?}"
+    );
+    let errs = extract_one(
+        "#[derive(Serialize, Deserialize, TS)]\n#[ts(export)]\npub struct S {\n    #[serde(default = \"default_n\")]\n    pub a: u32,\n}\n",
+    )
+    .unwrap_err();
+    assert!(
+        errs.iter().any(
+            |e| e == "x/sample.rs:5: S.a: default = `crate::x::sample::default_n` is not in emit::registry::REGISTRY"
         ),
         "{errs:?}"
     );
