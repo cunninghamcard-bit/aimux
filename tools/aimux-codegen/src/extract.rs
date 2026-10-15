@@ -334,6 +334,74 @@ pub struct FieldDef {
     /// Registered [`FieldCodec`] for a `serde_with` field.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub codec: Option<FieldCodecRef>,
+    /// (a) When serialization leaves the key out: the verbatim
+    /// `skip_serializing_if` predicate, or `null` when the key is always
+    /// written.
+    pub omitted_when: Option<String>,
+    /// (b) How `null` is read and written for this field.
+    pub null: NullHandling,
+}
+
+/// `null` handling of one field, derived from its Rust type and serde
+/// attributes only (`omitted_when`, `deserialize_with`, a registered codec).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NullHandling {
+    /// `rejected` (not an `Option`, not JSON); `asAbsent` (`Option<T>`
+    /// without a codec: `null` and an absent key both decode as `None`);
+    /// `distinct` (`present` codec: an absent key is `None`, `null` is
+    /// `Some(null)` / `Some(None)`); `asValue` (`serde_json::Value`: `null`
+    /// is a JSON value); `byType` (decided by the referenced type);
+    /// `codec` (another `deserialize_with`, whose rule is the codec's).
+    pub input: &'static str,
+    /// `never`; `whenNone` (`Option<T>` written as `null` because no
+    /// `skip_serializing_if = "Option::is_none"`); `asValue` (a JSON
+    /// `null` held as a value is written); `byType`; `codec`.
+    pub output: &'static str,
+}
+
+/// [`NullHandling`] for a field whose Rust type (without `#[ts]` override)
+/// is `rust`.
+fn null_handling(rust: &TypeRef, m: &Member, codec: Option<&FieldCodec>) -> NullHandling {
+    let skip_none = m.skip_serializing_if_fn.as_deref() == Some("Option::is_none");
+    let deser_codec = m
+        .with
+        .as_deref()
+        .is_some_and(|w| w.starts_with("with=") || w.starts_with("deserialize_with="));
+    let held = |inner: &TypeRef| match inner {
+        TypeRef::Json => "asValue",
+        TypeRef::Ref { .. } | TypeRef::Generic(_) => "byType",
+        _ => "never",
+    };
+    let input = match codec.map(|c| c.name) {
+        Some("presence") => "distinct",
+        Some("nonNullJson") => "rejected",
+        _ if deser_codec => "codec",
+        _ => match rust {
+            TypeRef::Option(_) => "asAbsent",
+            TypeRef::Json => "asValue",
+            TypeRef::Ref { .. } | TypeRef::Generic(_) => "byType",
+            _ => "rejected",
+        },
+    };
+    let output = if m
+        .with
+        .as_deref()
+        .is_some_and(|w| w.starts_with("with=") || w.starts_with("serialize_with="))
+    {
+        "codec"
+    } else {
+        match rust {
+            TypeRef::Option(inner) if skip_none => match &**inner {
+                // `Some(None)` / `Some(null)` is written as `null`.
+                TypeRef::Option(_) => "asValue",
+                other => held(other),
+            },
+            TypeRef::Option(_) => "whenNone",
+            other => held(other),
+        }
+    };
+    NullHandling { input, output }
 }
 
 /// The registered codec used by a field.
@@ -812,6 +880,8 @@ struct Member {
     skip: bool,
     default: bool,
     skip_serializing_if: bool,
+    /// The `skip_serializing_if` predicate path, verbatim.
+    skip_serializing_if_fn: Option<String>,
     flatten: bool,
     other: bool,
     with: Option<String>,
@@ -841,7 +911,7 @@ fn member(attrs: &[Attribute]) -> Result<Member, String> {
                     }
                     "skip_serializing_if" => {
                         m.skip_serializing_if = true;
-                        skip_rest(&n)?;
+                        m.skip_serializing_if_fn = Some(lit_str(&n)?);
                     }
                     "flatten" => m.flatten = true,
                     "other" => m.other = true,
@@ -948,6 +1018,7 @@ fn fields_of(owner: &str, fields: &Fields, rename_all: Option<&str>) -> Result<S
                     .unwrap_or_else(|| rename(&rust, rename_all, false));
                 let line = f.ident.as_ref().map_or(0, |i| i.span().start().line);
                 let codec = field_codec(owner, &rust, &m, line)?;
+                let null = null_handling(&type_ref(&f.ty, None), &m, codec);
                 let mut ty = type_ref(&f.ty, m.ts_type.as_deref());
                 if codec.is_some_and(|c| c.tri_state) {
                     let bad = || {
@@ -977,6 +1048,8 @@ fn fields_of(owner: &str, fields: &Fields, rename_all: Option<&str>) -> Result<S
                     flatten: m.flatten,
                     aliases: m.aliases,
                     serde_with: m.with,
+                    omitted_when: m.skip_serializing_if_fn,
+                    null,
                 });
             }
             Ok(Shape::Struct {
@@ -1047,6 +1120,8 @@ fn ts_only_struct(fields: &Fields) -> Result<Shape, String> {
             aliases: Vec::new(),
             serde_with: None,
             codec: None,
+            omitted_when: None,
+            null: null_handling(&type_ref(&f.ty, None), &m, None),
         });
     }
     if out.is_empty() {
@@ -1206,8 +1281,30 @@ fn args(seg: &syn::PathSegment) -> Vec<&Type> {
     }
 }
 
+/// Rust type text with token spacing removed except where two word tokens
+/// meet (`&'a Source`, `dyn Fn`, `&mut T`), so the text still reads as Rust.
+#[must_use]
+pub fn rust_text(ty: &Type) -> String {
+    let raw = ty.to_token_stream().to_string();
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let chars: Vec<char> = raw.chars().collect();
+    let mut out = String::with_capacity(raw.len());
+    for (i, &c) in chars.iter().enumerate() {
+        if c == ' ' {
+            let prev = out.chars().last();
+            let next = chars.get(i + 1).copied();
+            if prev.is_some_and(word) && next.is_some_and(word) {
+                out.push(' ');
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn type_ref(ty: &Type, ts_override: Option<&str>) -> TypeRef {
-    let text = ty.to_token_stream().to_string().replace(' ', "");
+    let text = rust_text(ty);
     if let Some(wire) = ts_override {
         return TypeRef::Codec {
             rust: text,

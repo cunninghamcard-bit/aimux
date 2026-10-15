@@ -104,14 +104,20 @@ fn manifest_records_versions_json_verbatim() {
     let versions: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&inputs().versions).unwrap()).unwrap();
     assert_eq!(manifest["sdk"], versions);
-    assert_eq!(versions.as_object().unwrap().len(), 18);
-    assert_eq!(manifest["generator"]["name"], "aimux-codegen");
-    assert!(
-        manifest["inputHash"]
-            .as_str()
-            .unwrap()
-            .starts_with("sha256:")
-    );
+    // Regenerating from an edited VERSIONS.json carries the edit through:
+    // the manifest copies the file, it does not keep its own table.
+    let dir = tmp("versions_verbatim");
+    let mut edited = versions.clone();
+    edited["ai"]["integrity"] = serde_json::json!("sha512-edited");
+    edited["@ai-sdk/extra"] = serde_json::json!({ "version": "0.0.1", "integrity": "sha512-x" });
+    let path = dir.join("VERSIONS.json");
+    std::fs::write(&path, serde_json::to_string_pretty(&edited).unwrap()).unwrap();
+    let mut i = inputs();
+    i.versions = path;
+    let fresh: serde_json::Value =
+        serde_json::from_str(&manifest::generate(&i).unwrap()[0].content).unwrap();
+    assert_eq!(fresh["sdk"], edited);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// Mutation 1: a type loses `#[ts(export)]` (it leaves the manifest) →
@@ -503,7 +509,10 @@ fn closure_dto_list_is_reproducible_from_source() {
         String::from_utf8_lossy(&out.stderr)
     );
     let list = std::fs::read_to_string(&inputs().list).unwrap();
-    assert!(list.contains("\n[exported] 210\n"));
+    let exported = exported_section(&list);
+    let model = aimux_codegen::extract::extract(&inputs().src_root, "aimux-core/src").unwrap();
+    assert_eq!(exported.len(), model.types.len());
+    assert!(list.contains(&format!("\n[exported] {}\n", model.types.len())));
     let tool = std::fs::read_to_string(workspace().join("aimux-core/src/tool.rs")).unwrap();
     assert!(
         tool.contains("#[ts(\n    export,"),
@@ -617,7 +626,27 @@ fn ts_only_tagged_wrapper_is_modelled_and_guarded() {
 #[test]
 fn serde_transparent_is_a_newtype_and_needs_one_field() {
     let m = manifest_json(&inputs());
-    assert!(find_type(&m, "NamespacedKind")["tsOverride"].is_string());
+    let kind = find_type(&m, "NamespacedKind");
+    assert!(kind["tsOverride"].is_string());
+    assert_eq!(kind["shape"]["kind"], "newtype");
+    assert_eq!(
+        kind["shape"]["inner"],
+        serde_json::json!({ "prim": "String" })
+    );
+
+    // A named one-field struct with `transparent` is a newtype of that
+    // field's type, not a one-field object.
+    let only = tmp("transparent_only");
+    std::fs::write(
+        only.join("wrap.rs"),
+        "#[derive(Serialize, Deserialize, TS)]\n#[serde(transparent)]\n#[ts(export)]\npub struct Wrap {\n    pub a: u32,\n}\n",
+    )
+    .unwrap();
+    let model = aimux_codegen::extract::extract(&only, "x").unwrap();
+    let wrap = serde_json::to_value(&model.types[0]).unwrap();
+    assert_eq!(wrap["shape"]["kind"], "newtype");
+    assert_eq!(wrap["shape"]["inner"], serde_json::json!({ "prim": "u32" }));
+    let _ = std::fs::remove_dir_all(only);
 
     let (dir, i) = scratch_src("transparent");
     std::fs::write(
@@ -633,4 +662,171 @@ fn serde_transparent_is_a_newtype_and_needs_one_field() {
     );
     assert!(!errs.iter().any(|e| e.contains("Wrap ")), "{errs:?}");
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Omission and `null` are two facts. `ApiCallError.data`
+/// (aimux-core/src/error.rs:76, `Option<Value>` + `crate::wire::present`)
+/// and `ApiCallError.response_body` (error.rs:64, plain `Option<String>`)
+/// are both omitted when `None`, but only `data` keeps `null` apart from an
+/// absent key. The manifest says so, the real serde impl agrees, and
+/// removing the `present` codec flips the manifest fact.
+#[test]
+fn omitted_and_null_are_distinct_manifest_facts() {
+    use aimux_core::error::ApiCallError;
+    let m = manifest_json(&inputs());
+    let t = find_type(&m, "ApiCallError");
+    let data = find_field(t, "data");
+    let body = find_field(t, "response_body");
+    for f in [data, body] {
+        assert_eq!(f["omittedWhen"], "Option::is_none", "{f}");
+    }
+    assert_eq!(data["null"]["input"], "distinct");
+    assert_eq!(data["null"]["output"], "asValue");
+    assert_eq!(body["null"]["input"], "asAbsent");
+    assert_eq!(body["null"]["output"], "never");
+
+    let base = serde_json::json!({ "url": "u", "requestBodyValues": {}, "message": "m" });
+    let decode = |extra: serde_json::Value| {
+        let mut v = base.clone();
+        v.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value::<ApiCallError>(v).unwrap()
+    };
+    let absent = decode(serde_json::json!({}));
+    let null = decode(serde_json::json!({ "data": null, "responseBody": null }));
+    assert!(absent.data.is_none());
+    assert_eq!(null.data, Some(serde_json::Value::Null));
+    assert!(null.response_body.is_none());
+    let written = serde_json::to_value(&null).unwrap();
+    assert_eq!(written["data"], serde_json::Value::Null);
+    assert!(written.as_object().unwrap().contains_key("data"));
+    assert!(!written.as_object().unwrap().contains_key("responseBody"));
+    assert!(
+        !serde_json::to_value(&absent)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("data")
+    );
+
+    let (dir, i) = scratch_src("null_facts");
+    let path = i.src_root.join("error.rs");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let from = "        deserialize_with = \"crate::wire::present\",\n        skip_serializing_if = \"Option::is_none\"\n    )]\n    pub data:";
+    assert!(text.contains(from));
+    std::fs::write(
+        &path,
+        text.replacen(
+            from,
+            "        skip_serializing_if = \"Option::is_none\"\n    )]\n    pub data:",
+            1,
+        ),
+    )
+    .unwrap();
+    let mutated = manifest_json(&i);
+    let data = find_field(find_type(&mutated, "ApiCallError"), "data");
+    assert_eq!(data["null"]["input"], "asAbsent");
+    assert_eq!(data["omittedWhen"], "Option::is_none");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The manifest's TS-only wrapper (`type` literal + flattened inner type)
+/// against what `aimux_core::wire::Tagged` (wire.rs:148-164) really writes.
+fn assert_wrapper_matches<T: serde::Serialize + aimux_core::wire::TypeTag>(
+    m: &serde_json::Value,
+    wrapper: &str,
+    value: &T,
+) {
+    let t = find_type(m, wrapper);
+    let fields = t["shape"]["fields"].as_array().unwrap();
+    let tag = fields.iter().find(|f| f["wire"] == "type").unwrap();
+    let literal: String =
+        serde_json::from_str(tag["type"]["codec"]["wire"].as_str().unwrap()).unwrap();
+    let inner = fields.iter().find(|f| f["flatten"] == true).unwrap();
+    let inner_name = inner["type"]["ref"]["name"].as_str().unwrap();
+    assert_eq!(
+        std::any::type_name::<T>().rsplit("::").next(),
+        Some(inner_name)
+    );
+
+    let tagged = serde_json::to_value(aimux_core::wire::Tagged(value)).unwrap();
+    assert_eq!(tagged["type"], literal.as_str(), "{wrapper}");
+    let mut rest = tagged.as_object().unwrap().clone();
+    rest.remove("type");
+    assert_eq!(
+        serde_json::Value::Object(rest),
+        serde_json::to_value(value).unwrap()
+    );
+}
+
+#[test]
+fn ts_only_wrappers_match_wire_tagged_output() {
+    use aimux_core::result::{Source, ToolApprovalResponseOutput, TypedToolResult};
+    use aimux_core::tool::ToolCall;
+    let m = manifest_json(&inputs());
+    let call = ToolCall {
+        tool_call_id: "c1".into(),
+        tool_name: "weather".into(),
+        input: serde_json::json!({ "city": "SH" }),
+        provider_executed: Some(true),
+        dynamic: None,
+        provider_metadata: None,
+        invalid: None,
+        error: None,
+    };
+    assert_wrapper_matches(&m, "TypedToolCall", &call);
+    let source = Source::Url {
+        id: "s1".into(),
+        url: "https://example.com".into(),
+        title: Some("t".into()),
+        provider_metadata: None,
+    };
+    assert_wrapper_matches(&m, "TypedSource", &source);
+    let result = TypedToolResult {
+        tool_call_id: "c1".into(),
+        tool_name: "weather".into(),
+        input: Some(serde_json::json!({ "city": "SH" })),
+        output: serde_json::json!({ "temp": 20 }),
+        provider_executed: None,
+        provider_metadata: None,
+        dynamic: None,
+        preliminary: None,
+    };
+    assert_wrapper_matches(&m, "TaggedToolResult", &result);
+
+    // Nested: ToolApprovalResponseOutput.toolCall is declared as
+    // TypedToolCall and serialized through `crate::wire::typed`.
+    let field = find_field(find_type(&m, "ToolApprovalResponseOutput"), "tool_call");
+    assert!(
+        field["type"]["codec"]["wire"]
+            .as_str()
+            .unwrap()
+            .ends_with("TypedToolCall"),
+        "{field}"
+    );
+    let reply = ToolApprovalResponseOutput {
+        approval_id: "a1".into(),
+        tool_call: call.clone(),
+        approved: true,
+        reason: None,
+        provider_executed: None,
+    };
+    let written = serde_json::to_value(&reply).unwrap();
+    assert_eq!(
+        written["toolCall"],
+        serde_json::to_value(aimux_core::wire::Tagged(&call)).unwrap()
+    );
+}
+
+/// Rust type text keeps the spaces Rust needs between word tokens.
+#[test]
+fn rust_type_text_keeps_word_spacing() {
+    let text = |s: &str| aimux_codegen::extract::rust_text(&syn::parse_str(s).unwrap());
+    assert_eq!(text("Vec<&'a Source>"), "Vec<&'a Source>");
+    assert_eq!(text("&mut  Vec < String >"), "&mut Vec<String>");
+    assert_eq!(text("Box<dyn Fn(u8) -> u8>"), "Box<dyn Fn(u8)->u8>");
+    let m = manifest_json(&inputs());
+    let sources = find_field(find_type(&m, "GenerateTextResultSnapshot"), "sources");
+    assert!(sources.to_string().contains("Vec<&'a Source>"), "{sources}");
 }
