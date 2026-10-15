@@ -1070,7 +1070,7 @@ fn body_decodes(m: &Ir, body: &wire::WireBody, v: &Value, depth: usize) -> bool 
     match body {
         B::Record { fields } => fields_decode(m, fields, v, depth),
         B::Alias(t) => decodes(m, t, v, depth),
-        B::StringEnum { values, open } => v
+        B::StringEnum { values, open, .. } => v
             .as_str()
             .is_some_and(|s| *open || values.iter().any(|x| x == s)),
         B::Union { repr, variants } => {
