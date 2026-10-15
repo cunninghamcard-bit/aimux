@@ -36,6 +36,12 @@
     "reason": "ImageResult.warnings has no skip_serializing_if: serde writes `[]`; the hand-written field is `omitempty` and drops it."
   },
   {
+    "type": "RawToolCall",
+    "field": "type",
+    "verdict": "手写错",
+    "reason": "v4 `RawToolCall` (tool.rs:123-126, `rename_all = \"camelCase\"`, no tag) has no `type` field; serde never writes one (fixtures cov-RawToolCall / empty-RawToolCall). The hand-written RawToolCall.MarshalJSON (bindings/go/repair.go:37-44) always adds `\"type\":\"tool-call\"`. The `type: \"tool-call\"` tag belongs to the TS-only `TypedToolCall` wrapper."
+  },
+  {
     "type": "SearchResult",
     "field": "warnings",
     "verdict": "手写错",

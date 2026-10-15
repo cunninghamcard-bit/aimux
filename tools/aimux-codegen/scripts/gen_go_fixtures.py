@@ -2,7 +2,7 @@
 """Write tests/common/go_fixtures.rs and go_fixtures_empty.rs (unit 2.2 on v4).
 
 One Rust literal per Go type that both the hand-written bindings/go
-(types.go + multimodal_types.go) and the generated Go declare; enums get one
+(types.go + multimodal_types.go + repair.go RawToolCall) and the generated Go declare; enums get one
 fixture per variant. Values are built from generated/manifest.json field
 lists; the test serializes them with serde, so serde stays the truth.
 `full` fills every optional with a value; `empty` uses None / [] / "" / 0.
@@ -31,6 +31,8 @@ def go_names(path):
     return set(re.findall(r"^type ([A-Za-z0-9_]+)", Path(path).read_text(), re.M))
 
 hand = go_names(ROOT / "bindings/go/types.go") | go_names(ROOT / "bindings/go/multimodal_types.go")
+# repair.go needs cgo; only its RawToolCall (type + JSON codec) is compared.
+hand |= {"RawToolCall"} & go_names(ROOT / "bindings/go/repair.go")
 ARGS = [a for a in sys.argv[1:] if a != "--check"]
 CHECK = "--check" in sys.argv[1:]
 gen = go_names(ARGS[0])

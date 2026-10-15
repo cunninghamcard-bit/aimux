@@ -1279,6 +1279,26 @@ pub fn coverage_fixtures() -> Vec<(&'static str, &'static str, Value, Option<Bac
             None,
         ),
         (
+            "cov-RawToolCall",
+            "RawToolCall",
+            {
+                let x: aimux_core::tool::RawToolCall = aimux_core::tool::RawToolCall {
+                    tool_call_id: "x".to_string(),
+                    tool_name: "x".to_string(),
+                    input: "x".to_string(),
+                    provider_executed: Some(true),
+                    dynamic: Some(true),
+                    provider_metadata: Some(
+                        [("x".to_string(), Default::default())]
+                            .into_iter()
+                            .collect(),
+                    ),
+                };
+                v(&x)
+            },
+            Some(back::<aimux_core::tool::RawToolCall>),
+        ),
+        (
             "cov-ReasoningEffort-ProviderDefault",
             "ReasoningEffort",
             {

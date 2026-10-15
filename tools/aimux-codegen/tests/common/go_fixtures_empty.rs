@@ -690,6 +690,22 @@ pub fn empty_fixtures() -> Vec<(&'static str, &'static str, Value, Option<Back>)
             None,
         ),
         (
+            "empty-RawToolCall",
+            "RawToolCall",
+            {
+                let x: aimux_core::tool::RawToolCall = aimux_core::tool::RawToolCall {
+                    tool_call_id: String::new(),
+                    tool_name: String::new(),
+                    input: String::new(),
+                    provider_executed: None,
+                    dynamic: None,
+                    provider_metadata: None,
+                };
+                v(&x)
+            },
+            Some(back::<aimux_core::tool::RawToolCall>),
+        ),
+        (
             "empty-ReasoningEffort",
             "ReasoningEffort",
             {
