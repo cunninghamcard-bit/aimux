@@ -10405,7 +10405,7 @@ public struct ToolResult: Codable, Equatable, Sendable {
         let c = try d.container(keyedBy: CodingKeys.self)
         toolCallId = try c.decode(String.self, forKey: .toolCallId)
         toolName = try c.decode(String.self, forKey: .toolName)
-        result = try c.decode(JSONValue.self, forKey: .result)
+        result = try c.decodeNonNull(JSONValue.self, forKey: .result)
         isError = try c.decodeIfPresent(Bool.self, forKey: .isError)
         preliminary = try c.decodeIfPresent(Bool.self, forKey: .preliminary)
         dynamic = try c.decodeIfPresent(Bool.self, forKey: .dynamic)

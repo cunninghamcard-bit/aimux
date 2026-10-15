@@ -81,6 +81,15 @@ extension KeyedDecodingContainer {
         contains(k) ? .value(try decode(t, forKey: k)) : .default
     }
 
+    /// A JSON value whose `null` serde rejects (`nonNullJson` codec).
+    public func decodeNonNull(_ t: JSONValue.Type, forKey k: Key) throws -> JSONValue {
+        let v = try decode(t, forKey: k)
+        if case .null = v {
+            throw DecodingError.valueNotFound(JSONValue.self, .init(codingPath: codingPath + [k], debugDescription: "null is rejected"))
+        }
+        return v
+    }
+
     public func decodeTriState<T>(_ t: T.Type, forKey k: Key) throws -> TriState<T> {
         guard contains(k) else { return .absent }
         if try decodeNil(forKey: k) { return .null }

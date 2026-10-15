@@ -922,6 +922,9 @@ fn check_struct(m: &Manifest, swift: &Swift, name: &str, sf: &[SField], r: &mut 
         let d = &s.dec;
         let dk = if f.null.input == "distinct" {
             "decodeTriState("
+        } else if f.null.input == "rejected" && s.ty == "JSONValue" {
+            // nonNullJson: a JSON value whose `null` serde rejects.
+            "decodeNonNull("
         } else if opt {
             "decodeIfPresent("
         } else if dflt.is_some() {
@@ -1242,6 +1245,12 @@ impl Sim<'_> {
                     }
                     Some(x) => FV::Val(self.value(&ty, x, depth)?),
                 }
+            } else if d.contains(".decodeNonNull(") {
+                match raw {
+                    None => return Err(format!("{name}.{}: missing key", f.key)),
+                    Some(Value::Null) => return Err(format!("{name}.{}: null is rejected", f.key)),
+                    Some(x) => FV::Val(self.value(&ty, x, depth)?),
+                }
             } else if d.contains(".decode(") {
                 let x = raw.ok_or(format!("{name}.{}: missing key", f.key))?;
                 FV::Val(self.value(&ty, x, depth)?)
@@ -1428,6 +1437,20 @@ fn all_fixtures() -> Vec<Fx> {
         }
         v.push((label, "InputRecord", j, Some(input)));
     }
+    // The nonNullJson codec on its own types: ToolResult (`result` rejects
+    // null) and TaggedToolResult (`output` is a plain JSON value).
+    v.push((
+        "nonnull-ToolResult",
+        "ToolResult",
+        json!({"toolCallId": "c", "toolName": "t", "result": {"k": 1}}),
+        Some(back::<aimux_core::tool::ToolResult>),
+    ));
+    v.push((
+        "nonnull-TaggedToolResult",
+        "TypedToolResult",
+        json!({"type": "tool-result", "toolCallId": "c", "toolName": "t", "output": {"k": 1}}),
+        Some(back_tagged::<aimux_core::result::TypedToolResult>),
+    ));
     // One generated field-absent fixture per emit::registry entry (the
     // same ones the Go round trip runs).
     for (label, ty, j) in registry_fixtures::registry_fixtures() {
@@ -1645,12 +1668,6 @@ const KNOWN_DIFFS: &[(&str, &str, &str, &[&str])] = &[
         ],
     ),
     (
-        "toolresult",
-        "StreamPart::ToolResult rejects `result: null` in hand-written serde",
-        "serde rejects",
-        &["cov-StreamPart-ToolResult/result=null"],
-    ),
-    (
         "base64",
         "VideoData base64 is normalised by serde (url-safe to standard); Swift keeps the string",
         "vs Swift",
@@ -1747,12 +1764,11 @@ const EXPECTED_KNOWN: &[(&str, usize)] = &[
     ("lenient", 8),
     ("nullalias", 16),
     ("seq", 32),
-    ("toolresult", 1),
     ("validated", 31),
 ];
 
 const EXPECTED_COUNTS: (usize, usize, usize, usize, usize, usize, usize) =
-    (309, 1083, 17, 45, 247, 26, 2169);
+    (309, 1083, 17, 45, 249, 26, 2190);
 
 /// Every `Defaulted<T>` field (a `#[serde(default)]` field whose Rust
 /// `Default` the Swift side cannot spell) rejects `null` like serde, and is
@@ -1962,6 +1978,15 @@ fn mutations(text: &str) -> Vec<(&'static str, String)> {
                 "\npublic struct ",
                 |l| l.contains(".decodeDefaulted(RequestInfo.self"),
                 |l| l.replace("decodeDefaulted(", "decodeIfPresent("),
+            ),
+        ),
+        (
+            "B2-nonnull-decode",
+            mutate(
+                t,
+                "public struct ToolResult:",
+                |l| l.contains(".decodeNonNull("),
+                |l| l.replace("decodeNonNull(", "decode("),
             ),
         ),
     ]

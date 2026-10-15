@@ -528,7 +528,7 @@ impl<'a> Gen<'a> {
         if let Some(p) = &f.skip_fn {
             let v = registry::lookup(registry::Kind::Skip, p).and_then(registry::skip_string);
             let ok = matches!((&v, self.resolve(&f.ty)), (Some(v), WireTy::Named(n))
-                if matches!(self.bodies.get(n.as_str()), Some(WireBody::StringEnum { values, .. }) if values.contains(&v)));
+                if matches!(self.bodies.get(n.as_str()), Some(WireBody::StringEnum { values, .. }) if values.contains(v)));
             return (!ok).then(|| {
                 format!(
                     "{owner}.{}: custom skip_serializing_if `{p}` is not a case of the field's string enum",
@@ -699,6 +699,14 @@ impl<'a> Gen<'a> {
                         format!("try c.encodeDefaulted({id}, forKey: {key})"),
                     ),
                 }
+            } else if p.rejects_null {
+                // A JSON value whose `null` serde rejects (`nonNullJson`):
+                // decode, then refuse `.null`.
+                (
+                    inner.clone(),
+                    format!("try {dc}.decodeNonNull({inner}.self, forKey: {dk})"),
+                    format!("try c.encode({id}, forKey: {key})"),
+                )
             } else {
                 (
                     inner.clone(),
@@ -1120,6 +1128,15 @@ extension KeyedDecodingContainer {
     /// `.default`; a present `null` is rejected.
     public func decodeDefaulted<T>(_ t: T.Type, forKey k: Key) throws -> Defaulted<T> {
         contains(k) ? .value(try decode(t, forKey: k)) : .default
+    }
+
+    /// A JSON value whose `null` serde rejects (`nonNullJson` codec).
+    public func decodeNonNull(_ t: JSONValue.Type, forKey k: Key) throws -> JSONValue {
+        let v = try decode(t, forKey: k)
+        if case .null = v {
+            throw DecodingError.valueNotFound(JSONValue.self, .init(codingPath: codingPath + [k], debugDescription: "null is rejected"))
+        }
+        return v
     }
 
     public func decodeTriState<T>(_ t: T.Type, forKey k: Key) throws -> TriState<T> {
