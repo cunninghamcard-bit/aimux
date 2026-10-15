@@ -2334,6 +2334,7 @@ fn syn_field(wire: &str, ty: wire::WireTy) -> wire::WireField {
         ty,
         presence: wire::Presence::default(),
         aliases: vec![],
+        skip_value: None,
     }
 }
 
@@ -2618,5 +2619,67 @@ fn go_fixture_files_are_current() {
         "gen_go_fixtures.py --check: {}{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Labels of the `InputRecord.operation` samples whose generated-Go round
+/// trip differs from serde (`skip_serializing_if =
+/// "RecordingOperation::is_language_model"`, aimux-core/src/recording.rs:184).
+fn custom_skip_red(mutate: impl Fn(String) -> String) -> BTreeSet<&'static str> {
+    use aimux_core::recording::InputRecord;
+    let samples: Vec<Fixture> = [
+        (
+            "skip-language_model",
+            json!({"operation": "language_model", "prompt": [], "options": {}}),
+        ),
+        (
+            "skip-decision",
+            json!({"operation": "decision", "prompt": [], "options": {}}),
+        ),
+        ("skip-absent", json!({"prompt": [], "options": {}})),
+    ]
+    .into_iter()
+    .map(|(label, json)| Fixture {
+        label,
+        ty: "InputRecord",
+        json,
+        back: Some(back::<InputRecord>),
+    })
+    .collect();
+    let run = run_go("skip", &samples, mutate);
+    let mut red = BTreeSet::new();
+    for (f, r) in samples.iter().zip(&run.results) {
+        assert_eq!(f.label, r.label);
+        let truth = f.back.unwrap()(&f.json).unwrap();
+        if !r.gen_err.is_empty() || !gen_is(r.gen_out.as_ref(), &truth, f.ty) {
+            red.insert(f.label);
+        }
+    }
+    red
+}
+
+/// A custom `skip_serializing_if` (wire::SKIP_VALUES) leaves the key out
+/// exactly when serde does. As a plain `omitempty` (the bug before this
+/// fix), `language_model` is written.
+#[test]
+fn custom_skip_predicate_matches_serde() {
+    let truth = back::<aimux_core::recording::InputRecord>(
+        &json!({"operation": "language_model", "prompt": [], "options": {}}),
+    )
+    .unwrap();
+    assert!(
+        truth.get("operation").is_none(),
+        "serde skips language_model"
+    );
+    assert_eq!(custom_skip_red(|s| s), BTreeSet::new());
+    let as_omitempty = |s: String| {
+        s.replace(
+            "`json:\"operation,omitzero\"`",
+            "`json:\"operation,omitempty\"`",
+        )
+    };
+    assert_eq!(
+        custom_skip_red(as_omitempty),
+        BTreeSet::from(["skip-language_model"])
     );
 }

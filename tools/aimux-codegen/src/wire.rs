@@ -94,7 +94,21 @@ pub struct WireField {
     pub ty: WireTy,
     pub presence: Presence,
     pub aliases: Vec<String>,
+    /// A custom `skip_serializing_if` from [`SKIP_VALUES`]: serde leaves
+    /// the key out when the value is this wire value (and `default`
+    /// restores it when absent).
+    pub skip_value: Option<String>,
 }
+
+/// Custom `skip_serializing_if` predicates, by the last path segment (as
+/// the manifest's `SKIP_PREDICATES`), with the wire value each one skips.
+/// A field skipped by any other predicate (not `is_none` / `is_empty`) is a
+/// lowering error: an emitter cannot write the check.
+pub const SKIP_VALUES: &[(&str, &str)] = &[
+    // aimux-core/src/recording.rs:78 `RecordingOperation::is_language_model`:
+    // `*self == Self::LanguageModel`, wire `"language_model"`.
+    ("is_language_model", "language_model"),
+];
 
 /// Field presence. `omittable`: the key may be absent (`skip_serializing_if`
 /// or `default`). `nullable`: the value may be `null` (`Option`).
@@ -159,6 +173,7 @@ fn tagged(body: &WireBody, tag: &str) -> Option<WireBody> {
             ..Presence::default()
         },
         aliases: vec![],
+        skip_value: None,
     };
     let with = |fields: &[WireField]| {
         std::iter::once(lit.clone())
@@ -429,7 +444,8 @@ impl<'a> Ctx<'a> {
                 out.extend(self.flattened(owner, f, 0));
                 continue;
             }
-            let w = self.field(f, &owner.source, conc);
+            let mut w = self.field(f, &owner.source, conc);
+            self.check_skip(owner, f, &mut w);
             self.check_tri_state(owner, f, &w);
             out.push(w);
         }
@@ -440,6 +456,28 @@ impl<'a> Ctx<'a> {
     /// `None` (`skip_serializing_if`): the Go `TriState[T]` + `omitzero`
     /// (emit/go.rs) writes the absent state by omitting the key, which is
     /// only the Rust output when serde skips it too.
+    /// A custom `skip_serializing_if` (not `is_none` / `is_empty`) is
+    /// looked up in [`SKIP_VALUES`]; an unregistered one is an error.
+    fn check_skip(&mut self, owner: &TypeDef, f: &FieldDef, w: &mut WireField) {
+        let Some(pred) = f.omitted_when.as_deref() else {
+            return;
+        };
+        let last = pred.rsplit("::").next().unwrap_or(pred);
+        if last == "is_none" || last == "is_empty" {
+            return;
+        }
+        match SKIP_VALUES.iter().find(|(p, _)| *p == last) {
+            Some((_, v)) => {
+                w.skip_value = Some((*v).to_string());
+                w.presence.skip_if_empty = false;
+            }
+            None => self.errors.push(format!(
+                "{}:{}: {}.{}: custom skip_serializing_if `{pred}` is not in wire::SKIP_VALUES; no emitter can write it",
+                owner.source, f.line, owner.name, f.rust
+            )),
+        }
+    }
+
     fn check_tri_state(&mut self, owner: &TypeDef, f: &FieldDef, w: &WireField) {
         if w.presence.tri_state && !w.presence.skip_if_empty {
             self.errors.push(format!(
@@ -469,7 +507,8 @@ impl<'a> Ctx<'a> {
                     if inner.flatten {
                         out.extend(self.flattened(def, inner, depth + 1));
                     } else {
-                        let w = self.field(inner, &def.source, &conc);
+                        let mut w = self.field(inner, &def.source, &conc);
+                        self.check_skip(def, inner, &mut w);
                         self.check_tri_state(def, inner, &w);
                         out.push(w);
                     }
@@ -523,6 +562,7 @@ impl<'a> Ctx<'a> {
                 ty: WireTy::Literal(lit.clone()),
                 presence,
                 aliases: f.aliases.clone(),
+                skip_value: None,
             };
         }
         let ty = if let TypeRef::Codec {
@@ -546,6 +586,7 @@ impl<'a> Ctx<'a> {
             ty,
             presence,
             aliases: f.aliases.clone(),
+            skip_value: None,
         }
     }
 
@@ -852,6 +893,33 @@ mod tests {
 
     /// A tri-state field without `skip_serializing_if` cannot round-trip
     /// through `TriState[T]` + `omitzero` (emit/go.rs): generation error.
+    #[test]
+    fn custom_skip_predicates_come_from_skip_values() {
+        let mut f = field("op", "op", TypeRef::Prim("String".into()));
+        f.default = true;
+        f.omit_when_empty = true;
+        f.line = 7;
+        let model = |f: FieldDef| Model {
+            types: vec![def("R", record(vec![f]))],
+            auxiliary_types: vec![],
+            aliases: BTreeMap::new(),
+        };
+        f.omitted_when = Some("Op::is_unknown_thing".into());
+        assert_eq!(
+            lower(&model(f.clone())).unwrap_err(),
+            [
+                "x.rs:7: R.op: custom skip_serializing_if `Op::is_unknown_thing` is not in wire::SKIP_VALUES; no emitter can write it"
+            ]
+        );
+        f.omitted_when = Some("RecordingOperation::is_language_model".into());
+        let m = lower(&model(f)).unwrap();
+        let WireBody::Record { fields } = &get(&m, "R").body else {
+            panic!()
+        };
+        assert_eq!(fields[0].skip_value.as_deref(), Some("language_model"));
+        assert!(fields[0].presence.omittable && !fields[0].presence.skip_if_empty);
+    }
+
     #[test]
     fn tri_state_without_skip_is_an_error() {
         let mut f = field("body", "body", TypeRef::Option(Box::new(TypeRef::Json)));

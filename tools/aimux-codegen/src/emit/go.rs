@@ -15,7 +15,7 @@
 //! - `Vec<u8>` → `[]U8` (a JSON array of numbers, not Go's base64 `[]byte`);
 //!   tuples, opaque JSON and u128/i128 → `json.RawMessage` / `json.Number`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
@@ -41,12 +41,14 @@ impl Emitter for Go {
             names,
             out: String::new(),
             literals: std::cell::RefCell::default(),
+            skips: BTreeMap::new(),
         };
         g.out.push_str(HEADER);
         for t in &model.types {
             g.ty(t);
         }
         g.literal_types();
+        g.skip_methods();
         vec![
             Output {
                 path: PathBuf::from("go.mod"),
@@ -261,6 +263,9 @@ struct Gen {
     out: String,
     /// Fixed string values used as field types ([`WireTy::Literal`]).
     literals: std::cell::RefCell<BTreeSet<String>>,
+    /// String-enum type → the wire value a custom `skip_serializing_if`
+    /// leaves out ([`WireField::skip_value`]).
+    skips: BTreeMap<String, String>,
 }
 
 /// Go type name of a fixed-string field.
@@ -372,6 +377,19 @@ impl Gen {
 
     /// One empty struct per fixed string: its zero value marshals as the
     /// string, and decoding accepts only that string.
+    /// `IsZero` for each string enum a custom `skip_serializing_if` skips
+    /// (`omitzero`): the skipped value, and `""` (an absent key decodes to
+    /// `""`, which serde reads as the `default`, the same skipped value).
+    fn skip_methods(&mut self) {
+        for (n, v) in std::mem::take(&mut self.skips) {
+            let q = go_str(&v);
+            let _ = write!(
+                self.out,
+                "\n// IsZero reports whether serde leaves {n} out: {q} (custom skip_serializing_if), or unset.\nfunc (x {n}) IsZero() bool {{ return x == \"\" || x == {q} }}\n"
+            );
+        }
+    }
+
     fn literal_types(&mut self) {
         let lits = self.literals.borrow().clone();
         for lit in lits {
@@ -431,6 +449,23 @@ impl Gen {
                         ""
                     },
                 )
+            };
+            let opt = match (&f.skip_value, &f.ty) {
+                (Some(v), WireTy::Named(n)) => {
+                    // `omitzero` calls the type's IsZero (skip_methods).
+                    let prev = self.skips.insert(n.clone(), v.clone());
+                    assert!(
+                        prev.is_none_or(|p| p == *v),
+                        "{name}.{}: {n} skipped at two different values",
+                        f.wire
+                    );
+                    ",omitzero"
+                }
+                (Some(_), _) => panic!(
+                    "{name}.{}: a custom skip_serializing_if needs a string-enum type",
+                    f.wire
+                ),
+                (None, _) => opt,
             };
             rows.push(vec![ident, ty, format!("`json:\"{}{opt}\"`", f.wire)]);
         }
