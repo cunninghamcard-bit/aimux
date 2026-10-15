@@ -830,3 +830,188 @@ fn rust_type_text_keeps_word_spacing() {
     let sources = find_field(find_type(&m, "GenerateTextResultSnapshot"), "sources");
     assert!(sources.to_string().contains("Vec<&'a Source>"), "{sources}");
 }
+
+/// `Option<Option<T>>` + `skip_serializing_if = "Option::is_none"`
+/// (`DecisionBooleanCriteria.true_`, decision_model.rs:88-100): `Some(None)`
+/// is written as `null`, `None` is left out. The manifest says `asValue`.
+#[test]
+fn option_option_with_skip_writes_some_none_as_null() {
+    use aimux_core::decision_model::DecisionBooleanCriteria;
+    let m = manifest_json(&inputs());
+    let t = find_type(&m, "DecisionBooleanCriteria");
+    for rust in ["true_", "false_"] {
+        let f = find_field(t, rust);
+        assert_eq!(f["null"]["output"], "asValue", "{f}");
+        assert_eq!(f["omittedWhen"], "Option::is_none", "{f}");
+    }
+    let written = serde_json::to_value(DecisionBooleanCriteria {
+        true_: Some(None),
+        false_: None,
+    })
+    .unwrap();
+    assert_eq!(written, serde_json::json!({ "true": null }));
+    let read: DecisionBooleanCriteria =
+        serde_json::from_value(serde_json::json!({ "true": null })).unwrap();
+    assert_eq!(read.true_, Some(None));
+    assert_eq!(read.false_, None);
+}
+
+/// `Option<T>` without `skip_serializing_if` (`ChatCompletionChoice
+/// .finish_reason`, openai_output.rs:73): `None` is written as `null`. The
+/// manifest says `whenNone`; the skipped neighbour `logprobs` says `never`
+/// for its key and `asValue` for a held JSON null.
+#[test]
+fn option_without_skip_writes_none_as_null() {
+    use aimux_core::openai_output::{ChatCompletionChoice, ChatCompletionMessage};
+    let m = manifest_json(&inputs());
+    let t = find_type(&m, "ChatCompletionChoice");
+    let finish = find_field(t, "finish_reason");
+    assert_eq!(finish["null"]["output"], "whenNone");
+    assert!(finish["omittedWhen"].is_null());
+    assert_eq!(find_field(t, "logprobs")["omittedWhen"], "Option::is_none");
+    let choice = ChatCompletionChoice {
+        index: 0,
+        message: ChatCompletionMessage {
+            role: "assistant".into(),
+            content: None,
+            reasoning_content: None,
+            tool_calls: None,
+            annotations: None,
+        },
+        finish_reason: None,
+        logprobs: None,
+    };
+    let written = serde_json::to_value(&choice).unwrap();
+    let obj = written.as_object().unwrap();
+    assert_eq!(obj.get("finish_reason"), Some(&serde_json::Value::Null));
+    assert!(!obj.contains_key("logprobs"));
+}
+
+/// `nonNullJson` (`ToolResult.result`, tool.rs:219): the manifest says
+/// `rejected`, and the real decoder rejects `null` while taking `{}`.
+#[test]
+fn non_null_json_codec_rejects_null() {
+    use aimux_core::tool::ToolResult;
+    let m = manifest_json(&inputs());
+    let f = find_field(find_type(&m, "ToolResult"), "result");
+    assert_eq!(f["codec"]["name"], "nonNullJson");
+    assert_eq!(f["null"]["input"], "rejected");
+    let with = |result: serde_json::Value| {
+        serde_json::from_value::<ToolResult>(
+            serde_json::json!({ "toolCallId": "c", "toolName": "t", "result": result }),
+        )
+    };
+    assert!(with(serde_json::Value::Null).is_err());
+    assert!(with(serde_json::json!({})).is_ok());
+}
+
+fn extract_one(src: &str) -> Result<serde_json::Value, Vec<String>> {
+    let dir = tmp("extract_one");
+    std::fs::write(dir.join("sample.rs"), src).unwrap();
+    let r = aimux_codegen::extract::extract(&dir, "x")
+        .map(|m| serde_json::to_value(&m.types[0]).unwrap());
+    let _ = std::fs::remove_dir_all(dir);
+    r
+}
+
+/// A `deserialize_with` field (declared with `#[ts(type)]`) leaves null
+/// handling to its codec: the manifest says `codec`, not a guess.
+#[test]
+fn deserialize_with_field_null_is_codec() {
+    let t = extract_one(
+        "#[derive(Serialize, Deserialize, TS)]\n#[ts(export)]\npub struct S {\n    #[serde(deserialize_with = \"lenient\")]\n    #[ts(type = \"number\")]\n    pub a: Option<u32>,\n}\n",
+    )
+    .unwrap();
+    let a = &t["shape"]["fields"][0];
+    assert_eq!(a["null"]["input"], "codec", "{a}");
+    assert_eq!(a["null"]["output"], "whenNone", "{a}");
+}
+
+/// `skip_serializing_if` predicates are matched by last path segment
+/// (`is_none`, `is_empty`, ..); any other predicate, or an `Option` field
+/// skipped by something other than `is_none`, fails generation with
+/// file:line instead of defaulting to `whenNone`.
+#[test]
+fn skip_predicates_are_registered_by_last_segment() {
+    let ok = extract_one(
+        "#[derive(Serialize, Deserialize, TS)]\n#[ts(export)]\npub struct S {\n    #[serde(skip_serializing_if = \"crate::util::is_empty\")]\n    pub a: Vec<u32>,\n    #[serde(skip_serializing_if = \"std::option::Option::is_none\")]\n    pub b: Option<u32>,\n}\n",
+    )
+    .unwrap();
+    assert_eq!(
+        ok["shape"]["fields"][0]["omittedWhen"],
+        "crate::util::is_empty"
+    );
+    assert_eq!(ok["shape"]["fields"][1]["null"]["output"], "never");
+
+    let errs = extract_one(
+        "#[derive(Serialize, Deserialize, TS)]\n#[ts(export)]\npub struct S {\n    #[serde(skip_serializing_if = \"is_zero\")]\n    pub a: u32,\n}\n",
+    )
+    .unwrap_err();
+    assert!(
+        errs.iter().any(
+            |e| e == "x/sample.rs:5: S.a: unregistered skip_serializing_if predicate `is_zero`"
+        ),
+        "{errs:?}"
+    );
+    let errs = extract_one(
+        "#[derive(Serialize, Deserialize, TS)]\n#[ts(export)]\npub struct S {\n    #[serde(skip_serializing_if = \"Vec::is_empty\")]\n    pub a: Option<Vec<u32>>,\n}\n",
+    )
+    .unwrap_err();
+    assert!(
+        errs.iter()
+            .any(|e| e.starts_with("x/sample.rs:5: S.a: Option field skipped by `Vec::is_empty`")),
+        "{errs:?}"
+    );
+}
+
+/// The `presence` codec needs a `Some` payload that can hold `null`.
+/// Narrowing `ApiCallError.data` (error.rs:76) to `Option<String>` keeps
+/// the registration but fails generation at the field's line.
+#[test]
+fn presence_codec_needs_a_nullable_payload() {
+    let m = manifest_json(&inputs());
+    let mut distinct = 0;
+    let mut walk = vec![];
+    for t in m["types"].as_array().unwrap() {
+        walk.push(t["shape"].clone());
+    }
+    while let Some(shape) = walk.pop() {
+        for f in shape["fields"].as_array().into_iter().flatten() {
+            if f["codec"]["name"] == "presence" {
+                assert_eq!(f["null"]["input"], "distinct", "{f}");
+                distinct += 1;
+            }
+        }
+        for v in shape["variants"].as_array().into_iter().flatten() {
+            walk.push(v["shape"].clone());
+        }
+    }
+    assert_eq!(
+        distinct,
+        aimux_codegen::extract::FIELD_CODECS
+            .iter()
+            .filter(|c| c.name == "presence")
+            .count()
+    );
+
+    let (dir, i) = scratch_src("presence_payload");
+    let path = i.src_root.join("error.rs");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let from = "    pub data: Option<serde_json::Value>,";
+    assert!(text.contains(from));
+    std::fs::write(
+        &path,
+        text.replacen(from, "    pub data: Option<String>,", 1),
+    )
+    .unwrap();
+    let errs = errors(&i);
+    assert!(
+        errs.iter()
+            .any(|e| e.starts_with("aimux-core/src/error.rs:")
+                && e.contains(
+                    "ApiCallError.data: presence codec needs Option<Option<T>> or Option<Value>"
+                )),
+        "{errs:?}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

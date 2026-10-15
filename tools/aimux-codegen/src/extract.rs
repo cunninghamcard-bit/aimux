@@ -360,10 +360,54 @@ pub struct NullHandling {
     pub output: &'static str,
 }
 
+/// `skip_serializing_if` predicates the manifest understands, by the last
+/// path segment. Any other predicate fails generation: the manifest does
+/// not guess when a key is left out.
+pub const SKIP_PREDICATES: &[&str] = &[
+    // `Option::is_none`: `None` is left out.
+    "is_none",
+    // `Vec::is_empty` / `str::is_empty` / maps: an empty value is left out.
+    "is_empty",
+    // aimux-core/src/recording.rs:184 `RecordingOperation::is_language_model`:
+    // the default operation is left out.
+    "is_language_model",
+];
+
 /// [`NullHandling`] for a field whose Rust type (without `#[ts]` override)
 /// is `rust`.
-fn null_handling(rust: &TypeRef, m: &Member, codec: Option<&FieldCodec>) -> NullHandling {
-    let skip_none = m.skip_serializing_if_fn.as_deref() == Some("Option::is_none");
+///
+/// # Errors
+///
+/// `Owner.field: ..` text for an unregistered `skip_serializing_if`
+/// predicate, an `Option` field skipped by anything but `is_none` (its
+/// `None` output would be unknown), or a `presence` codec on a field whose
+/// `Some` payload cannot hold `null`.
+fn null_handling(
+    owner: &str,
+    field: &str,
+    rust: &TypeRef,
+    m: &Member,
+    codec: Option<&FieldCodec>,
+) -> Result<NullHandling, String> {
+    let predicate = m
+        .skip_serializing_if_fn
+        .as_deref()
+        .map(|p| p.rsplit("::").next().unwrap_or(p));
+    if let Some(p) = predicate
+        && !SKIP_PREDICATES.contains(&p)
+    {
+        return Err(format!(
+            "{owner}.{field}: unregistered skip_serializing_if predicate `{}`",
+            m.skip_serializing_if_fn.as_deref().unwrap_or_default()
+        ));
+    }
+    let skip_none = predicate == Some("is_none");
+    if matches!(rust, TypeRef::Option(_)) && predicate.is_some() && !skip_none {
+        return Err(format!(
+            "{owner}.{field}: Option field skipped by `{}`, not `is_none`; its None output is unknown",
+            m.skip_serializing_if_fn.as_deref().unwrap_or_default()
+        ));
+    }
     let deser_codec = m
         .with
         .as_deref()
@@ -374,7 +418,18 @@ fn null_handling(rust: &TypeRef, m: &Member, codec: Option<&FieldCodec>) -> Null
         _ => "never",
     };
     let input = match codec.map(|c| c.name) {
-        Some("presence") => "distinct",
+        Some("presence") => match rust {
+            // `Option<Option<T>>` or `Option<Value>`: the `Some` payload
+            // holds the `null` that an absent key does not produce.
+            TypeRef::Option(inner) if matches!(**inner, TypeRef::Option(_) | TypeRef::Json) => {
+                "distinct"
+            }
+            _ => {
+                return Err(format!(
+                    "{owner}.{field}: presence codec needs Option<Option<T>> or Option<Value>; `Some` cannot hold null"
+                ));
+            }
+        },
         Some("nonNullJson") => "rejected",
         _ if deser_codec => "codec",
         _ => match rust {
@@ -401,7 +456,7 @@ fn null_handling(rust: &TypeRef, m: &Member, codec: Option<&FieldCodec>) -> Null
             other => held(other),
         }
     };
-    NullHandling { input, output }
+    Ok(NullHandling { input, output })
 }
 
 /// The registered codec used by a field.
@@ -1018,7 +1073,8 @@ fn fields_of(owner: &str, fields: &Fields, rename_all: Option<&str>) -> Result<S
                     .unwrap_or_else(|| rename(&rust, rename_all, false));
                 let line = f.ident.as_ref().map_or(0, |i| i.span().start().line);
                 let codec = field_codec(owner, &rust, &m, line)?;
-                let null = null_handling(&type_ref(&f.ty, None), &m, codec);
+                let null = null_handling(owner, &rust, &type_ref(&f.ty, None), &m, codec)
+                    .map_err(|e| at_line(line, &e))?;
                 let mut ty = type_ref(&f.ty, m.ts_type.as_deref());
                 if codec.is_some_and(|c| c.tri_state) {
                     let bad = || {
@@ -1110,6 +1166,7 @@ fn ts_only_struct(fields: &Fields) -> Result<Shape, String> {
             (None, None, true) => (rust.clone(), type_ref(&f.ty, None), true),
             _ => return Err(MSG.into()),
         };
+        let null = null_handling("", &rust, &type_ref(&f.ty, None), &m, None)?;
         out.push(FieldDef {
             wire,
             rust,
@@ -1121,7 +1178,7 @@ fn ts_only_struct(fields: &Fields) -> Result<Shape, String> {
             serde_with: None,
             codec: None,
             omitted_when: None,
-            null: null_handling(&type_ref(&f.ty, None), &m, None),
+            null,
         });
     }
     if out.is_empty() {
