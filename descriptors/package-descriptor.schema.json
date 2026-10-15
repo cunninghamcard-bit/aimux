@@ -1,0 +1,201 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aimux.dev/schemas/package-descriptor.schema.json",
+  "title": "aimux package descriptor (draft, phase 1 unit 1.7)",
+  "description": "A credential-free static description of one provider package (#200 §6.5 field list; RFC-0040 §2.1). Data only: no closures, no secret values, not a protocol interpreter. The protocol/family tag describes the adapter and test grouping only; it never decides model.provider and is not replayable configuration.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "package_id",
+    "factory",
+    "settings_schema",
+    "credential_fields",
+    "runtime_handle_fields",
+    "methods",
+    "name_semantics",
+    "provider_string_rules",
+    "provider_options_rules",
+    "tools",
+    "extensions",
+    "auth",
+    "catalogue_mapping",
+    "audit_metadata",
+    "supported_features",
+    "source_verification"
+  ],
+  "properties": {
+    "$schema": { "type": "string" },
+    "package_id": {
+      "description": "Stable package identifier (the AI SDK package name without scope).",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$"
+    },
+    "factory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "default_factory"],
+      "properties": {
+        "name": { "description": "Rust factory (create_xxx).", "type": "string", "pattern": "^create_[a-z_]+$" },
+        "sdk_name": { "description": "AI SDK factory (createXxx).", "type": "string" },
+        "default_factory": {
+          "description": "Default instance (e.g. openai()), or null when the package has none.",
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "settings_schema": {
+      "description": "JSON Schema of the package settings as plain data. Runtime handles (fetch, generate_id, ...) are NOT here; see runtime_handle_fields.",
+      "type": "object",
+      "required": ["type", "properties", "additionalProperties"],
+      "properties": {
+        "type": { "const": "object" },
+        "additionalProperties": { "const": false },
+        "required": { "type": "array", "items": { "type": "string" } },
+        "properties": { "type": "object", "minProperties": 1 }
+      }
+    },
+    "credential_fields": {
+      "description": "Settings fields that carry secrets. Only these accept {\"env\": \"NAME\"} in config documents (RFC-0040 §3.2).",
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["field", "default_env", "sent_as", "empty_string"],
+        "properties": {
+          "field": { "type": "string" },
+          "default_env": { "description": "Package-default env read at request time when the field is absent, or null.", "type": ["string", "null"] },
+          "sent_as": { "description": "Header the value is sent in, e.g. \"authorization: Bearer\" or \"x-api-key\".", "type": "string" },
+          "empty_string": { "description": "What an explicit \"\" means.", "enum": ["used_as_given", "no_credential"] },
+          "exclusive_with": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "runtime_handle_fields": {
+      "description": "Settings that are runtime objects, not data (never in C JSON; unknown in JSON is an error, not skip).",
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["field", "kind"],
+        "properties": {
+          "field": { "type": "string" },
+          "kind": { "enum": ["fetch", "id_generator", "web_socket", "closure"] },
+          "feature": { "type": "string" }
+        }
+      }
+    },
+    "methods": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["list", "default_method"],
+      "properties": {
+        "list": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "kind", "provider_suffix"],
+            "properties": {
+              "name": { "type": "string", "pattern": "^[a-z_]+$" },
+              "kind": { "enum": ["language", "embedding", "image", "speech", "transcription", "decision", "files", "skills", "models"] },
+              "provider_suffix": { "description": "Suffix after the provider name in provider(); null means the name itself (no suffix).", "type": ["string", "null"] },
+              "alias_of": { "type": "string" }
+            }
+          }
+        },
+        "default_method": { "description": "Method of the callable provider (provider(modelId)).", "type": "string" }
+      }
+    },
+    "name_semantics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["setting", "default", "required"],
+      "properties": {
+        "setting": { "type": ["string", "null"] },
+        "default": { "type": ["string", "null"] },
+        "required": { "type": "boolean" },
+        "note": { "type": "string" }
+      }
+    },
+    "provider_string_rules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["template"],
+      "properties": {
+        "template": { "description": "e.g. \"{name}.{method_suffix}\".", "type": "string" },
+        "examples": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "provider_options_rules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["namespaces", "unknown_fields"],
+      "properties": {
+        "namespaces": { "description": "providerOptions keys read, in order (later wins).", "type": "array", "minItems": 1, "items": { "type": "string" } },
+        "unknown_fields": { "enum": ["dropped", "passed_through_to_body", "error"] }
+      }
+    },
+    "tools": {
+      "description": "Provider-defined tool ids (e.g. openai.web_search).",
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string" }
+    },
+    "extensions": {
+      "description": "Named non-standard capabilities kept on the registration (RFC-0040 §2.1: must not be erased).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["discovery", "named"],
+      "properties": {
+        "discovery": { "type": "boolean" },
+        "named": { "type": "array", "uniqueItems": true, "items": { "type": "string" } }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["modes", "offline_auth_recipe"],
+      "properties": {
+        "modes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["api_key_header", "bearer", "none", "sigv4", "adc", "azure_token"] } },
+        "offline_auth_recipe": { "description": "How replay/offline runs authenticate without secrets.", "type": "string" }
+      }
+    },
+    "catalogue_mapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["catalogue_provider_ids"],
+      "properties": {
+        "catalogue_provider_ids": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "audit_metadata": {
+      "description": "Explicit audit family; never inferred from URLs or provider strings.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["family"],
+      "properties": {
+        "family": { "type": "string" },
+        "protocol": { "type": "string" }
+      }
+    },
+    "supported_features": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string" }
+    },
+    "source_verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sdk_package", "sdk_version", "aimux_source"],
+      "properties": {
+        "sdk_package": { "type": "string" },
+        "sdk_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+        "aimux_source": { "description": "file:line of the Rust factory/settings this descriptor was written from.", "type": "array", "minItems": 1, "items": { "type": "string" } }
+      }
+    }
+  }
+}

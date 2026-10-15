@@ -41,6 +41,7 @@ default = ["realtime"]
 realtime = ["aimux-provider-utils/ws"]
 
 [dev-dependencies]
+jsonschema = { workspace = true }
 # WebSocket server side for realtime transcription integration tests.
 tokio-tungstenite = { workspace = true }
 aimux-core = { workspace = true }
