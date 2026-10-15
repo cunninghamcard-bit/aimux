@@ -96,11 +96,63 @@ fn string_enums(m: &WireModel) -> Vec<String> {
         .collect()
 }
 
+/// The committed manifest (generated/manifest.json).
+fn manifest_json() -> serde_json::Value {
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("generated/manifest.json");
+    serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
+}
+
+/// Manifest string enums: an externally tagged enum whose variants are all
+/// unit, with whether it is open (a `#[serde(other)]` variant).
+fn manifest_string_enums() -> BTreeMap<String, bool> {
+    manifest_json()["types"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| {
+            let s = &t["shape"];
+            s["kind"] == "enum"
+                && s["representation"]["style"] == "external"
+                && s["variants"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|v| v["shape"]["kind"] == "unit")
+        })
+        .map(|t| {
+            let open = t["shape"]["variants"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v["other"] == true);
+            (t["name"].as_str().unwrap().to_string(), open)
+        })
+        .collect()
+}
+
+/// Every manifest field object (struct fields and variant fields).
+fn manifest_fields(v: &serde_json::Value, out: &mut Vec<serde_json::Value>) {
+    match v {
+        serde_json::Value::Object(o) => {
+            if o.contains_key("wire") && o.contains_key("null") && o.contains_key("type") {
+                out.push(v.clone());
+            }
+            for x in o.values() {
+                manifest_fields(x, out);
+            }
+        }
+        serde_json::Value::Array(a) => a.iter().for_each(|x| manifest_fields(x, out)),
+        _ => {}
+    }
+}
+
 #[test]
-fn ir_has_17_string_enums() {
-    // v4 (#55 had 19): DecisionQuestionType and the others below.
-    let names = string_enums(&model());
-    assert_eq!(names.len(), 17, "{names:?}");
+fn ir_string_enums_match_the_manifest() {
+    let names: Vec<String> = string_enums(&model());
+    let want: Vec<String> = manifest_string_enums().into_keys().collect();
+    let mut got = names.clone();
+    got.sort();
+    assert_eq!(got, want);
     // The Go output's two extra `type X string` are aliases, not enums.
     let m = model();
     for a in ["Size", "AspectRatio"] {
@@ -396,28 +448,26 @@ fn records_follow_the_presence_matrix() {
         ae.contains("try c.encodeTriState(data, forKey: .data)"),
         "{ae}"
     );
-    let tri = model()
-        .types
+    // Tri-state only on codec fields (#55 emit_swift_test.rs:391-396): the
+    // manifest's distinct-null fields, each carrying a codec, counted from
+    // generated/manifest.json, not from the IR.
+    let mut mf = Vec::new();
+    manifest_fields(&manifest_json(), &mut mf);
+    let distinct: Vec<&serde_json::Value> = mf
         .iter()
-        .flat_map(|t| match &t.body {
-            WireBody::Record { fields } => fields.clone(),
-            WireBody::Union { variants, .. } => variants
-                .iter()
-                .flat_map(|v| match &v.body {
-                    VariantBody::Fields(f) => f.clone(),
-                    _ => vec![],
-                })
-                .collect(),
-            _ => vec![],
-        })
-        .filter(|f| f.presence.tri_state)
-        .count();
+        .filter(|f| f["null"]["input"] == "distinct")
+        .collect();
+    assert!(!distinct.is_empty());
+    assert!(
+        distinct.iter().all(|f| f["codec"].is_object()),
+        "a distinct-null field without a codec: {distinct:?}"
+    );
     assert_eq!(
         src.lines()
             .filter(|l| l.trim_start().starts_with("public var ") && l.contains(": TriState<"))
             .count(),
-        tri,
-        "TriState used outside tri-state fields"
+        distinct.len(),
+        "TriState used outside codec fields"
     );
     // Runtime: default rejects a present null (no decodeIfPresent).
     let rt = file(&model(), "Runtime.swift");
@@ -455,11 +505,30 @@ fn string_enums_open_and_closed() {
         "{mt}"
     );
     assert!(mt.contains("rawValue = Self.aliases[s] ?? s"), "{mt}");
-    // Closed: a String raw enum (synthesized decode rejects unknown values).
+    // Open / closed as the manifest says (`other: true` on a variant).
+    let me = manifest_string_enums();
+    for (name, open) in &me {
+        let b = block(&src, name);
+        if *open {
+            assert!(
+                b.starts_with(&format!("public struct {name}: RawRepresentable")),
+                "{b}"
+            );
+        } else {
+            assert!(
+                b.starts_with(&format!(
+                    "public enum {name}: String, Codable, Equatable, Sendable, CaseIterable {{"
+                )),
+                "{b}"
+            );
+        }
+    }
+    // Closed: a String raw enum (synthesized decode rejects unknown values),
+    // as many as the manifest has closed string enums.
     let closed = src
         .matches(": String, Codable, Equatable, Sendable, CaseIterable {")
         .count();
-    assert_eq!(closed, 13, "17 string enums - 4 open");
+    assert_eq!(closed, me.values().filter(|o| !**o).count(), "{me:?}");
 }
 
 #[test]
