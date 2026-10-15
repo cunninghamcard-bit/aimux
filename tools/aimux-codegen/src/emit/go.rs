@@ -492,6 +492,12 @@ impl Gen {
     }
 
     fn record(&mut self, name: &str, fields: &[WireField]) {
+        if fields.iter().any(|f| f.default_fn.is_some()) {
+            let _ = writeln!(
+                self.out,
+                "//\n// {name} implements UnmarshalJSON (to preset its #[serde(default = \"fn\")]\n// values). Embedding it in another struct promotes that method and\n// swallows the outer struct's fields: do not embed it."
+            );
+        }
         let _ = writeln!(self.out, "type {name} struct {{");
         let mut used = BTreeSet::new();
         let mut rows = Vec::new();

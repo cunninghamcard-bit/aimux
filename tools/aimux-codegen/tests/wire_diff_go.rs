@@ -2697,23 +2697,33 @@ fn default_fn_red(mutate: impl Fn(String) -> String) -> BTreeSet<&'static str> {
         .2;
     let mut absent = base.clone();
     absent.as_object_mut().unwrap().remove("n");
-    let mut three = base;
+    let mut three = base.clone();
     three["n"] = json!(3);
-    let samples: Vec<Fixture> = [("default-n-absent", absent), ("default-n-3", three)]
-        .into_iter()
-        .map(|(label, json)| Fixture {
-            label,
-            ty: "VideoCallOptions",
-            json,
-            back: Some(back::<VideoCallOptions>),
-        })
-        .collect();
+    // serde rejects `"n": null` (a u32); Go must too, not keep the preset.
+    let mut null = base;
+    null["n"] = Value::Null;
+    let samples: Vec<Fixture> = [
+        ("default-n-absent", absent),
+        ("default-n-3", three),
+        ("default-n-null", null),
+    ]
+    .into_iter()
+    .map(|(label, json)| Fixture {
+        label,
+        ty: "VideoCallOptions",
+        json,
+        back: Some(back::<VideoCallOptions>),
+    })
+    .collect();
     let run = run_go("defaultfn", &samples, mutate);
     let mut red = BTreeSet::new();
     for (f, r) in samples.iter().zip(&run.results) {
         assert_eq!(f.label, r.label);
-        let truth = f.back.unwrap()(&f.json).unwrap();
-        if !r.gen_err.is_empty() || !gen_is(r.gen_out.as_ref(), &truth, f.ty) {
+        let ok = match f.back.unwrap()(&f.json) {
+            Ok(truth) => r.gen_err.is_empty() && gen_is(r.gen_out.as_ref(), &truth, f.ty),
+            Err(_) => !r.gen_err.is_empty(),
+        };
+        if !ok {
             red.insert(f.label);
         }
     }
@@ -2731,6 +2741,18 @@ fn default_fn_matches_serde() {
     assert_eq!(
         default_fn_red(no_preset),
         BTreeSet::from(["default-n-absent"])
+    );
+    assert!(back::<aimux_core::video_model::VideoCallOptions>(&json!({"n": null})).is_err());
+    // Without rejectNull, json.Unmarshal leaves the preset under a null.
+    let no_reject = |s: String| {
+        s.replace(
+            "\tif err := rejectNull(b, reflect.TypeOf(p).Elem()); err != nil {\n\t\treturn err\n\t}\n\treturn json.Unmarshal(b, p)",
+            "\treturn json.Unmarshal(b, p)",
+        )
+    };
+    assert_eq!(
+        default_fn_red(no_reject),
+        BTreeSet::from(["default-n-null"])
     );
 }
 
