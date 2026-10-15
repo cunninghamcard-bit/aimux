@@ -9437,6 +9437,7 @@
       "name": "RawToolCall",
       "category": "tool",
       "source": "aimux-core/src/tool.rs",
+      "typeTag": "tool-call",
       "shape": {
         "kind": "struct",
         "fields": [
@@ -11968,6 +11969,7 @@
       "name": "Source",
       "category": "core",
       "source": "aimux-core/src/result.rs",
+      "typeTag": "source",
       "shape": {
         "kind": "enum",
         "representation": {
@@ -15259,6 +15261,7 @@
       "name": "ToolCall",
       "category": "tool",
       "source": "aimux-core/src/tool.rs",
+      "typeTag": "tool-call",
       "shape": {
         "kind": "struct",
         "fields": [
@@ -18823,6 +18826,7 @@
       "name": "TypedToolResult",
       "category": "core",
       "source": "aimux-core/src/result.rs",
+      "typeTag": "tool-result",
       "shape": {
         "kind": "struct",
         "fields": [

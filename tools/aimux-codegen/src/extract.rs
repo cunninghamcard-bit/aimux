@@ -274,6 +274,11 @@ pub struct TypeDef {
     /// `#[ts(as|type = ..)]` on the container.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ts_override: Option<CodecWire>,
+    /// `impl crate::wire::TypeTag for <type> { const TYPE = ".." }`: the
+    /// `type` value `aimux_core::wire::Tagged` / `typed` / `typed_vec`
+    /// write in front of the value's own fields where it is used standalone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub type_tag: Option<String>,
     pub shape: Shape,
 }
 
@@ -613,6 +618,7 @@ pub fn extract(src_root: &Path, rel_prefix: &str) -> Result<Model, Vec<String>> 
     let mut found = Vec::new();
     let mut errors = Vec::new();
     let mut aliases: BTreeMap<String, (AliasDef, usize)> = BTreeMap::new();
+    let mut tags: BTreeMap<String, String> = BTreeMap::new();
     for path in &files {
         let rel = format!(
             "{rel_prefix}/{}",
@@ -636,6 +642,10 @@ pub fn extract(src_root: &Path, rel_prefix: &str) -> Result<Model, Vec<String>> 
             }
         };
         walk_items(&file.items, &rel, &mut found, &mut aliases, &mut errors);
+        type_tags(&file.items, &mut tags);
+    }
+    for f in &mut found {
+        f.def.type_tag = tags.get(&f.def.name).cloned();
     }
     let exported: BTreeSet<String> = found
         .iter()
@@ -915,6 +925,46 @@ fn is_cfg_test(attrs: &[Attribute]) -> bool {
         .any(|a| a.path().is_ident("cfg") && a.meta.to_token_stream().to_string().contains("test"))
 }
 
+/// `impl [crate::]wire::TypeTag for Name { const TYPE: &str = "lit"; }`
+/// items (outside `#[cfg(test)]` modules): `Name` → `lit`.
+fn type_tags(items: &[Item], out: &mut BTreeMap<String, String>) {
+    for item in items {
+        match item {
+            Item::Mod(m) if !is_cfg_test(&m.attrs) => {
+                if let Some((_, inner)) = &m.content {
+                    type_tags(inner, out);
+                }
+            }
+            Item::Impl(i) => {
+                let is_tag = i.trait_.as_ref().is_some_and(|(_, p, _)| {
+                    p.segments.last().is_some_and(|s| s.ident == "TypeTag")
+                });
+                let Type::Path(self_ty) = i.self_ty.as_ref() else {
+                    continue;
+                };
+                let Some(name) = self_ty.path.segments.last().map(|s| s.ident.to_string()) else {
+                    continue;
+                };
+                if !is_tag {
+                    continue;
+                }
+                for it in &i.items {
+                    if let syn::ImplItem::Const(c) = it
+                        && c.ident == "TYPE"
+                        && let syn::Expr::Lit(syn::ExprLit {
+                            lit: syn::Lit::Str(lit),
+                            ..
+                        }) = &c.expr
+                    {
+                        out.insert(name.clone(), lit.value());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn walk_items(
     items: &[Item],
     rel: &str,
@@ -1058,6 +1108,7 @@ fn consider(
                     return;
                 }
             },
+            type_tag: None,
             shape,
         },
         line,

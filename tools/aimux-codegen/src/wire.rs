@@ -128,6 +128,11 @@ pub enum WireTy {
     /// `null` or the inner type, in a nested position (e.g. a map value);
     /// a field's own `Option` is [`Presence::nullable`] instead.
     Nullable(Box<WireTy>),
+    /// A fixed string (`#[ts(type = "\"lit\"")]`, e.g. the `type` tag of
+    /// v4 `TypedToolCall` / `TypedSource` / `TaggedToolResult`): always
+    /// written with exactly this value; on input absent or this value
+    /// (`crate::wire::untag`), anything else is rejected.
+    Literal(String),
 }
 
 struct Ctx<'a> {
@@ -141,12 +146,58 @@ struct Ctx<'a> {
     errors: Vec<String>,
 }
 
+/// The body `aimux_core::wire::Tagged` writes for a [`TypeDef::type_tag`]
+/// type: a fixed `type` field first, then the value's own fields (for an
+/// internally tagged union, in every struct variant).
+fn tagged(body: &WireBody, tag: &str) -> Option<WireBody> {
+    let lit = WireField {
+        wire: "type".into(),
+        rust: "type_tag".into(),
+        ty: WireTy::Literal(tag.into()),
+        presence: Presence {
+            omittable: true,
+            ..Presence::default()
+        },
+        aliases: vec![],
+    };
+    let with = |fields: &[WireField]| {
+        std::iter::once(lit.clone())
+            .chain(fields.iter().filter(|f| f.wire != "type").cloned())
+            .collect::<Vec<_>>()
+    };
+    match body {
+        WireBody::Record { fields } => Some(WireBody::Record {
+            fields: with(fields),
+        }),
+        WireBody::Union {
+            repr: repr @ UnionRepr::Internal { .. },
+            variants,
+        } => Some(WireBody::Union {
+            repr: repr.clone(),
+            variants: variants
+                .iter()
+                .map(|v| {
+                    let mut v = v.clone();
+                    v.body = match &v.body {
+                        VariantBody::Fields(f) => VariantBody::Fields(with(f)),
+                        VariantBody::Unit => VariantBody::Fields(with(&[])),
+                        other => other.clone(),
+                    };
+                    v
+                })
+                .collect(),
+        }),
+        _ => None,
+    }
+}
+
 /// Lower the extracted model.
 ///
 /// # Errors
 ///
 /// A Rust name defined in several files without distinct `ts(rename)`
-/// names, or a `flatten` whose target is not a struct.
+/// names, a `flatten` whose target is not a struct, a tri-state field
+/// without `skip_serializing_if`, or a `TypeTag` on a non-record type.
 pub fn lower(model: &Model) -> Result<WireModel, Vec<String>> {
     let all: Vec<&TypeDef> = model.types.iter().chain(&model.auxiliary_types).collect();
     let mut count: BTreeMap<&str, usize> = BTreeMap::new();
@@ -184,6 +235,25 @@ pub fn lower(model: &Model) -> Result<WireModel, Vec<String>> {
     let mut types = Vec::new();
     for (ir, t) in ctx.defs.clone() {
         let body = ctx.body(t);
+        if let Some(tag) = &t.type_tag {
+            // The standalone (FFI) form: `aimux_core::wire::Tagged`.
+            let name = format!("Tagged{ir}");
+            match tagged(&body, tag) {
+                Some(_) if ctx.defs.contains_key(&name) => ctx.errors.push(format!(
+                    "{}: wire name `{name}` (TypeTag form of {}) is not unique",
+                    t.source, t.name
+                )),
+                Some(b) => types.push(WireType {
+                    name,
+                    doc_source: t.source.clone(),
+                    body: b,
+                }),
+                None => ctx.errors.push(format!(
+                    "{}: {}: `TypeTag` on a type that is not a record or an internally tagged union",
+                    t.source, t.name
+                )),
+            }
+        }
         types.push(WireType {
             name: ir,
             doc_source: t.source.clone(),
@@ -359,9 +429,24 @@ impl<'a> Ctx<'a> {
                 out.extend(self.flattened(owner, f, 0));
                 continue;
             }
-            out.push(self.field(f, &owner.source, conc));
+            let w = self.field(f, &owner.source, conc);
+            self.check_tri_state(owner, f, &w);
+            out.push(w);
         }
         out
+    }
+
+    /// A tri-state field (`null.input = distinct`) must also be skipped when
+    /// `None` (`skip_serializing_if`): the Go `TriState[T]` + `omitzero`
+    /// (emit/go.rs) writes the absent state by omitting the key, which is
+    /// only the Rust output when serde skips it too.
+    fn check_tri_state(&mut self, owner: &TypeDef, f: &FieldDef, w: &WireField) {
+        if w.presence.tri_state && !w.presence.skip_if_empty {
+            self.errors.push(format!(
+                "{}:{}: {}.{}: tri-state field (null input `distinct`) without `skip_serializing_if`: absent and null cannot both round-trip",
+                owner.source, f.line, owner.name, f.rust
+            ));
+        }
     }
 
     fn flattened(&mut self, owner: &TypeDef, f: &FieldDef, depth: usize) -> Vec<WireField> {
@@ -384,7 +469,9 @@ impl<'a> Ctx<'a> {
                     if inner.flatten {
                         out.extend(self.flattened(def, inner, depth + 1));
                     } else {
-                        out.push(self.field(inner, &def.source, &conc));
+                        let w = self.field(inner, &def.source, &conc);
+                        self.check_tri_state(def, inner, &w);
+                        out.push(w);
                     }
                 }
                 return out;
@@ -422,6 +509,22 @@ impl<'a> Ctx<'a> {
             }
             other => other.clone(),
         };
+        if let TypeRef::Codec {
+            wire: CodecWire::Literal(lit),
+            ..
+        } = &inner
+        {
+            // Read with the tag optional, never skipped when written.
+            presence.omittable = true;
+            presence.skip_if_empty = false;
+            return WireField {
+                wire: f.wire.clone(),
+                rust: f.rust.clone(),
+                ty: WireTy::Literal(lit.clone()),
+                presence,
+                aliases: f.aliases.clone(),
+            };
+        }
         let ty = if let TypeRef::Codec {
             wire: CodecWire::Type(declared),
             ..
@@ -471,6 +574,10 @@ impl<'a> Ctx<'a> {
                 wire: CodecWire::Type(declared),
                 ..
             } => self.ty(declared, source, conc),
+            TypeRef::Codec {
+                wire: CodecWire::Literal(lit),
+                ..
+            } => WireTy::Literal(lit.clone()),
             TypeRef::Codec { rust, .. } => match parse_type_ref(rust) {
                 Some(TypeRef::Ref { name, .. }) => {
                     let ir = self.resolve(&name, source);
@@ -512,7 +619,7 @@ pub fn referenced(t: &WireTy) -> BTreeSet<String> {
                 walk(value, out);
             }
             WireTy::Tuple(items) => items.iter().for_each(|i| walk(i, out)),
-            WireTy::Prim(_) | WireTy::Json => {}
+            WireTy::Prim(_) | WireTy::Json | WireTy::Literal(_) => {}
         }
     }
     walk(t, &mut out);
@@ -566,6 +673,7 @@ mod tests {
             concrete: BTreeMap::new(),
             proxy: BTreeMap::new(),
             ts_override: None,
+            type_tag: None,
             shape,
         }
     }
@@ -593,8 +701,24 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(names, sorted);
-        // v4 manifest: 210 types + 2 auxiliary + 10 aliases.
-        assert_eq!(m.types.len(), 222);
+        // v4 manifest: 210 types + 2 auxiliary + 10 aliases, plus the 4
+        // `Tagged*` forms of the `TypeTag` types (ToolCall, RawToolCall,
+        // Source, TypedToolResult).
+        assert_eq!(m.types.len(), 226);
+        let tagged: Vec<&str> = names
+            .iter()
+            .copied()
+            .filter(|n| {
+                [
+                    "TaggedToolCall",
+                    "TaggedRawToolCall",
+                    "TaggedSource",
+                    "TaggedTypedToolResult",
+                ]
+                .contains(n)
+            })
+            .collect();
+        assert_eq!(tagged.len(), 4);
     }
 
     #[test]
@@ -724,6 +848,40 @@ mod tests {
         };
         let wires: Vec<&str> = fields.iter().map(|f| f.wire.as_str()).collect();
         assert_eq!(wires, ["a", "b"]);
+    }
+
+    /// A tri-state field without `skip_serializing_if` cannot round-trip
+    /// through `TriState[T]` + `omitzero` (emit/go.rs): generation error.
+    #[test]
+    fn tri_state_without_skip_is_an_error() {
+        let mut f = field("body", "body", TypeRef::Option(Box::new(TypeRef::Json)));
+        f.default = true;
+        f.serde_with = Some("deserialize_with=present".into());
+        f.null = crate::extract::NullHandling {
+            input: "distinct",
+            output: "asValue",
+        };
+        f.line = 9;
+        let model = |f: FieldDef| Model {
+            types: vec![def("R", record(vec![f]))],
+            auxiliary_types: vec![],
+            aliases: BTreeMap::new(),
+        };
+        let err = lower(&model(f.clone())).unwrap_err();
+        assert_eq!(
+            err,
+            [
+                "x.rs:9: R.body: tri-state field (null input `distinct`) without `skip_serializing_if`: absent and null cannot both round-trip"
+            ]
+        );
+        // With `skip_serializing_if = "Option::is_none"` it lowers.
+        f.omit_when_empty = true;
+        f.omitted_when = Some("Option::is_none".into());
+        let m = lower(&model(f)).unwrap();
+        let WireBody::Record { fields } = &get(&m, "R").body else {
+            panic!()
+        };
+        assert!(fields[0].presence.tri_state && fields[0].presence.skip_if_empty);
     }
 
     #[test]

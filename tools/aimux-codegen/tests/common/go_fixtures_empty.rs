@@ -10,7 +10,8 @@
 
 use serde_json::Value;
 
-use super::{Back, back};
+#[allow(unused_imports)]
+use super::{Back, back, back_tagged};
 
 fn v<T: serde::Serialize>(x: &T) -> Value {
     serde_json::to_value(x).expect("serde serializes the aimux-core value")
@@ -701,9 +702,9 @@ pub fn empty_fixtures() -> Vec<(&'static str, &'static str, Value, Option<Back>)
                     dynamic: None,
                     provider_metadata: None,
                 };
-                v(&x)
+                v(&aimux_core::wire::Tagged(&x))
             },
-            Some(back::<aimux_core::tool::RawToolCall>),
+            Some(back_tagged::<aimux_core::tool::RawToolCall>),
         ),
         (
             "empty-ReasoningEffort",
@@ -923,9 +924,9 @@ pub fn empty_fixtures() -> Vec<(&'static str, &'static str, Value, Option<Back>)
                     title: None,
                     provider_metadata: None,
                 };
-                v(&x)
+                v(&aimux_core::wire::Tagged(&x))
             },
-            Some(back::<aimux_core::result::Source>),
+            Some(back_tagged::<aimux_core::result::Source>),
         ),
         (
             "empty-SpeechCallOptions",
@@ -1157,9 +1158,9 @@ pub fn empty_fixtures() -> Vec<(&'static str, &'static str, Value, Option<Back>)
                     invalid: None,
                     error: None,
                 };
-                v(&x)
+                v(&aimux_core::wire::Tagged(&x))
             },
-            Some(back::<aimux_core::tool::ToolCall>),
+            Some(back_tagged::<aimux_core::tool::ToolCall>),
         ),
         (
             "empty-ToolChoice",

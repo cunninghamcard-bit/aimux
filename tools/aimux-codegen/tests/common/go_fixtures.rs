@@ -10,7 +10,8 @@
 
 use serde_json::Value;
 
-use super::{Back, back};
+#[allow(unused_imports)]
+use super::{Back, back, back_tagged};
 
 fn v<T: serde::Serialize>(x: &T) -> Value {
     serde_json::to_value(x).expect("serde serializes the aimux-core value")
@@ -1294,9 +1295,9 @@ pub fn coverage_fixtures() -> Vec<(&'static str, &'static str, Value, Option<Bac
                             .collect(),
                     ),
                 };
-                v(&x)
+                v(&aimux_core::wire::Tagged(&x))
             },
-            Some(back::<aimux_core::tool::RawToolCall>),
+            Some(back_tagged::<aimux_core::tool::RawToolCall>),
         ),
         (
             "cov-ReasoningEffort-ProviderDefault",
@@ -1659,9 +1660,9 @@ pub fn coverage_fixtures() -> Vec<(&'static str, &'static str, Value, Option<Bac
                             .collect(),
                     ),
                 };
-                v(&x)
+                v(&aimux_core::wire::Tagged(&x))
             },
-            Some(back::<aimux_core::result::Source>),
+            Some(back_tagged::<aimux_core::result::Source>),
         ),
         (
             "cov-Source-Document",
@@ -1678,9 +1679,9 @@ pub fn coverage_fixtures() -> Vec<(&'static str, &'static str, Value, Option<Bac
                             .collect(),
                     ),
                 };
-                v(&x)
+                v(&aimux_core::wire::Tagged(&x))
             },
-            Some(back::<aimux_core::result::Source>),
+            Some(back_tagged::<aimux_core::result::Source>),
         ),
         (
             "cov-SpeechCallOptions",
@@ -2589,9 +2590,9 @@ pub fn coverage_fixtures() -> Vec<(&'static str, &'static str, Value, Option<Bac
                         "x".to_string(),
                     )),
                 };
-                v(&x)
+                v(&aimux_core::wire::Tagged(&x))
             },
-            Some(back::<aimux_core::tool::ToolCall>),
+            Some(back_tagged::<aimux_core::tool::ToolCall>),
         ),
         (
             "cov-ToolChoice-0",

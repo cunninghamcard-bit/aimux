@@ -20,6 +20,8 @@
 mod go_fixtures;
 #[path = "common/go_fixtures_empty.rs"]
 mod go_fixtures_empty;
+#[path = "common/go_fixtures_tri.rs"]
+mod go_fixtures_tri;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -61,6 +63,55 @@ pub type Back = fn(&Value) -> Result<Value, String>;
 pub fn back<T: serde::Serialize + serde::de::DeserializeOwned>(v: &Value) -> Result<Value, String> {
     let t: T = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
     serde_json::to_value(&t).map_err(|e| e.to_string())
+}
+
+/// [`Back`] for a `TypeTag` type sampled where it is used standalone (FFI
+/// JSON, e.g. aimux-ffi/src/lib.rs:1972, parse_tool_call.rs:625,
+/// generate.rs:575-583): read as `aimux_core::wire::typed` reads it (the
+/// tag optional, but when present it must be `T::TYPE`), written back with
+/// `aimux_core::wire::Tagged`.
+///
+/// # Errors
+///
+/// serde rejects the value.
+pub fn back_tagged<T>(v: &Value) -> Result<Value, String>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned + aimux_core::wire::TypeTag,
+{
+    let t: T = aimux_core::wire::typed::deserialize(v.clone()).map_err(|e| e.to_string())?;
+    serde_json::to_value(aimux_core::wire::Tagged(&t)).map_err(|e| e.to_string())
+}
+
+/// Generated Go type for a fixture type: a `TypeTag` type is sampled in
+/// its standalone (tagged) form, which the generator emits as `Tagged<T>`.
+fn gen_name(ty: &str) -> String {
+    static TAGGED: std::sync::OnceLock<BTreeSet<String>> = std::sync::OnceLock::new();
+    let tagged = TAGGED.get_or_init(|| {
+        let m: Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                workspace().join("tools/aimux-codegen/generated/manifest.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        m["types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| t.get("typeTag").is_some())
+            .map(|t| {
+                t["tsName"]
+                    .as_str()
+                    .unwrap_or(t["name"].as_str().unwrap())
+                    .to_string()
+            })
+            .collect()
+    });
+    if tagged.contains(ty) {
+        format!("Tagged{ty}")
+    } else {
+        ty.to_string()
+    }
 }
 
 /// One fixture: label, Go type name (same in both packages), serde output.
@@ -259,7 +310,14 @@ fn fixtures() -> Vec<Fixture> {
                 raw: Some("tool_use".into()),
             },
         ),
-        fxd("tool-call", "ToolCall", &tool_call),
+        Fixture {
+            back: Some(back_tagged::<ToolCall>),
+            ..fx(
+                "tool-call",
+                "ToolCall",
+                &aimux_core::wire::Tagged(&tool_call),
+            )
+        },
         fxd(
             "response-metadata-empty",
             "ResponseMetadata",
@@ -584,14 +642,27 @@ fn run_go(label: &str, fixtures: &[Fixture], mutate: impl Fn(String) -> String) 
     .unwrap();
     let hand = hand_types();
     let mut cases = String::new();
-    for t in fixtures.iter().map(|f| f.ty).collect::<BTreeSet<_>>() {
+    // `zero-` fixtures: `ty` is a generated-Go composite literal; the Go
+    // value itself is encoded (no input).
+    let mut zeros = String::new();
+    for f in fixtures.iter().filter(|f| f.label.starts_with("zero-")) {
+        zeros.push_str(&format!("\t{:?}: gen.{},\n", f.label, f.ty));
+    }
+    for t in fixtures
+        .iter()
+        .filter(|f| !f.label.starts_with("zero-"))
+        .map(|f| f.ty)
+        .collect::<BTreeSet<_>>()
+    {
         if hand.contains(t) {
             cases.push_str(&format!(
-                "\t\tcase {t:?}:\n\t\t\tr = run[gen.{t}, hand.{t}](f.Label, f.JSON)\n"
+                "\t\tcase {t:?}:\n\t\t\tr = run[gen.{g}, hand.{t}](f.Label, f.JSON)\n",
+                g = gen_name(t)
             ));
         } else {
             cases.push_str(&format!(
-                "\t\tcase {t:?}:\n\t\t\tr = result{{Label: f.Label}}\n\t\t\tr.GenOut, r.GenErr = through[gen.{t}](f.JSON)\n"
+                "\t\tcase {t:?}:\n\t\t\tr = result{{Label: f.Label}}\n\t\t\tr.GenOut, r.GenErr = through[gen.{g}](f.JSON)\n",
+                g = gen_name(t)
             ));
         }
     }
@@ -622,6 +693,9 @@ type result struct {{
 	GenErr  string          `json:"gen_err"`
 	HandErr string          `json:"hand_err"`
 }}
+
+var zeros = map[string]any{{
+{zeros}}}
 
 func through[T any](in []byte) (json.RawMessage, string) {{
 	var v T
@@ -656,6 +730,17 @@ func main() {{
 	}}{{}}
 	for _, f := range fixtures {{
 		var r result
+		if z, ok := zeros[f.Label]; ok {{
+			r = result{{Label: f.Label}}
+			b, err := json.Marshal(z)
+			if err != nil {{
+				r.GenErr = "encode: " + err.Error()
+			}} else {{
+				r.GenOut = b
+			}}
+			out.Results = append(out.Results, r)
+			continue
+		}}
 		switch f.Type {{
 {cases}		default:
 			panic("no Go type for " + f.Type)
@@ -716,12 +801,14 @@ fn child<'a>(v: Option<&'a Value>, key: &str) -> Option<&'a Value> {
 
 /// Compare `gen` and `hand` at every path of `truth` ∪ `hand`. Keys only
 /// the generated output has are returned in `gen_extra`.
+#[allow(clippy::too_many_arguments)]
 fn diff(
     ty: &str,
     path: &str,
     truth: Option<&Value>,
     gen_v: Option<&Value>,
     hand: Option<&Value>,
+    floats: &BTreeSet<String>,
     rows: &mut Vec<Row>,
     gen_extra: &mut Vec<String>,
 ) {
@@ -761,6 +848,7 @@ fn diff(
                 child(truth, &k),
                 child(gen_v, &k),
                 child(hand, &k),
+                floats,
                 rows,
                 gen_extra,
             );
@@ -790,6 +878,7 @@ fn diff(
                 at(truth, i),
                 at(gen_v, i),
                 at(hand, i),
+                floats,
                 rows,
                 gen_extra,
             );
@@ -797,7 +886,7 @@ fn diff(
         return;
     }
     let same = match (gen_v, hand) {
-        (Some(g), Some(h)) => json_eq(g, h),
+        (Some(g), Some(h)) => json_eq_at(g, h, path, floats),
         (g, h) => g == h,
     };
     if !same {
@@ -823,26 +912,188 @@ struct Compared {
     errors: Vec<String>,
 }
 
-/// JSON equality where numbers compare by value: Go's encoding/json writes
-/// an `f64` zero as `0`, serde as `0.0`; both decode to the same `f64`
-/// (serde accepts either), so this is not a wire difference.
-fn json_eq(a: &Value, b: &Value) -> bool {
+/// The IR, for type-directed comparison.
+fn ir() -> &'static BTreeMap<String, wire::WireType> {
+    static IR: std::sync::OnceLock<BTreeMap<String, wire::WireType>> = std::sync::OnceLock::new();
+    IR.get_or_init(|| {
+        wire::from_inputs(&Inputs::from_workspace(&workspace()))
+            .unwrap()
+            .types
+            .into_iter()
+            .map(|t| (t.name.clone(), t))
+            .collect()
+    })
+}
+
+fn join_key(path: &str, k: &str) -> String {
+    if path.is_empty() {
+        k.to_string()
+    } else {
+        format!("{path}.{k}")
+    }
+}
+
+/// JSON paths (in [`diff`]'s `a.b[0]` form) of `v` whose IR type is an
+/// `f32` / `f64` primitive, found by walking `v` along the IR type `ty`.
+fn float_paths(ty: &str, v: &Value) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    walk_ty(&wire::WireTy::Named(ty.into()), v, "", &mut out, 0);
+    out
+}
+
+fn walk_ty(ty: &wire::WireTy, v: &Value, path: &str, out: &mut BTreeSet<String>, depth: usize) {
+    use wire::WireTy as T;
+    if depth > 64 {
+        return;
+    }
+    match ty {
+        T::Prim(p) if p == "f32" || p == "f64" => {
+            out.insert(path.to_string());
+        }
+        T::Nullable(i) => walk_ty(i, v, path, out, depth + 1),
+        T::Array(i) => {
+            for (n, x) in v.as_array().into_iter().flatten().enumerate() {
+                walk_ty(i, x, &format!("{path}[{n}]"), out, depth + 1);
+            }
+        }
+        T::Tuple(items) => {
+            for (n, (i, x)) in items
+                .iter()
+                .zip(v.as_array().into_iter().flatten())
+                .enumerate()
+            {
+                walk_ty(i, x, &format!("{path}[{n}]"), out, depth + 1);
+            }
+        }
+        T::Map { value, .. } => {
+            for (k, x) in v.as_object().into_iter().flatten() {
+                walk_ty(value, x, &join_key(path, k), out, depth + 1);
+            }
+        }
+        T::Named(n) => {
+            if let Some(t) = ir().get(n) {
+                walk_body(&t.body, v, path, out, depth + 1);
+            }
+        }
+        T::Prim(_) | T::Json | T::Literal(_) => {}
+    }
+}
+
+fn walk_fields(
+    fields: &[wire::WireField],
+    v: &Value,
+    path: &str,
+    out: &mut BTreeSet<String>,
+    depth: usize,
+) {
+    for f in fields {
+        if let Some(x) = v.get(&f.wire) {
+            walk_ty(&f.ty, x, &join_key(path, &f.wire), out, depth);
+        }
+    }
+}
+
+fn walk_variant(
+    b: &wire::VariantBody,
+    v: &Value,
+    path: &str,
+    out: &mut BTreeSet<String>,
+    depth: usize,
+) {
+    match b {
+        wire::VariantBody::Unit => {}
+        wire::VariantBody::Fields(fields) => walk_fields(fields, v, path, out, depth),
+        wire::VariantBody::Value(t) => walk_ty(t, v, path, out, depth),
+        wire::VariantBody::Tuple(items) => {
+            walk_ty(&wire::WireTy::Tuple(items.clone()), v, path, out, depth);
+        }
+    }
+}
+
+fn walk_body(
+    body: &wire::WireBody,
+    v: &Value,
+    path: &str,
+    out: &mut BTreeSet<String>,
+    depth: usize,
+) {
+    use wire::{UnionRepr as R, WireBody as B};
+    match body {
+        B::Record { fields } => walk_fields(fields, v, path, out, depth),
+        B::Alias(t) => walk_ty(t, v, path, out, depth),
+        B::StringEnum { .. } => {}
+        B::Union { repr, variants } => {
+            let named = |tag: &str| {
+                variants
+                    .iter()
+                    .find(|x| x.wire.as_deref() == Some(tag) || x.aliases.iter().any(|a| a == tag))
+            };
+            match repr {
+                R::Internal { tag } => {
+                    if let Some(x) = v.get(tag).and_then(Value::as_str).and_then(named) {
+                        walk_variant(&x.body, v, path, out, depth);
+                    }
+                }
+                R::Adjacent { tag, content } => {
+                    if let (Some(x), Some(c)) = (
+                        v.get(tag).and_then(Value::as_str).and_then(named),
+                        v.get(content),
+                    ) {
+                        walk_variant(&x.body, c, &join_key(path, content), out, depth);
+                    }
+                }
+                R::External => {
+                    if let Some((k, c)) = v
+                        .as_object()
+                        .filter(|o| o.len() == 1)
+                        .and_then(|o| o.iter().next())
+                        && let Some(x) = named(k)
+                    {
+                        walk_variant(&x.body, c, &join_key(path, k), out, depth);
+                    }
+                }
+                // serde tries each variant; any variant's float path counts.
+                R::Untagged => {
+                    for x in variants {
+                        walk_variant(&x.body, v, path, out, depth);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// JSON equality. Numbers at a path the IR types `f32` / `f64` (see
+/// [`float_paths`]) compare by value: Go's encoding/json writes an `f64`
+/// zero as `0`, serde as `0.0`, and both decode to the same `f64`. Every
+/// other number, integers included, must be the same JSON number exactly.
+fn json_eq_at(a: &Value, b: &Value, path: &str, floats: &BTreeSet<String>) -> bool {
     match (a, b) {
-        (Value::Number(x), Value::Number(y)) => x == y || x.as_f64() == y.as_f64(),
+        (Value::Number(x), Value::Number(y)) => {
+            x == y || (floats.contains(path) && x.as_f64() == y.as_f64())
+        }
         (Value::Array(x), Value::Array(y)) => {
-            x.len() == y.len() && x.iter().zip(y).all(|(a, b)| json_eq(a, b))
+            x.len() == y.len()
+                && x.iter()
+                    .zip(y)
+                    .enumerate()
+                    .all(|(n, (a, b))| json_eq_at(a, b, &format!("{path}[{n}]"), floats))
         }
         (Value::Object(x), Value::Object(y)) => {
             x.len() == y.len()
-                && x.iter()
-                    .all(|(k, v)| y.get(k).is_some_and(|w| json_eq(v, w)))
+                && x.iter().all(|(k, v)| {
+                    y.get(k)
+                        .is_some_and(|w| json_eq_at(v, w, &join_key(path, k), floats))
+                })
         }
         _ => a == b,
     }
 }
 
-fn gen_is(out: Option<&Value>, truth: &Value) -> bool {
-    out.is_some_and(|o| json_eq(o, truth))
+/// The generated output equals `truth` (a value of IR type `ty`).
+fn gen_is(out: Option<&Value>, truth: &Value, ty: &str) -> bool {
+    let floats = float_paths(&gen_name(ty), truth);
+    out.is_some_and(|o| json_eq_at(o, truth, "", &floats))
 }
 
 fn compare(fixtures: &[Fixture], run: &GoRun) -> Compared {
@@ -863,7 +1114,7 @@ fn compare(fixtures: &[Fixture], run: &GoRun) -> Compared {
         // the same value.
         if let (Some(back), Some(out)) = (f.back, r.gen_out.as_ref()) {
             match back(out) {
-                Ok(v) if json_eq(&v, &f.json) => {}
+                Ok(v) if json_eq_at(&v, &f.json, "", &float_paths(&gen_name(f.ty), &f.json)) => {}
                 Ok(v) => c.gen_mismatch.push(format!(
                     "{}: serde decode of the generated Go output gives {v}, not {}",
                     f.label, f.json
@@ -875,7 +1126,7 @@ fn compare(fixtures: &[Fixture], run: &GoRun) -> Compared {
             }
         }
         if !hand.contains(f.ty) {
-            if !gen_is(r.gen_out.as_ref(), &f.json) {
+            if !gen_is(r.gen_out.as_ref(), &f.json, f.ty) {
                 c.gen_mismatch.push(format!(
                     "{}: rust {} != generated {}",
                     f.label,
@@ -894,7 +1145,7 @@ fn compare(fixtures: &[Fixture], run: &GoRun) -> Compared {
                 truth: "ok".into(),
             });
             // The hand-written side has no output to compare field by field.
-            if !gen_is(r.gen_out.as_ref(), &f.json) {
+            if !gen_is(r.gen_out.as_ref(), &f.json, f.ty) {
                 c.gen_mismatch.push(format!(
                     "{}: rust {} != generated {}",
                     f.label,
@@ -904,7 +1155,7 @@ fn compare(fixtures: &[Fixture], run: &GoRun) -> Compared {
             }
             continue;
         }
-        if !gen_is(r.gen_out.as_ref(), &f.json) {
+        if !gen_is(r.gen_out.as_ref(), &f.json, f.ty) {
             c.gen_mismatch.push(format!(
                 "{}: rust {} != generated {}",
                 f.label,
@@ -916,7 +1167,7 @@ fn compare(fixtures: &[Fixture], run: &GoRun) -> Compared {
         // fields are all `json:"-"`) drops the whole value: one row.
         let empty = r.hand_out.as_ref().is_some_and(|h| h == &json!({}));
         if empty && f.json.as_object().is_some_and(|o| !o.is_empty()) {
-            if !gen_is(r.gen_out.as_ref(), &f.json) {
+            if !gen_is(r.gen_out.as_ref(), &f.json, f.ty) {
                 c.gen_mismatch
                     .push(format!("{}: rust {} != generated", f.label, f.json));
             }
@@ -935,6 +1186,7 @@ fn compare(fixtures: &[Fixture], run: &GoRun) -> Compared {
             Some(&f.json),
             r.gen_out.as_ref(),
             r.hand_out.as_ref(),
+            &float_paths(&gen_name(f.ty), &f.json),
             &mut c.rows,
             &mut c.gen_extra,
         );
@@ -1045,7 +1297,12 @@ fn render(fixtures: &[Fixture], rows: &[Row], v: &BTreeMap<(String, String), Str
         "<!-- Generated by tools/aimux-codegen/tests/wire_diff_go.rs; do not edit.\n     Regenerate: AIMUX_BLESS_DIFF=1 cargo test -p aimux-codegen --test wire_diff_go\n     Verdicts: docs/plan/2.2-diff-go-verdicts.json -->\n\n# 2.2: generated Go vs hand-written Go\n\n",
     );
     s.push_str("Each fixture is a real aimux-core value serialized with serde (the truth). It is decoded and re-marshaled by the generated Go (`aimux-codegen --emit go`) and by the hand-written `bindings/go/types.go` + `multimodal_types.go` + the `RawToolCall` type and codec from `repair.go` (the rest of repair.go needs cgo). A row is a JSON path where the two outputs differ. The verdict says which side disagrees with the Rust output. The test also requires the generated output to equal the Rust output for every fixture.\n\n");
-    s.push_str("## Rules\n\n- Numbers are compared by numeric value: Go's encoding/json writes an `f64` zero as `0`, serde as `0.0`; they are the same JSON value and decode to the same `f64` (`json_eq`, tools/aimux-codegen/tests/wire_diff_go.rs:826). No other normalization is applied.\n- Every `手写错` row below is a U1 finding about the hand-written Go. U1 does not modify the hand-written Go; it is removed in U3, when the generated code replaces it.\n\n");
+    let json_eq_line = include_str!("wire_diff_go.rs")
+        .lines()
+        .position(|l| l.starts_with("fn json_eq_at("))
+        .unwrap()
+        + 1;
+    s.push_str(&format!("## Rules\n\n- Numbers are compared by numeric value only at JSON paths whose IR type is `f32` / `f64` (`float_paths` + `json_eq_at`, tools/aimux-codegen/tests/wire_diff_go.rs:{json_eq_line}): Go writes an `f64` zero as `0`, serde as `0.0`, the same JSON value. Every other number, integers included, must match exactly (2^53+1 ≠ 2^53). No other normalization is applied.\n- A `TypeTag` type (`ToolCall`, `RawToolCall`, `Source`) is sampled where the FFI uses it standalone, with its `type` tag (`aimux_core::wire::Tagged` / `typed` / `typed_vec`: aimux-ffi/src/lib.rs:1972, aimux-core/src/parse_tool_call.rs:625, aimux-core/src/generate.rs:575-583), and compared with the generated `Tagged<T>`.\n- Every `手写错` row below is a U1 finding about the hand-written Go. U1 does not modify the hand-written Go; it is removed in U3, when the generated code replaces it.\n\n"));
     s.push_str("## Fixtures\n\n| label | type | serde output |\n|---|---|---|\n");
     for f in fixtures {
         s.push_str(&format!(
@@ -1260,8 +1517,9 @@ fn mutated_wire_name_is_reported_as_exactly_one_row() {
         .collect();
     let base = compare(&fixtures, &run_go("base", &fixtures, |s| s));
     let mutated_run = run_go("mutated", &fixtures, |s| {
-        // Only types.go declares ToolCall; other files pass through.
-        let Some(start) = s.find("\ntype ToolCall struct {") else {
+        // Only types.go declares TaggedToolCall (the generated form of a
+        // standalone ToolCall); other files pass through.
+        let Some(start) = s.find("\ntype TaggedToolCall struct {") else {
             return s;
         };
         let end = start + s[start..].find("\n}\n").unwrap();
@@ -1561,7 +1819,7 @@ fn omitted_and_null_samples_match_manifest_presence() {
         }
         if !r.gen_err.is_empty() {
             problems.push(format!("{label}: generated Go rejects: {}", r.gen_err));
-        } else if !gen_is(r.gen_out.as_ref(), &truth) {
+        } else if !gen_is(r.gen_out.as_ref(), &truth, f.ty) {
             problems.push(format!(
                 "{label}: serde {truth} != generated {}",
                 show(r.gen_out.as_ref())
@@ -1570,4 +1828,369 @@ fn omitted_and_null_samples_match_manifest_presence() {
     }
     assert_eq!(problems, Vec::<String>::new(), "{} samples", samples.len());
     eprintln!("presence samples: {}", samples.len());
+}
+
+// U1 review (A) items 1, 3, 5 -----------------------------------------------
+
+/// Replace, on struct-field lines only (those with a `json:"type"` tag),
+/// a `Lit*` fixed-value field type by `json.RawMessage`: the generated Go
+/// as it was before `WireTy::Literal` (the fallback).
+fn literal_as_fallback(s: String) -> String {
+    s.lines()
+        .map(|l| {
+            if l.contains("`json:\"type\"`")
+                && let Some(i) = l.find(" Lit")
+            {
+                let end = l[i + 1..].find(' ').map_or(l.len(), |e| i + 1 + e);
+                format!("{} json.RawMessage{}", &l[..i], &l[end..])
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+/// Fixed `type` tag cases. (a) `zero-*`: a Go zero value (a union with
+/// only its variant tag set) encoded; serde (`wire::typed`) must accept the
+/// output and the tag must be written. (b) `untagged-*`: serde's plain
+/// (untagged) JSON of the value decoded and re-encoded by the generated Go;
+/// the output must equal `aimux_core::wire::Tagged` of the value and serde
+/// must accept it. Types: the TS-only wrappers (`TypedToolCall`,
+/// `TaggedToolResult`, `TypedSource`) and the `TypeTag` forms (`Tagged*`).
+fn literal_cases() -> (Vec<Fixture>, Vec<(&'static str, &'static str, Value)>) {
+    use aimux_core::result::{Source, TypedToolResult};
+    use aimux_core::tool::RawToolCall;
+    let tc: Back = back_tagged::<ToolCall>;
+    let rtc: Back = back_tagged::<RawToolCall>;
+    let tr: Back = back_tagged::<TypedToolResult>;
+    let src: Back = back_tagged::<Source>;
+    let zero = |label, ty, back| Fixture {
+        label,
+        ty,
+        json: Value::Null,
+        back: Some(back),
+    };
+    let mut fixtures = vec![
+        zero("zero-TypedToolCall", "TypedToolCall{}", tc),
+        zero("zero-TaggedToolCall", "TaggedToolCall{}", tc),
+        zero("zero-TaggedRawToolCall", "TaggedRawToolCall{}", rtc),
+        zero("zero-TaggedToolResult", "TaggedToolResult{}", tr),
+        zero("zero-TaggedTypedToolResult", "TaggedTypedToolResult{}", tr),
+        zero(
+            "zero-TypedSource-url",
+            "TypedSource{Tag: \"url\", Value: gen.TypedSourceUrl{}}",
+            src,
+        ),
+        zero(
+            "zero-TypedSource-document",
+            "TypedSource{Tag: \"document\", Value: gen.TypedSourceDocument{}}",
+            src,
+        ),
+        zero(
+            "zero-TaggedSource-url",
+            "TaggedSource{Tag: \"url\", Value: gen.TaggedSourceUrl{}}",
+            src,
+        ),
+        zero(
+            "zero-TaggedSource-document",
+            "TaggedSource{Tag: \"document\", Value: gen.TaggedSourceDocument{}}",
+            src,
+        ),
+    ];
+    fn pair<T>(v: Value) -> (Value, Value)
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned + aimux_core::wire::TypeTag,
+    {
+        let t: T = serde_json::from_value(v).unwrap();
+        (
+            serde_json::to_value(&t).unwrap(),
+            serde_json::to_value(aimux_core::wire::Tagged(&t)).unwrap(),
+        )
+    }
+    let call = json!({"toolCallId": "c1", "toolName": "t", "input": {"a": 1}});
+    let raw = json!({"toolCallId": "c1", "toolName": "t", "input": "{\"a\":1}"});
+    let result = json!({"toolCallId": "c1", "toolName": "t", "output": {"ok": true}});
+    let url = json!({"sourceType": "url", "id": "s1", "url": "https://example.com"});
+    let doc =
+        json!({"sourceType": "document", "id": "d1", "mediaType": "text/plain", "title": "T"});
+    let mut tagged = Vec::new();
+    for (label, ty, (plain, truth), back) in [
+        (
+            "untagged-TypedToolCall",
+            "TypedToolCall",
+            pair::<ToolCall>(call.clone()),
+            tc,
+        ),
+        (
+            "untagged-TaggedToolCall",
+            "TaggedToolCall",
+            pair::<ToolCall>(call),
+            tc,
+        ),
+        (
+            "untagged-TaggedRawToolCall",
+            "TaggedRawToolCall",
+            pair::<RawToolCall>(raw),
+            rtc,
+        ),
+        (
+            "untagged-TaggedToolResult",
+            "TaggedToolResult",
+            pair::<TypedToolResult>(result.clone()),
+            tr,
+        ),
+        (
+            "untagged-TaggedTypedToolResult",
+            "TaggedTypedToolResult",
+            pair::<TypedToolResult>(result),
+            tr,
+        ),
+        (
+            "untagged-TypedSource-url",
+            "TypedSource",
+            pair::<Source>(url.clone()),
+            src,
+        ),
+        (
+            "untagged-TypedSource-document",
+            "TypedSource",
+            pair::<Source>(doc.clone()),
+            src,
+        ),
+        (
+            "untagged-TaggedSource-url",
+            "TaggedSource",
+            pair::<Source>(url),
+            src,
+        ),
+        (
+            "untagged-TaggedSource-document",
+            "TaggedSource",
+            pair::<Source>(doc),
+            src,
+        ),
+    ] {
+        assert!(plain.get("type").is_none(), "{label}: input is untagged");
+        fixtures.push(Fixture {
+            label,
+            ty,
+            json: plain,
+            back: Some(back),
+        });
+        tagged.push((label, ty, truth));
+    }
+    (fixtures, tagged)
+}
+
+/// Failing `(zero, untagged)` literal cases for the generated Go (`mutate`d).
+fn literal_failures(mutate: impl Fn(String) -> String) -> (usize, Vec<String>, usize, Vec<String>) {
+    let (fixtures, tagged) = literal_cases();
+    let run = run_go("literal", &fixtures, mutate);
+    let (mut zero, mut untagged) = (Vec::new(), Vec::new());
+    let mut n_zero = 0;
+    for (f, r) in fixtures.iter().zip(&run.results) {
+        assert_eq!(f.label, r.label);
+        let is_zero = f.label.starts_with("zero-");
+        n_zero += usize::from(is_zero);
+        let fail = if !r.gen_err.is_empty() {
+            Some(format!("{}: generated Go: {}", f.label, r.gen_err))
+        } else {
+            let out = r.gen_out.clone().unwrap_or(Value::Null);
+            let lit = f.back.unwrap()(&out);
+            match (&lit, is_zero) {
+                (Err(e), _) => Some(format!("{}: serde rejects {out}: {e}", f.label)),
+                (Ok(_), true) if !out.get("type").is_some_and(Value::is_string) => {
+                    Some(format!("{}: no `type` tag in {out}", f.label))
+                }
+                (Ok(_), false) => {
+                    let truth = &tagged.iter().find(|t| t.0 == f.label).unwrap().2;
+                    (out != *truth)
+                        .then(|| format!("{}: Tagged {truth} != generated {out}", f.label))
+                }
+                _ => None,
+            }
+        };
+        if let Some(m) = fail {
+            if is_zero {
+                zero.push(m);
+            } else {
+                untagged.push(m);
+            }
+        }
+    }
+    (n_zero, zero, fixtures.len() - n_zero, untagged)
+}
+
+/// Item 1: a `#[ts(type = "\"lit\"")]` field is a fixed value, always
+/// written. Mutation: the fallback (`json.RawMessage`) writes `"type":null`
+/// for a zero value and for untagged input, and every case of both classes
+/// goes red.
+#[test]
+fn fixed_type_tag_is_always_written() {
+    let (nz, zero, nu, untagged) = literal_failures(|s| s);
+    assert_eq!((nz, nu), (9, 9));
+    assert_eq!(
+        (zero.len(), untagged.len(), &zero, &untagged),
+        (0, 0, &Vec::<String>::new(), &Vec::<String>::new())
+    );
+    let (_, zero, _, untagged) = literal_failures(literal_as_fallback);
+    assert_eq!(zero.len(), nz, "{zero:#?}");
+    assert_eq!(untagged.len(), nu, "{untagged:#?}");
+}
+
+/// Every tri-state field (`null.input = distinct`) in the committed
+/// manifest, enum variant fields included: `(owner label, wire)`.
+fn tri_state_fields() -> Vec<(String, String)> {
+    let m: Value = serde_json::from_str(
+        &std::fs::read_to_string(workspace().join("tools/aimux-codegen/generated/manifest.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    let mut out = Vec::new();
+    for t in m["types"].as_array().unwrap() {
+        let go = t["tsName"].as_str().unwrap_or(t["name"].as_str().unwrap());
+        let distinct = |sh: &Value| -> Vec<String> {
+            sh["fields"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|f| f["null"]["input"] == "distinct")
+                .map(|f| f["wire"].as_str().unwrap().to_string())
+                .collect()
+        };
+        for w in distinct(&t["shape"]) {
+            out.push((format!("tri-{go}"), w));
+        }
+        for v in t["shape"]["variants"].as_array().into_iter().flatten() {
+            for w in distinct(&v["shape"]) {
+                out.push((format!("tri-{go}-{}", v["rust"].as_str().unwrap()), w));
+            }
+        }
+    }
+    out
+}
+
+/// Replace, on struct-field lines, `TriState[X]` + `omitzero` by `*X` +
+/// `omitempty`: the generated Go with `tri_state = false`.
+fn tri_state_as_pointer(s: String) -> String {
+    s.lines()
+        .map(|l| {
+            if l.contains("`json:")
+                && let Some(i) = l.find("TriState[")
+            {
+                let close = i + l[i..].find(']').unwrap();
+                format!("{}*{}{}", &l[..i], &l[i + 9..close], &l[close + 1..])
+                    .replace(",omitzero", ",omitempty")
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+/// Tri-state fields whose omitted or null sample fails: serde must land on
+/// absent / null, the generated Go must accept both samples and write
+/// exactly what serde writes.
+fn tri_state_red(mutate: impl Fn(String) -> String) -> (Vec<(String, String)>, BTreeSet<String>) {
+    let fields = tri_state_fields();
+    let owners = go_fixtures_tri::tri_state_fixtures();
+    let mut samples = Vec::new();
+    let mut expect = Vec::new();
+    for (owner, wire) in &fields {
+        let (_, ty, json, back) = owners
+            .iter()
+            .find(|o| o.0 == owner)
+            .unwrap_or_else(|| panic!("no fixture {owner}"));
+        let obj = json
+            .as_object()
+            .unwrap_or_else(|| panic!("{owner} is not an object"));
+        assert!(obj.contains_key(wire.as_str()), "{owner}: {wire} filled");
+        for (kind, want) in [("omitted", Key::Absent), ("null", Key::Null)] {
+            let mut o = obj.clone();
+            if kind == "omitted" {
+                o.remove(wire.as_str());
+            } else {
+                o.insert(wire.clone(), Value::Null);
+            }
+            let label: &'static str = Box::leak(format!("{owner}.{wire}-{kind}").into_boxed_str());
+            samples.push(Fixture {
+                label,
+                ty,
+                json: Value::Object(o),
+                back: *back,
+            });
+            expect.push((format!("{owner}.{wire}"), wire.clone(), want));
+        }
+    }
+    let run = run_go("tristate", &samples, mutate);
+    let mut red = BTreeSet::new();
+    for ((f, r), (field, wire, want)) in samples.iter().zip(&run.results).zip(&expect) {
+        assert_eq!(f.label, r.label);
+        let truth = f.back.expect("tri-state owners deserialize")(&f.json)
+            .unwrap_or_else(|e| panic!("{}: serde rejects the sample: {e}", f.label));
+        assert_eq!(
+            key_of(&truth, wire),
+            Some(*want),
+            "{}: manifest vs serde",
+            f.label
+        );
+        if !r.gen_err.is_empty() || !gen_is(r.gen_out.as_ref(), &truth, f.ty) {
+            red.insert(field.clone());
+        }
+    }
+    (fields, red)
+}
+
+/// Item 3: every tri-state field in the manifest (not only those with a
+/// hand-written counterpart). Mutation `tri_state = false`: every one is red.
+#[test]
+fn every_tri_state_field_round_trips_omitted_and_null() {
+    let (fields, red) = tri_state_red(|s| s);
+    let names: BTreeSet<String> = fields.iter().map(|(o, w)| format!("{o}.{w}")).collect();
+    assert_eq!(names.len(), 14, "{names:#?}");
+    assert!(names.contains("tri-ApiCallError.data"), "{names:#?}");
+    assert!(
+        names.contains("tri-AssistantContentPart-ToolApprovalRequest.inputSchemaInput"),
+        "{names:#?}"
+    );
+    assert_eq!(red, BTreeSet::new());
+    let (_, red) = tri_state_red(tri_state_as_pointer);
+    assert_eq!(red, names, "mutation: every tri-state field red");
+    eprintln!(
+        "tri-state fields: {}, red under mutation: {}",
+        names.len(),
+        red.len()
+    );
+}
+
+/// Item 5: integers compare exactly; only `f32` / `f64` paths by value.
+#[test]
+fn integers_compare_exactly_floats_by_value() {
+    let none = BTreeSet::new();
+    let (big, near) = (
+        json!(9_007_199_254_740_993_u64),
+        json!(9_007_199_254_740_992_u64),
+    );
+    assert_eq!(big.as_f64(), near.as_f64(), "the same f64");
+    assert!(!json_eq_at(&big, &near, "", &none));
+    // RerankingRank: `index` is an integer, `relevanceScore` an f64.
+    let truth = json!({"index": 9_007_199_254_740_993_u64, "relevanceScore": 0.0});
+    let floats = float_paths("RerankingRank", &truth);
+    assert_eq!(floats, BTreeSet::from(["relevanceScore".to_string()]));
+    let go = json!({"index": 9_007_199_254_740_993_u64, "relevanceScore": 0});
+    assert!(json_eq_at(&go, &truth, "", &floats));
+    let off = json!({"index": 9_007_199_254_740_992_u64, "relevanceScore": 0.0});
+    assert!(!json_eq_at(&off, &truth, "", &floats));
+    // An integer field written as 1.0 is a different JSON number.
+    let int_as_float = json!({"index": 1.0, "relevanceScore": 0.0});
+    assert!(!json_eq_at(
+        &int_as_float,
+        &json!({"index": 1, "relevanceScore": 0.0}),
+        "",
+        &floats
+    ));
 }

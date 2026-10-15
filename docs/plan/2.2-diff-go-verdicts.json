@@ -36,22 +36,10 @@
     "reason": "ImageResult.warnings has no skip_serializing_if: serde writes `[]`; the hand-written field is `omitempty` and drops it."
   },
   {
-    "type": "RawToolCall",
-    "field": "type",
-    "verdict": "手写错",
-    "reason": "v4 `RawToolCall` (tool.rs:123-126, `rename_all = \"camelCase\"`, no tag) has no `type` field; serde never writes one (fixtures cov-RawToolCall / empty-RawToolCall). The hand-written RawToolCall.MarshalJSON (bindings/go/repair.go:37-44) always adds `\"type\":\"tool-call\"`. The `type: \"tool-call\"` tag belongs to the TS-only `TypedToolCall` wrapper."
-  },
-  {
     "type": "SearchResult",
     "field": "warnings",
     "verdict": "手写错",
     "reason": "The Rust field `warnings` has no skip_serializing_if, so serde always writes it (empty value [], fixture empty-SearchResult); the hand-written Go field is `omitempty` and drops it."
-  },
-  {
-    "type": "Source",
-    "field": "type",
-    "verdict": "手写错",
-    "reason": "v4 `Source` (result.rs:280-286) is internally tagged by `sourceType` only; the `type: \"source\"` tag belongs to the TS-only `TypedSource` wrapper. The hand-written Source.MarshalJSON (types.go:118-131) always adds `\"type\":\"source\"`."
   },
   {
     "type": "SpeechResult",
@@ -100,12 +88,6 @@
     "field": "(all fields)",
     "verdict": "手写错",
     "reason": "The hand-written StreamPart is {Type, Raw} with `json:\"-\"` on both, so json.Marshal writes `{}` for every part."
-  },
-  {
-    "type": "ToolCall",
-    "field": "type",
-    "verdict": "手写错",
-    "reason": "v4 `ToolCall` (tool.rs:145) has no `type` field; the `type: \"tool-call\"` tag belongs to the TS-only `TypedToolCall` wrapper. The hand-written ToolCall.MarshalJSON (types.go:224-230) always adds `\"type\":\"tool-call\"`."
   },
   {
     "type": "TranscriptionCallOptions",

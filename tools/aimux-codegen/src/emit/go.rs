@@ -40,11 +40,13 @@ impl Emitter for Go {
         let mut g = Gen {
             names,
             out: String::new(),
+            literals: std::cell::RefCell::default(),
         };
         g.out.push_str(HEADER);
         for t in &model.types {
             g.ty(t);
         }
+        g.literal_types();
         vec![
             Output {
                 path: PathBuf::from("go.mod"),
@@ -257,6 +259,13 @@ func marshalPayload(v any) ([]byte, error) {
 struct Gen {
     names: BTreeSet<String>,
     out: String,
+    /// Fixed string values used as field types ([`WireTy::Literal`]).
+    literals: std::cell::RefCell<BTreeSet<String>>,
+}
+
+/// Go type name of a fixed-string field.
+fn literal_name(lit: &str) -> String {
+    format!("Lit{}", pascal(lit))
 }
 
 /// `snake_case` / `kebab-case` / `camelCase` text → `PascalCase` identifier.
@@ -354,6 +363,25 @@ impl Gen {
             WireTy::Named(n) if self.names.contains(n) => n.clone(),
             WireTy::Named(_) => "json.RawMessage".into(),
             WireTy::Nullable(i) => format!("*{}", self.go_ty(i)),
+            WireTy::Literal(lit) => {
+                self.literals.borrow_mut().insert(lit.clone());
+                literal_name(lit)
+            }
+        }
+    }
+
+    /// One empty struct per fixed string: its zero value marshals as the
+    /// string, and decoding accepts only that string.
+    fn literal_types(&mut self) {
+        let lits = self.literals.borrow().clone();
+        for lit in lits {
+            let n = literal_name(&lit);
+            let q = go_str(&lit);
+            let _ = write!(
+                self.out,
+                "\n// {n} is the fixed wire value {q}: always written, and decoding accepts only {q}.\ntype {n} struct{{}}\n\nfunc ({n}) MarshalJSON() ([]byte, error) {{ return []byte(`{q}`), nil }}\n\nfunc (*{n}) UnmarshalJSON(b []byte) error {{\n\tvar s string\n\tif err := json.Unmarshal(b, &s); err != nil || s != {q} {{\n\t\treturn fmt.Errorf(\"expected type %s, found %s\", {qq}, b)\n\t}}\n\treturn nil\n}}\n",
+                qq = go_str(&q),
+            );
         }
     }
 
