@@ -16,6 +16,8 @@
 //!   bug may remain).
 //! - Real `go` is required: if it is missing the test fails.
 
+#[path = "common/float_paths.rs"]
+mod float_paths_common;
 #[path = "common/go_fixtures.rs"]
 mod go_fixtures;
 #[path = "common/go_fixtures_empty.rs"]
@@ -24,6 +26,10 @@ mod go_fixtures_empty;
 mod go_fixtures_tri;
 #[path = "common/go_fixtures_untagged.rs"]
 mod go_fixtures_untagged;
+#[path = "common/registry_fixtures.rs"]
+mod registry_fixtures;
+use float_paths_common::{Ir, float_paths_in, json_eq_at};
+use registry_fixtures::{registry_back, registry_fixtures};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -86,6 +92,15 @@ where
 
 /// Generated Go type for a fixture type: a `TypeTag` type is sampled in
 /// its standalone (tagged) form, which the generator emits as `Tagged<T>`.
+/// JSON paths (in [`diff`]'s `a.b[0]` form) of `v` whose IR type is an
+/// `f32` / `f64` primitive, found by walking `v` along the IR type `ty`.
+/// Each union contributes only the variant `v` actually is: a tagged union
+/// by its tag, an untagged union by serde's rule, the first variant in
+/// declaration order that `v` decodes as ([`decodes`]).
+fn float_paths(ty: &str, v: &Value) -> BTreeSet<String> {
+    float_paths_in(ir(), ty, v)
+}
+
 fn gen_name(ty: &str) -> String {
     static TAGGED: std::sync::OnceLock<BTreeSet<String>> = std::sync::OnceLock::new();
     let tagged = TAGGED.get_or_init(|| {
@@ -927,288 +942,6 @@ fn ir() -> &'static Ir {
     })
 }
 
-fn join_key(path: &str, k: &str) -> String {
-    if path.is_empty() {
-        k.to_string()
-    } else {
-        format!("{path}.{k}")
-    }
-}
-
-type Ir = BTreeMap<String, wire::WireType>;
-
-/// JSON paths (in [`diff`]'s `a.b[0]` form) of `v` whose IR type is an
-/// `f32` / `f64` primitive, found by walking `v` along the IR type `ty`.
-/// Each union contributes only the variant `v` actually is: a tagged union
-/// by its tag, an untagged union by serde's rule, the first variant in
-/// declaration order that `v` decodes as ([`decodes`]).
-fn float_paths(ty: &str, v: &Value) -> BTreeSet<String> {
-    float_paths_in(ir(), ty, v)
-}
-
-fn float_paths_in(m: &Ir, ty: &str, v: &Value) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    walk_ty(m, &wire::WireTy::Named(ty.into()), v, "", &mut out, 0);
-    out
-}
-
-/// Whether serde would decode `v` as the IR type `ty` (JSON kind, integer
-/// vs float, required keys, tags, untagged arms in order). Unknown keys are
-/// accepted, as serde does without `deny_unknown_fields`.
-fn decodes(m: &Ir, ty: &wire::WireTy, v: &Value, depth: usize) -> bool {
-    use wire::WireTy as T;
-    if depth > 64 {
-        return true;
-    }
-    match ty {
-        T::Prim(p) => match p.as_str() {
-            "String" | "str" => v.is_string(),
-            "char" => v.as_str().is_some_and(|s| s.chars().count() == 1),
-            "bool" => v.is_boolean(),
-            "u8" => v.as_u64().is_some_and(|n| n <= u64::from(u8::MAX)),
-            "u16" => v.as_u64().is_some_and(|n| n <= u64::from(u16::MAX)),
-            "u32" => v.as_u64().is_some_and(|n| n <= u64::from(u32::MAX)),
-            "u64" | "usize" | "u128" => v.is_u64(),
-            "i8" | "i16" | "i32" | "i64" | "isize" | "i128" => v.is_i64(),
-            "f32" | "f64" => v.is_number(),
-            _ => true,
-        },
-        T::Json => true,
-        T::Literal(l) => v.as_str() == Some(l.as_str()),
-        T::Nullable(i) => v.is_null() || decodes(m, i, v, depth + 1),
-        T::Array(i) => v
-            .as_array()
-            .is_some_and(|a| a.iter().all(|x| decodes(m, i, x, depth + 1))),
-        T::Tuple(items) => v.as_array().is_some_and(|a| {
-            a.len() == items.len()
-                && items
-                    .iter()
-                    .zip(a)
-                    .all(|(i, x)| decodes(m, i, x, depth + 1))
-        }),
-        T::Map { value, .. } => v
-            .as_object()
-            .is_some_and(|o| o.values().all(|x| decodes(m, value, x, depth + 1))),
-        T::Named(n) => m
-            .get(n)
-            .is_none_or(|t| body_decodes(m, &t.body, v, depth + 1)),
-    }
-}
-
-fn fields_decode(m: &Ir, fields: &[wire::WireField], v: &Value, depth: usize) -> bool {
-    let Some(o) = v.as_object() else {
-        return false;
-    };
-    fields.iter().all(|f| match o.get(&f.wire) {
-        None => f.presence.omittable || f.presence.nullable,
-        Some(Value::Null) if f.presence.nullable => true,
-        Some(x) => decodes(m, &f.ty, x, depth),
-    })
-}
-
-fn variant_decodes(m: &Ir, b: &wire::VariantBody, v: &Value, untagged: bool, depth: usize) -> bool {
-    match b {
-        wire::VariantBody::Unit => !untagged || v.is_null(),
-        wire::VariantBody::Fields(f) => fields_decode(m, f, v, depth),
-        wire::VariantBody::Value(t) => decodes(m, t, v, depth),
-        wire::VariantBody::Tuple(items) => {
-            decodes(m, &wire::WireTy::Tuple(items.clone()), v, depth)
-        }
-    }
-}
-
-/// The variant of a union `v` is, with its payload: by tag, or (untagged)
-/// the first variant in declaration order that decodes.
-fn matched_variant<'a>(
-    m: &Ir,
-    repr: &wire::UnionRepr,
-    variants: &'a [wire::WireVariant],
-    v: &'a Value,
-    path: &str,
-    depth: usize,
-) -> Option<(&'a wire::WireVariant, &'a Value, String)> {
-    use wire::UnionRepr as R;
-    let named = |tag: &str| {
-        variants
-            .iter()
-            .find(|x| x.wire.as_deref() == Some(tag) || x.aliases.iter().any(|a| a == tag))
-            .or_else(|| variants.iter().find(|x| x.other))
-    };
-    match repr {
-        R::Internal { tag } => v
-            .get(tag)
-            .and_then(Value::as_str)
-            .and_then(named)
-            .map(|x| (x, v, path.to_string())),
-        R::Adjacent { tag, content } => {
-            let x = v.get(tag).and_then(Value::as_str).and_then(named)?;
-            Some((
-                x,
-                v.get(content).unwrap_or(&Value::Null),
-                join_key(path, content),
-            ))
-        }
-        R::External => {
-            if let Some(s) = v.as_str() {
-                return named(s).map(|x| (x, &Value::Null, path.to_string()));
-            }
-            let (k, c) = v
-                .as_object()
-                .filter(|o| o.len() == 1)
-                .and_then(|o| o.iter().next())?;
-            named(k).map(|x| (x, c, join_key(path, k)))
-        }
-        R::Untagged => variants
-            .iter()
-            .find(|x| variant_decodes(m, &x.body, v, true, depth))
-            .map(|x| (x, v, path.to_string())),
-    }
-}
-
-fn body_decodes(m: &Ir, body: &wire::WireBody, v: &Value, depth: usize) -> bool {
-    use wire::WireBody as B;
-    match body {
-        B::Record { fields } => fields_decode(m, fields, v, depth),
-        B::Alias(t) => decodes(m, t, v, depth),
-        B::StringEnum { values, open } => v
-            .as_str()
-            .is_some_and(|s| *open || values.iter().any(|x| x == s)),
-        B::Union { repr, variants } => {
-            let untagged = matches!(repr, wire::UnionRepr::Untagged);
-            matched_variant(m, repr, variants, v, "", depth)
-                .is_some_and(|(x, p, _)| untagged || variant_decodes(m, &x.body, p, false, depth))
-        }
-    }
-}
-
-fn walk_ty(
-    m: &Ir,
-    ty: &wire::WireTy,
-    v: &Value,
-    path: &str,
-    out: &mut BTreeSet<String>,
-    depth: usize,
-) {
-    use wire::WireTy as T;
-    if depth > 64 {
-        return;
-    }
-    match ty {
-        T::Prim(p) if p == "f32" || p == "f64" => {
-            out.insert(path.to_string());
-        }
-        T::Nullable(i) => walk_ty(m, i, v, path, out, depth + 1),
-        T::Array(i) => {
-            for (n, x) in v.as_array().into_iter().flatten().enumerate() {
-                walk_ty(m, i, x, &format!("{path}[{n}]"), out, depth + 1);
-            }
-        }
-        T::Tuple(items) => {
-            for (n, (i, x)) in items
-                .iter()
-                .zip(v.as_array().into_iter().flatten())
-                .enumerate()
-            {
-                walk_ty(m, i, x, &format!("{path}[{n}]"), out, depth + 1);
-            }
-        }
-        T::Map { value, .. } => {
-            for (k, x) in v.as_object().into_iter().flatten() {
-                walk_ty(m, value, x, &join_key(path, k), out, depth + 1);
-            }
-        }
-        T::Named(n) => {
-            if let Some(t) = m.get(n) {
-                walk_body(m, &t.body, v, path, out, depth + 1);
-            }
-        }
-        T::Prim(_) | T::Json | T::Literal(_) => {}
-    }
-}
-
-fn walk_fields(
-    m: &Ir,
-    fields: &[wire::WireField],
-    v: &Value,
-    path: &str,
-    out: &mut BTreeSet<String>,
-    depth: usize,
-) {
-    for f in fields {
-        if let Some(x) = v.get(&f.wire) {
-            walk_ty(m, &f.ty, x, &join_key(path, &f.wire), out, depth);
-        }
-    }
-}
-
-fn walk_variant(
-    m: &Ir,
-    b: &wire::VariantBody,
-    v: &Value,
-    path: &str,
-    out: &mut BTreeSet<String>,
-    depth: usize,
-) {
-    match b {
-        wire::VariantBody::Unit => {}
-        wire::VariantBody::Fields(fields) => walk_fields(m, fields, v, path, out, depth),
-        wire::VariantBody::Value(t) => walk_ty(m, t, v, path, out, depth),
-        wire::VariantBody::Tuple(items) => {
-            walk_ty(m, &wire::WireTy::Tuple(items.clone()), v, path, out, depth);
-        }
-    }
-}
-
-fn walk_body(
-    m: &Ir,
-    body: &wire::WireBody,
-    v: &Value,
-    path: &str,
-    out: &mut BTreeSet<String>,
-    depth: usize,
-) {
-    use wire::WireBody as B;
-    match body {
-        B::Record { fields } => walk_fields(m, fields, v, path, out, depth),
-        B::Alias(t) => walk_ty(m, t, v, path, out, depth),
-        B::StringEnum { .. } => {}
-        B::Union { repr, variants } => {
-            // Only the matched variant: a path that is an integer in one
-            // variant and a float in another follows the value's variant.
-            if let Some((x, payload, p)) = matched_variant(m, repr, variants, v, path, depth) {
-                walk_variant(m, &x.body, payload, &p, out, depth);
-            }
-        }
-    }
-}
-
-/// JSON equality. Numbers at a path the IR types `f32` / `f64` (see
-/// [`float_paths`]) compare by value: Go's encoding/json writes an `f64`
-/// zero as `0`, serde as `0.0`, and both decode to the same `f64`. Every
-/// other number, integers included, must be the same JSON number exactly.
-fn json_eq_at(a: &Value, b: &Value, path: &str, floats: &BTreeSet<String>) -> bool {
-    match (a, b) {
-        (Value::Number(x), Value::Number(y)) => {
-            x == y || (floats.contains(path) && x.as_f64() == y.as_f64())
-        }
-        (Value::Array(x), Value::Array(y)) => {
-            x.len() == y.len()
-                && x.iter()
-                    .zip(y)
-                    .enumerate()
-                    .all(|(n, (a, b))| json_eq_at(a, b, &format!("{path}[{n}]"), floats))
-        }
-        (Value::Object(x), Value::Object(y)) => {
-            x.len() == y.len()
-                && x.iter().all(|(k, v)| {
-                    y.get(k)
-                        .is_some_and(|w| json_eq_at(v, w, &join_key(path, k), floats))
-                })
-        }
-        _ => a == b,
-    }
-}
-
 /// The generated output equals `truth` (a value of IR type `ty`).
 fn gen_is(out: Option<&Value>, truth: &Value, ty: &str) -> bool {
     let floats = float_paths(&gen_name(ty), truth);
@@ -1416,12 +1149,12 @@ fn render(fixtures: &[Fixture], rows: &[Row], v: &BTreeMap<(String, String), Str
         "<!-- Generated by tools/aimux-codegen/tests/wire_diff_go.rs; do not edit.\n     Regenerate: AIMUX_BLESS_DIFF=1 cargo test -p aimux-codegen --test wire_diff_go\n     Verdicts: docs/plan/2.2-diff-go-verdicts.json -->\n\n# 2.2: generated Go vs hand-written Go\n\n",
     );
     s.push_str("Each fixture is a real aimux-core value serialized with serde (the truth). It is decoded and re-marshaled by the generated Go (`aimux-codegen --emit go`) and by the hand-written `bindings/go/types.go` + `multimodal_types.go` + the `RawToolCall` type and codec from `repair.go` (the rest of repair.go needs cgo). A row is a JSON path where the two outputs differ. The verdict says which side disagrees with the Rust output. The test also requires the generated output to equal the Rust output for every fixture.\n\n");
-    let json_eq_line = include_str!("wire_diff_go.rs")
+    let json_eq_line = include_str!("common/float_paths.rs")
         .lines()
-        .position(|l| l.starts_with("fn json_eq_at("))
+        .position(|l| l.starts_with("pub fn json_eq_at("))
         .unwrap()
         + 1;
-    s.push_str(&format!("## Rules\n\n- Numbers are compared by numeric value only at JSON paths whose IR type is `f32` / `f64` (`float_paths` + `json_eq_at`, tools/aimux-codegen/tests/wire_diff_go.rs:{json_eq_line}): Go writes an `f64` zero as `0`, serde as `0.0`, the same JSON value. Every other number, integers included, must match exactly (2^53+1 ≠ 2^53). No other normalization is applied.\n- A `TypeTag` type (`ToolCall`, `RawToolCall`, `Source`) is sampled where the FFI uses it standalone, with its `type` tag (`aimux_core::wire::Tagged` / `typed` / `typed_vec`: aimux-ffi/src/lib.rs:1972, aimux-core/src/parse_tool_call.rs:625, aimux-core/src/generate.rs:575-583), and compared with the generated `Tagged<T>`.\n- Every `手写错` row below is a U1 finding about the hand-written Go. U1 does not modify the hand-written Go; it is removed in U3, when the generated code replaces it.\n\n"));
+    s.push_str(&format!("## Rules\n\n- Numbers are compared by numeric value only at JSON paths whose IR type is `f32` / `f64` (`float_paths` + `json_eq_at`, tools/aimux-codegen/tests/common/float_paths.rs:{json_eq_line}): Go writes an `f64` zero as `0`, serde as `0.0`, the same JSON value. Every other number, integers included, must match exactly (2^53+1 ≠ 2^53). No other normalization is applied.\n- A `TypeTag` type (`ToolCall`, `RawToolCall`, `Source`) is sampled where the FFI uses it standalone, with its `type` tag (`aimux_core::wire::Tagged` / `typed` / `typed_vec`: aimux-ffi/src/lib.rs:1972, aimux-core/src/parse_tool_call.rs:625, aimux-core/src/generate.rs:575-583), and compared with the generated `Tagged<T>`.\n- Every `手写错` row below is a U1 finding about the hand-written Go. U1 does not modify the hand-written Go; it is removed in U3, when the generated code replaces it.\n\n"));
     s.push_str("## Fixtures\n\n| label | type | serde output |\n|---|---|---|\n");
     for f in fixtures {
         s.push_str(&format!(
@@ -2802,104 +2535,6 @@ fn registry_mutations_are_caught() {
     // A bogus path in REGISTRY (via a synthetic model) fails check.
     let m = wire::from_inputs(&Inputs::from_workspace(&workspace())).unwrap();
     assert_eq!(aimux_codegen::emit::registry::check(&m), Ok(()));
-}
-
-/// A minimal JSON value of `t` that serde accepts: required keys only,
-/// zero values, the first enum value / internally tagged variant.
-fn minimal(m: &wire::WireModel, t: &wire::WireTy) -> Value {
-    use wire::{UnionRepr, VariantBody, WireBody, WireTy};
-    match t {
-        WireTy::Prim(p) if p == "String" || p == "str" || p == "char" => json!(""),
-        WireTy::Prim(p) if p == "bool" => json!(false),
-        WireTy::Prim(_) => json!(0),
-        WireTy::Json | WireTy::Nullable(_) => Value::Null,
-        WireTy::Array(_) => json!([]),
-        WireTy::Map { .. } => json!({}),
-        WireTy::Tuple(items) => Value::Array(items.iter().map(|i| minimal(m, i)).collect()),
-        WireTy::Literal(l) => json!(l),
-        WireTy::Named(n) => {
-            let ty = m
-                .types
-                .iter()
-                .find(|x| &x.name == n)
-                .unwrap_or_else(|| panic!("{n}"));
-            match &ty.body {
-                WireBody::Record { fields } => minimal_record(m, fields),
-                WireBody::Alias(a) => minimal(m, a),
-                WireBody::StringEnum { values, .. } => json!(values[0]),
-                WireBody::Union {
-                    repr: UnionRepr::Internal { tag },
-                    variants,
-                } => {
-                    let v = &variants[0];
-                    let mut o = match &v.body {
-                        VariantBody::Fields(fs) => minimal_record(m, fs),
-                        VariantBody::Unit => json!({}),
-                        other => panic!("{n}: no minimal value for {other:?}"),
-                    };
-                    o[tag.as_str()] = json!(v.wire.clone().unwrap());
-                    o
-                }
-                other => panic!("{n}: no minimal value for {other:?}"),
-            }
-        }
-    }
-}
-
-fn minimal_record(m: &wire::WireModel, fields: &[wire::WireField]) -> Value {
-    let mut o = serde_json::Map::new();
-    for f in fields.iter().filter(|f| !f.presence.omittable) {
-        let v = if f.presence.nullable {
-            Value::Null
-        } else {
-            minimal(m, &f.ty)
-        };
-        o.insert(f.wire.clone(), v);
-    }
-    Value::Object(o)
-}
-
-/// serde round trip for an emit::registry owner type. A new registry
-/// owner must be added here (else the test fails, not skips).
-fn registry_back(ty: &str) -> Back {
-    match ty {
-        "VideoCallOptions" => back::<aimux_core::video_model::VideoCallOptions>,
-        "HttpExchange" => back::<aimux_core::recording::HttpExchange>,
-        "InputRecord" => back::<aimux_core::recording::InputRecord>,
-        other => panic!("registry owner {other}: add its serde type to registry_back"),
-    }
-}
-
-/// One generated "field absent" fixture per emit::registry use: the
-/// owner's minimal value without that key. `(label, owner, json)`.
-fn registry_fixtures() -> Vec<(String, String, Value)> {
-    let model = wire::from_inputs(&Inputs::from_workspace(&workspace())).unwrap();
-    aimux_codegen::emit::registry::uses(&model)
-        .into_iter()
-        .map(|(e, owner, f)| {
-            // Every other non-Option field is written, so only this key's
-            // absence is under test (an absent plain `#[serde(default)]`
-            // map is a separate Go difference: nil writes null).
-            let wire::WireBody::Record { fields } =
-                &model.types.iter().find(|t| t.name == owner).unwrap().body
-            else {
-                panic!("{owner}: registry owner is not a record")
-            };
-            let mut o = serde_json::Map::new();
-            for g in fields
-                .iter()
-                .filter(|g| !g.presence.nullable && g.wire != f.wire)
-            {
-                o.insert(g.wire.clone(), minimal(&model, &g.ty));
-            }
-            let j = Value::Object(o);
-            (
-                format!("registry-{}-absent:{}", owner, e.path),
-                owner.to_string(),
-                j,
-            )
-        })
-        .collect()
 }
 
 /// Labels whose Go decode→encode differs from serde, over the

@@ -46,7 +46,12 @@ pub enum WireBody {
     Alias(WireTy),
     /// Externally tagged enum whose variants are all unit: a JSON string.
     /// `open`: a `#[serde(other)]` variant accepts unknown values.
-    StringEnum { values: Vec<String>, open: bool },
+    /// `aliases`: `(alias, main value)` from variant `#[serde(alias)]`.
+    StringEnum {
+        values: Vec<String>,
+        open: bool,
+        aliases: Vec<(String, String)>,
+    },
     /// Any other enum. Variants in declaration order.
     Union {
         repr: UnionRepr,
@@ -113,6 +118,10 @@ pub struct Presence {
     pub nullable: bool,
     pub tri_state: bool,
     pub skip_if_empty: bool,
+    /// A JSON-value field whose `null` serde rejects (manifest
+    /// `null.input = rejected` on a `json` type, e.g. the `nonNullJson`
+    /// codec of `ToolResult.result`).
+    pub rejects_null: bool,
 }
 
 /// A wire value type.
@@ -328,6 +337,13 @@ impl<'a> Ctx<'a> {
                     return WireBody::StringEnum {
                         values: variants.iter().filter_map(|v| v.wire.clone()).collect(),
                         open: variants.iter().any(|v| v.other),
+                        aliases: variants
+                            .iter()
+                            .filter_map(|v| v.wire.as_ref().map(|w| (v, w)))
+                            .flat_map(|(v, w)| {
+                                v.aliases.iter().map(move |a| (a.clone(), w.clone()))
+                            })
+                            .collect(),
                     };
                 }
                 let variants = variants
@@ -515,6 +531,7 @@ impl<'a> Ctx<'a> {
             nullable: false,
             tri_state: false,
             skip_if_empty: f.omit_when_empty,
+            rejects_null: f.null.input == "rejected" && matches!(f.ty, TypeRef::Json),
         };
         // Tri-state follows the manifest's input fact: `distinct` means an
         // absent key and `null` decode differently (`present` on
@@ -805,7 +822,8 @@ mod tests {
                 omittable: true,
                 nullable: true,
                 tri_state: true,
-                skip_if_empty: true
+                skip_if_empty: true,
+                rejects_null: false,
             }
         );
         assert_eq!(fields[0].ty, WireTy::Named("DecisionInput".into()));
