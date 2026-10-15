@@ -44,6 +44,8 @@ use aimux_codegen::extract::{self, CodecWire, FieldDef, Representation, Shape, T
 use aimux_codegen::manifest::Inputs;
 use serde_json::{Map, Value, json};
 
+#[path = "common/float_paths.rs"]
+mod float_paths;
 #[path = "common/go_fixtures.rs"]
 mod go_fixtures;
 #[path = "common/go_fixtures_empty.rs"]
@@ -1412,20 +1414,26 @@ impl Sim<'_> {
     }
 }
 
-/// Numbers compare by value (serde writes `f64`, the input may be an int).
-fn same(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Number(x), Value::Number(y)) => {
-            x == y || (x.is_f64() || y.is_f64()) && x.as_f64() == y.as_f64()
-        }
-        (Value::Array(x), Value::Array(y)) => {
-            x.len() == y.len() && x.iter().zip(y).all(|(a, b)| same(a, b))
-        }
-        (Value::Object(x), Value::Object(y)) => {
-            x.len() == y.len() && x.iter().all(|(k, a)| y.get(k).is_some_and(|b| same(a, b)))
-        }
-        _ => a == b,
-    }
+/// The wire IR by type name, for [`float_paths::float_paths_in`].
+fn ir() -> &'static float_paths::Ir {
+    static IR: std::sync::OnceLock<float_paths::Ir> = std::sync::OnceLock::new();
+    IR.get_or_init(|| {
+        aimux_codegen::wire::from_inputs(&Inputs::from_workspace(&workspace()))
+            .unwrap()
+            .types
+            .into_iter()
+            .map(|t| (t.name.clone(), t))
+            .collect()
+    })
+}
+
+/// Equality as U1 (tests/common/float_paths.rs `json_eq_at`): numbers
+/// compare by value only at JSON paths of `truth` whose IR type is `f32` /
+/// `f64`; every other number, integers included, must be the same JSON
+/// number (`1` ≠ `1.0`).
+fn same(ty: &str, truth: &Value, got: &Value) -> bool {
+    let floats = float_paths::float_paths_in(ir(), ty, truth);
+    float_paths::json_eq_at(truth, got, "", &floats)
 }
 
 type Fx = (&'static str, &'static str, Value, Option<Back>);
@@ -1511,7 +1519,7 @@ fn sim_check(m: &Manifest, swift: &Swift, r: &mut Report) {
                 Ok(json.clone())
             }
         };
-        compare(label, &truth, &got, r);
+        compare(&name, label, &truth, &got, r);
         let (Some(b), Some(obj)) = (back, json.as_object()) else {
             continue;
         };
@@ -1536,19 +1544,20 @@ fn sim_check(m: &Manifest, swift: &Swift, r: &mut Report) {
         }
         for (l, p) in cases {
             r.perturbed += 1;
-            compare(&l, &b(&p), &sim.value(&name, &p, 0), r);
+            compare(&name, &l, &b(&p), &sim.value(&name, &p, 0), r);
         }
     }
 }
 
 fn compare(
+    ty: &str,
     label: &str,
     truth: &Result<Value, String>,
     got: &Result<Value, String>,
     r: &mut Report,
 ) {
     match (truth, got) {
-        (Ok(t), Ok(g)) if same(t, g) => {}
+        (Ok(t), Ok(g)) if same(ty, t, g) => {}
         (Err(_), Err(_)) => {}
         (Ok(t), Ok(g)) => r.bad.push(format!("[S] {label}: serde {t} vs Swift {g}")),
         (Ok(_), Err(e)) => r
@@ -2151,4 +2160,27 @@ fn line_reader_misses_nested_extension_and_one_line() {
             .lines()
             .any(|l| l.starts_with("    public struct ") || l.starts_with("    public enum "))
     );
+}
+
+#[test]
+fn same_compares_numbers_by_value_only_on_float_paths() {
+    // RerankingRank: `index: u32`, `relevanceScore: f64`
+    // (aimux-core/src/reranking_model.rs:98-100).
+    let t = json!({"index": 1, "relevanceScore": 1.0});
+    assert!(same(
+        "RerankingRank",
+        &t,
+        &json!({"index": 1, "relevanceScore": 1})
+    ));
+    assert!(!same(
+        "RerankingRank",
+        &t,
+        &json!({"index": 1.0, "relevanceScore": 1.0})
+    ));
+    // 2^53 + 1 and 2^53 are one f64 but different integers.
+    assert!(!same(
+        "RerankingRank",
+        &json!({"index": 9_007_199_254_740_993_u64, "relevanceScore": 0.5}),
+        &json!({"index": 9_007_199_254_740_992_u64, "relevanceScore": 0.5}),
+    ));
 }
