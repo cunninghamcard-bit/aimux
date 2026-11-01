@@ -145,7 +145,9 @@ jobs:
           run="{
             $(job rust-test aimux-ffi)
             $(job node-binding bindings/node)
+            $(job node-shipped bindings/node)
             $(job python-binding bindings/python)
+            $(job python-shipped bindings/python)
             $(job ffi-build aimux-ffi bindings/go)
             $(job ffi-sanitizers aimux-ffi)
             $(job ffi-linux-arm aimux-ffi)
@@ -349,6 +351,43 @@ jobs:
         if: matrix.settings.test && runner.os == 'Linux'
         working-directory: bindings/node
         run: git diff --exit-code -- index.js index.d.ts
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-${{ matrix.settings.target }}
+          path: |
+            bindings/node/*.node
+            bindings/node/index.js
+            bindings/node/index.d.ts
+
+  # The shipped Node build (fat LTO, opt-level "s") runs beside the test
+  # legs instead of after them: it shares nothing with them but the checkout.
+  # Its artifact is the one release.yml rehearses.
+  node-shipped:
+    name: Node binding shipped profile (x86_64-unknown-linux-gnu)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: fromJSON(needs.changes.outputs.run)['node-shipped']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings/node -> target
+          key: x86_64-unknown-linux-gnu-shipped
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: bindings/node/package-lock.json
+      - name: Install dependencies
+        working-directory: bindings/node
+        run: npm ci
       # The shipped build: bindings/node/Cargo.toml's [profile.release]
       # (opt-level "s", fat LTO, one codegen unit, strip; RFC-0043 B-profile).
       # This workflow's env pins CARGO_PROFILE_RELEASE_* to the fast CI values
@@ -356,7 +395,6 @@ jobs:
       # release.yml does, loads the result and prints its size. The uploaded
       # artifact is this build.
       - name: Build with the shipped profile, load it, print its size
-        if: matrix.settings.test && runner.os == 'Linux'
         working-directory: bindings/node
         shell: bash
         env:
@@ -367,17 +405,14 @@ jobs:
           CARGO_PROFILE_RELEASE_OPT_LEVEL: "s"
           CARGO_PROFILE_RELEASE_STRIP: "true"
         run: |
-          npx napi build --platform --release --target ${{ matrix.settings.target }} --use-napi-cross
+          npx napi build --platform --release --target x86_64-unknown-linux-gnu --use-napi-cross
           node -e "const m = require('./index.js'); const n = Object.keys(m).length; if (!n) throw new Error('the binding loaded with no exports'); console.log(n, 'exports')"
-          python3 ../../scripts/check_native_artifact.py '${{ matrix.settings.binary }}'
+          python3 ../../scripts/check_native_artifact.py 'aimux.linux-x64-gnu.node'
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: node-${{ matrix.settings.target }}
-          path: |
-            bindings/node/*.node
-            bindings/node/index.js
-            bindings/node/index.d.ts
+          name: node-x86_64-unknown-linux-gnu-shipped
+          path: bindings/node/*.node
 
   # ── Python binding: build + test (single OS — wheels built per-OS at release) ──
   python-binding:
@@ -418,6 +453,29 @@ jobs:
           python -m pytest tests/ -v
       - name: DTO vector codecs
         run: python3 scripts/check_dto_vectors.py python
+
+  python-shipped:
+    name: Python binding shipped profile
+    runs-on: ubuntu-latest
+    needs: changes
+    if: fromJSON(needs.changes.outputs.run)['python-shipped']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings/python -> target
+          key: shipped
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: bindings/python/pyproject.toml
+      - name: Install maturin and test deps
+        run: pip install "maturin[patchelf]" pytest pydantic
       # The shipped build: bindings/python/Cargo.toml's [profile.release]
       # (opt-level "s", fat LTO, one codegen unit, strip; RFC-0043 B-profile).
       # This workflow's env pins CARGO_PROFILE_RELEASE_* to the fast CI values
@@ -611,6 +669,9 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.14.3"
+          # Repo cache is over 10 GB (Flutter SDK 4 GB + stale Gradle entries);
+          # evict superseded Gradle entries so Rust caches stop being evicted.
+          cache-cleanup: on-success
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -771,6 +832,8 @@ jobs:
           tool: cargo-ndk@4.1.2
       - uses: gradle/actions/setup-gradle@v4
         if: matrix.platform == 'android'
+        with:
+          cache-cleanup: on-success
       - name: Build iOS xcframework
         if: matrix.platform == 'ios'
         run: |
@@ -890,6 +953,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: tools/aimux-web/web/package-lock.json
       - name: Type-check the web console (vue-tsc --noEmit)
         working-directory: tools/aimux-web/web
         run: |
@@ -908,7 +973,9 @@ jobs:
       - changes
       - rust-test
       - node-binding
+      - node-shipped
       - python-binding
+      - python-shipped
       - ffi-build
       - ffi-sanitizers
       - ffi-linux-arm
