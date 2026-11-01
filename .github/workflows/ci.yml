@@ -1,5 +1,6 @@
 name: CI
 
+# CI timing control run (no-op comment).
 on:
   push:
     branches: [master]
