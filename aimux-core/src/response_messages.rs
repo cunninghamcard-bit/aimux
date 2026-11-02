@@ -243,7 +243,13 @@ impl ResponseMessageBuilder {
                         reason: approval.reason.clone(),
                         is_automatic: approval.is_automatic,
                         signature: approval.signature.clone(),
-                        input_schema_input: None,
+                        // As AI SDK `to-response-messages.ts`: only when it
+                        // differs from the validated input.
+                        input_schema_input: approval
+                            .input_schema_input
+                            .as_ref()
+                            .filter(|raw| **raw != approval.tool_call.input)
+                            .cloned(),
                     }
                 }
                 GenerateContent::ToolCall(call) => ContentPart::ToolCall {
@@ -310,5 +316,59 @@ fn file_base64(data: &FileBytes) -> String {
     match data {
         FileBytes::Base64(data) => data.clone(),
         FileBytes::Binary(data) => base64::engine::general_purpose::STANDARD.encode(data),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn approval(input_schema_input: Option<Value>) -> ToolApprovalRequestOutput {
+        ToolApprovalRequestOutput {
+            approval_id: "approval-1".into(),
+            tool_call: crate::tool::ToolCall {
+                tool_call_id: "call-1".into(),
+                tool_name: "weather".into(),
+                input: serde_json::json!({"city": "Paris"}),
+                provider_executed: Some(true),
+                dynamic: None,
+                provider_metadata: None,
+                invalid: None,
+                error: None,
+            },
+            reason: None,
+            is_automatic: None,
+            signature: None,
+            input_schema_input,
+        }
+    }
+
+    fn approval_part(input_schema_input: Option<Value>) -> Value {
+        let mut builder = ResponseMessageBuilder::new();
+        builder.approval(&approval(input_schema_input));
+        let messages = serde_json::to_value(builder.finish().messages).unwrap();
+        messages[0]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|part| part["type"] == "tool-approval-request")
+            .cloned()
+            .unwrap()
+    }
+
+    #[test]
+    fn approval_writes_input_schema_input_when_it_differs_from_the_input() {
+        let part = approval_part(Some(serde_json::json!({"city": "paris"})));
+        assert_eq!(
+            part["inputSchemaInput"],
+            serde_json::json!({"city": "paris"})
+        );
+    }
+
+    #[test]
+    fn approval_omits_input_schema_input_when_equal_or_absent() {
+        let equal = approval_part(Some(serde_json::json!({"city": "Paris"})));
+        assert!(equal.get("inputSchemaInput").is_none());
+        assert!(approval_part(None).get("inputSchemaInput").is_none());
     }
 }
