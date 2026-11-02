@@ -780,15 +780,15 @@ jobs:
         env:
           ABIS: ${{ matrix.abis }}
         run: |
-          read -ra abis <<< "$ABIS"
+          read -ra abi_list <<< "$ABIS"
           targets=()
-          for abi in "${abis[@]}"; do
+          for abi in "${abi_list[@]}"; do
             targets+=(-t "$abi")
           done
           cargo ndk "${targets[@]}" \
             -o bindings/flutter/android/src/main/jniLibs build -p aimux-ffi --release
-          for abi in "${abis[@]}"; do
-            test -f bindings/flutter/android/src/main/jniLibs/$abi/libaimux_ffi.so \
+          for abi in "${abi_list[@]}"; do
+            test -f "bindings/flutter/android/src/main/jniLibs/$abi/libaimux_ffi.so" \
               || { echo "Missing $abi" >&2; exit 1; }
           done
       - name: Build example (iOS — CocoaPods; Flutter SPM can't link plugin binaries)
