@@ -1,0 +1,20 @@
+{
+  "source": "RFC-0042 §3.2 normative tool-argument test vectors (rfc/0042-v4-type-boundaries.md:84-91)",
+  "notes": {
+    "providerInput": "the provider's argument text, verbatim; must survive RawToolCall Rust->JSON->Rust byte for byte",
+    "expect.input": "the core-parsed value, compared with JSON semantics after ToolCall Rust->JSON->Rust",
+    "duplicateKeys": "D19: RFC-0042:89 specifies only 'the parser's final object semantics'; expected value is serde_json's last-wins {\"a\":2}",
+    "ignore": "rows still blocked on a parser change; run with --ignored"
+  },
+  "vectors": [
+    {"row": 1, "providerInput": "\"Tokyo\"", "expect": {"valid": true, "input": "Tokyo"}},
+    {"row": 2, "providerInput": "\"{\\\"x\\\":1}\"", "expect": {"valid": true, "input": "{\"x\":1}"}},
+    {"row": 3, "providerInput": "123", "expect": {"valid": true, "input": 123}},
+    {"row": 3, "providerInput": "true", "expect": {"valid": true, "input": true}},
+    {"row": 3, "providerInput": "null", "expect": {"valid": true, "input": null}},
+    {"row": 4, "providerInput": "{\"a\":1,\"a\":2}", "expect": {"valid": true, "input": {"a": 2}}},
+    {"row": 5, "providerInput": " 1e2 ", "expect": {"valid": true, "input": 100.0}},
+    {"row": 6, "providerInput": "{\"a\":", "expect": {"valid": false}},
+    {"row": 6, "providerInput": "", "expect": {"valid": false}, "ignore": "D18: parser change in 3.3"}
+  ]
+}
