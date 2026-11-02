@@ -1,0 +1,28 @@
+name: Workflow lint
+
+# actionlint over .github/workflows: expression and context errors, matrix
+# property typos, `needs`/`if` mistakes, and shellcheck on `run:` scripts.
+# Without it these show only when a workflow runs, which for release.yml is a
+# tag push: v0.3.0's console-build was dropped without an error by a matrix
+# key mismatch, and finding it took seven dispatched runs. Seconds to run,
+# and only when a workflow file changes.
+on:
+  push:
+    paths: ['.github/workflows/**']
+  pull_request:
+    paths: ['.github/workflows/**']
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      # The image carries shellcheck, which actionlint runs on every `run:`.
+      - name: actionlint
+        uses: docker://rhysd/actionlint:1.7.7
+        with:
+          args: -color
