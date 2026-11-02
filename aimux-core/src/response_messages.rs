@@ -18,6 +18,25 @@ use crate::result::{
 };
 use crate::shared::{FileBytes, GeneratedFileData, SharedProviderMetadata};
 
+/// AI SDK `isDeepEqualData` (`ai/src/util/is-deep-equal-data.ts:8-48`) over
+/// parsed JSON. Numbers compare as JavaScript numbers (IEEE-754 doubles), so
+/// `1` equals `1.0`, `-0` equals `0`, and integers beyond 2^53 that round to
+/// the same double are equal. Objects compare by key set, ignoring order.
+pub(crate) fn is_deep_equal_data(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => x.as_f64() == y.as_f64(),
+        (Value::Array(x), Value::Array(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(x, y)| is_deep_equal_data(x, y))
+        }
+        (Value::Object(x), Value::Object(y)) => {
+            x.len() == y.len()
+                && x.iter()
+                    .all(|(key, x)| y.get(key).is_some_and(|y| is_deep_equal_data(x, y)))
+        }
+        _ => a == b,
+    }
+}
+
 /// Match the AI SDK's response-message safety rule for invalid tool calls:
 /// malformed primitive input must not be replayed as a prompt tool-call input.
 /// JavaScript's `typeof value === "object"` includes arrays and null, so those
@@ -243,7 +262,13 @@ impl ResponseMessageBuilder {
                         reason: approval.reason.clone(),
                         is_automatic: approval.is_automatic,
                         signature: approval.signature.clone(),
-                        input_schema_input: None,
+                        // As AI SDK `to-response-messages.ts`: only when it
+                        // differs from the validated input.
+                        input_schema_input: approval
+                            .input_schema_input
+                            .as_ref()
+                            .filter(|raw| !is_deep_equal_data(raw, &approval.tool_call.input))
+                            .cloned(),
                     }
                 }
                 GenerateContent::ToolCall(call) => ContentPart::ToolCall {
@@ -310,5 +335,100 @@ fn file_base64(data: &FileBytes) -> String {
     match data {
         FileBytes::Base64(data) => data.clone(),
         FileBytes::Binary(data) => base64::engine::general_purpose::STANDARD.encode(data),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn approval(input_schema_input: Option<Value>) -> ToolApprovalRequestOutput {
+        ToolApprovalRequestOutput {
+            approval_id: "approval-1".into(),
+            tool_call: crate::tool::ToolCall {
+                tool_call_id: "call-1".into(),
+                tool_name: "weather".into(),
+                input: serde_json::json!({"city": "Paris"}),
+                provider_executed: Some(true),
+                dynamic: None,
+                provider_metadata: None,
+                invalid: None,
+                error: None,
+            },
+            reason: None,
+            is_automatic: None,
+            signature: None,
+            input_schema_input,
+        }
+    }
+
+    fn approval_part(input_schema_input: Option<Value>) -> Value {
+        let mut builder = ResponseMessageBuilder::new();
+        builder.approval(&approval(input_schema_input));
+        let messages = serde_json::to_value(builder.finish().messages).unwrap();
+        messages[0]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|part| part["type"] == "tool-approval-request")
+            .cloned()
+            .unwrap()
+    }
+
+    #[test]
+    fn approval_writes_input_schema_input_when_it_differs_from_the_input() {
+        let part = approval_part(Some(serde_json::json!({"city": "paris"})));
+        assert_eq!(
+            part["inputSchemaInput"],
+            serde_json::json!({"city": "paris"})
+        );
+    }
+
+    /// Each case is `[a, b, isDeepEqualData(JSON.parse(a), JSON.parse(b))]`
+    /// as printed by node running the pinned `ai@7.0.127` source.
+    #[test]
+    fn deep_equal_data_matches_javascript() {
+        let cases = [
+            (r#"{"a":1}"#, r#"{"a":1.0}"#, true),
+            ("-0.0", "0", true),
+            (r#"{"x":-0.0}"#, r#"{"x":0}"#, true),
+            ("9007199254740993", "9007199254740992", true),
+            ("[9007199254740993]", "[9007199254740992]", true),
+            ("18446744073709551615", "18446744073709551616", true),
+            ("1e2", "100", true),
+            (r#"{"a":1,"b":2}"#, r#"{"b":2,"a":1}"#, true),
+            ("[]", "{}", false),
+            ("null", "{}", false),
+            (r#""1""#, "1", false),
+            (r#"{"a":null}"#, "{}", false),
+            (r#"{"a":[1,{"b":2}]}"#, r#"{"a":[1,{"b":3}]}"#, false),
+        ];
+        for (a, b, js) in cases {
+            let (x, y): (Value, Value) = (
+                serde_json::from_str(a).unwrap(),
+                serde_json::from_str(b).unwrap(),
+            );
+            assert_eq!(is_deep_equal_data(&x, &y), js, "{a} vs {b}");
+            assert_eq!(is_deep_equal_data(&y, &x), js, "{b} vs {a}");
+        }
+    }
+
+    #[test]
+    fn approval_omits_input_schema_input_when_only_number_spelling_differs() {
+        let mut request = approval(Some(serde_json::json!({"n": 1.0})));
+        request.tool_call.input = serde_json::json!({"n": 1});
+        let mut builder = ResponseMessageBuilder::new();
+        builder.approval(&request);
+        let messages = serde_json::to_value(builder.finish().messages).unwrap();
+        let part = &messages[0]["content"][0];
+        assert_eq!(part["type"], "tool-approval-request");
+        assert!(part.get("inputSchemaInput").is_none());
+    }
+
+    #[test]
+    fn approval_omits_input_schema_input_when_equal_or_absent() {
+        let equal = approval_part(Some(serde_json::json!({"city": "Paris"})));
+        assert!(equal.get("inputSchemaInput").is_none());
+        assert!(approval_part(None).get("inputSchemaInput").is_none());
     }
 }
